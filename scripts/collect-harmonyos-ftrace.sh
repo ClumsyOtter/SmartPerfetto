@@ -125,7 +125,8 @@ if [ ! -f "$OUTPUT_FILE" ]; then
   exit 1
 fi
 
-FILE_SIZE=$(ls -lh "$OUTPUT_FILE" | awk '{print $5}')
+FILE_SIZE_BYTES=$(wc -c < "$OUTPUT_FILE" | tr -d ' ')
+FILE_SIZE="${FILE_SIZE_BYTES} bytes"
 LINE_COUNT=$(wc -l < "$OUTPUT_FILE" | tr -d ' ')
 
 # Check for error messages in output
