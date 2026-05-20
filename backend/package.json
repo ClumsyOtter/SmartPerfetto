@@ -1,12 +1,11 @@
 {
   "name": "@gracker/smartperfetto",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "SmartPerfetto CLI and backend runtime",
   "main": "dist/index.js",
   "bin": {
-    "smp": "./dist/cli-user/bin.js",
-    "smartperfetto": "./dist/cli-user/bin.js",
-    "smartperfetto-mcp": "./dist/bin/smartperfetto-mcp.js"
+    "smp": "dist/cli-user/bin.js",
+    "smartperfetto": "dist/cli-user/bin.js"
   },
   "files": [
     "dist/**/*",

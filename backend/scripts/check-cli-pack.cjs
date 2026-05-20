@@ -11,6 +11,11 @@ const raw = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-script
 const pack = JSON.parse(raw)[0];
 const files = new Set(pack.files.map((file) => file.path));
 const failures = [];
+const packageJsonEntry = pack.files.find((file) => file.path === 'package.json');
+if (!packageJsonEntry) {
+  failures.push('missing required package file: package.json');
+}
+const packageJson = require('../package.json');
 
 const requiredFiles = [
   'LICENSE',
@@ -29,6 +34,14 @@ const requiredFiles = [
 
 for (const file of requiredFiles) {
   if (!files.has(file)) failures.push(`missing required package file: ${file}`);
+}
+
+for (const [name, binPath] of Object.entries(packageJson.bin ?? {})) {
+  if (typeof binPath !== 'string') {
+    failures.push(`bin entry ${name} must point to a string path`);
+    continue;
+  }
+  if (!files.has(binPath)) failures.push(`bin entry ${name} points to missing package file: ${binPath}`);
 }
 
 for (const file of files) {
