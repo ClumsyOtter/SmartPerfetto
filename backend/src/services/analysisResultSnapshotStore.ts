@@ -42,6 +42,9 @@ interface SnapshotRow {
   trace_metadata_json: string;
   summary_json: string;
   conclusion_contract_json: string | null;
+  claim_support_json: string | null;
+  claim_verification_json: string | null;
+  identity_resolutions_json: string | null;
   status: AnalysisResultSnapshotStatus;
   schema_version: AnalysisResultSnapshot['schemaVersion'];
   created_at: number;
@@ -98,6 +101,15 @@ function snapshotSelectColumns(alias = 's', includeConclusionContract = true): s
   const conclusionContractColumn = includeConclusionContract
     ? `${alias}.conclusion_contract_json`
     : `NULL AS conclusion_contract_json`;
+  const claimSupportColumn = includeConclusionContract
+    ? `${alias}.claim_support_json`
+    : `NULL AS claim_support_json`;
+  const claimVerificationColumn = includeConclusionContract
+    ? `${alias}.claim_verification_json`
+    : `NULL AS claim_verification_json`;
+  const identityResolutionsColumn = includeConclusionContract
+    ? `${alias}.identity_resolutions_json`
+    : `NULL AS identity_resolutions_json`;
   return [
     `${alias}.id`,
     `${alias}.tenant_id`,
@@ -115,6 +127,9 @@ function snapshotSelectColumns(alias = 's', includeConclusionContract = true): s
     `${alias}.trace_metadata_json`,
     `${alias}.summary_json`,
     conclusionContractColumn,
+    claimSupportColumn,
+    claimVerificationColumn,
+    identityResolutionsColumn,
     `${alias}.status`,
     `${alias}.schema_version`,
     `${alias}.created_at`,
@@ -194,6 +209,15 @@ function mapSnapshot(row: SnapshotRow, metrics: NormalizedMetricValue[], evidenc
     ...(row.conclusion_contract_json
       ? { conclusionContract: parseJson<unknown>(row.conclusion_contract_json, undefined) }
       : {}),
+    ...(row.claim_support_json
+      ? { claimSupport: parseJson<AnalysisResultSnapshot['claimSupport']>(row.claim_support_json, undefined) }
+      : {}),
+    ...(row.claim_verification_json
+      ? { claimVerificationResult: parseJson<AnalysisResultSnapshot['claimVerificationResult']>(row.claim_verification_json, undefined) }
+      : {}),
+    ...(row.identity_resolutions_json
+      ? { identityResolutions: parseJson<AnalysisResultSnapshot['identityResolutions']>(row.identity_resolutions_json, undefined) }
+      : {}),
     metrics,
     evidenceRefs,
     status: row.status,
@@ -249,11 +273,13 @@ export class AnalysisResultSnapshotRepository {
         INSERT INTO analysis_result_snapshots
           (id, tenant_id, workspace_id, trace_id, session_id, run_id, report_id, created_by,
            visibility, scene_type, title, user_query, trace_label, trace_metadata_json,
-           summary_json, conclusion_contract_json, status, schema_version, created_at, expires_at)
+           summary_json, conclusion_contract_json, claim_support_json, claim_verification_json,
+           identity_resolutions_json, status, schema_version, created_at, expires_at)
         VALUES
           (@id, @tenantId, @workspaceId, @traceId, @sessionId, @runId, @reportId, @createdBy,
            @visibility, @sceneType, @title, @userQuery, @traceLabel, @traceMetadataJson,
-           @summaryJson, @conclusionContractJson, @status, @schemaVersion, @createdAt, @expiresAt)
+           @summaryJson, @conclusionContractJson, @claimSupportJson, @claimVerificationJson,
+           @identityResolutionsJson, @status, @schemaVersion, @createdAt, @expiresAt)
       `).run({
         id: snapshot.id,
         tenantId: snapshot.tenantId,
@@ -273,6 +299,15 @@ export class AnalysisResultSnapshotRepository {
         conclusionContractJson: snapshot.conclusionContract === undefined
           ? null
           : stringifyJson(snapshot.conclusionContract),
+        claimSupportJson: snapshot.claimSupport === undefined
+          ? null
+          : stringifyJson(snapshot.claimSupport),
+        claimVerificationJson: snapshot.claimVerificationResult === undefined
+          ? null
+          : stringifyJson(snapshot.claimVerificationResult),
+        identityResolutionsJson: snapshot.identityResolutions === undefined
+          ? null
+          : stringifyJson(snapshot.identityResolutions),
         status: snapshot.status,
         schemaVersion: snapshot.schemaVersion,
         createdAt: snapshot.createdAt,

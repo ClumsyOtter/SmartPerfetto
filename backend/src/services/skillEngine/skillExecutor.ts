@@ -60,6 +60,7 @@ import {
 } from '../../types/teaching.types';
 import {
   DataEnvelope,
+  DataEnvelopeTraceSide,
   ColumnDefinition,
   createDataEnvelope,
   buildColumnDefinitions,
@@ -71,6 +72,8 @@ import {
   sanitizeDisplayConfigForRuntime,
 } from './displayContractValidator';
 import { IdentityGate, type IdentityGateResult } from '../processIdentity/identityGate';
+import { buildIdentityResolutionFromProcessGate } from '../processIdentity/identityContractMapper';
+import type { IdentityResolutionV1, IdentityTraceSide } from '../../types/identityContract';
 import type {
   ProcessIdentityCandidate,
   ProcessIdentityResolution,
@@ -1145,6 +1148,13 @@ export class SkillExecutor {
     }
   }
 
+  private resolveTraceSide(inherited: Record<string, any>): IdentityTraceSide {
+    const value = inherited.__traceSide;
+    return value === 'current' || value === 'reference' || value === 'unknown'
+      ? value
+      : 'current';
+  }
+
   private buildIdentityCacheKey(traceId: string, target: ProcessIdentityTarget): string {
     return JSON.stringify({
       traceId,
@@ -1191,18 +1201,83 @@ export class SkillExecutor {
       targetMatchSources: row.target_match_sources ? String(row.target_match_sources) : undefined,
       supportingSources: row.supporting_sources ? String(row.supporting_sources) : undefined,
       identityWarning: row.identity_warning ? String(row.identity_warning) : undefined,
+      threadUtid: this.toNumber(row.thread_utid),
+      threadTid: this.toNumber(row.thread_tid),
+      threadName: row.thread_name ? String(row.thread_name) : undefined,
+      threadRole: row.thread_role === 'app_main' || row.thread_role === 'render_thread'
+        ? row.thread_role
+        : this.toNumber(row.thread_utid) !== undefined ? 'unknown' : undefined,
+      threadTargetMatched: this.toNumber(row.thread_target_matched) === 1,
     };
   }
 
-  private normalizeIdentityStatus(candidate: ProcessIdentityCandidate | undefined): ProcessIdentityResolution['status'] {
+  private hasExactProcessIdTarget(
+    target: ProcessIdentityTarget,
+    candidate: ProcessIdentityCandidate | undefined,
+  ): boolean {
+    if (!candidate) return false;
+    const sources = new Set(this.splitSources(candidate.targetMatchSources));
+    return Boolean(target.upid !== undefined && sources.has('upid'));
+  }
+
+  private identityQualityWarnings(
+    candidate: ProcessIdentityCandidate | undefined,
+    candidates: ProcessIdentityCandidate[],
+    target: ProcessIdentityTarget,
+  ): string[] {
+    if (!candidate) return [];
+    const warnings = new Set<string>();
+    const warning = candidate.identityWarning && candidate.identityWarning !== 'ok'
+      ? candidate.identityWarning
+      : undefined;
+    if (warning) warnings.add(warning);
+
+    const targetSources = new Set(this.splitSources(candidate.targetMatchSources));
+    const hasProcessTarget = Boolean(
+      target.requestedName ||
+      target.upid !== undefined ||
+      target.pid !== undefined,
+    );
+    const hasExactProcessId = this.hasExactProcessIdTarget(target, candidate);
+    const processLevelSources = Array.from(targetSources)
+      .filter(source => source !== 'thread.name');
+
+    if (target.threadName && !hasProcessTarget) {
+      warnings.add('thread-only identity target is not enough to verify a unique process');
+    }
+    if (processLevelSources.length === 0) {
+      warnings.add('identity candidate has no process-level target match source');
+    }
+    if (candidate.rawStatus === 'probable' && !hasExactProcessId) {
+      warnings.add('probable identity match requires additional confirmation before parameter rewrite');
+    }
+
+    const second = candidates.find(item =>
+      item !== candidate &&
+      item.confidenceScore > 0);
+    if (second && candidate.confidenceScore - second.confidenceScore < 20) {
+      warnings.add('multiple close process identity candidates require manual confirmation');
+    }
+    return Array.from(warnings);
+  }
+
+  private normalizeIdentityStatus(
+    candidate: ProcessIdentityCandidate | undefined,
+    candidates: ProcessIdentityCandidate[],
+    target: ProcessIdentityTarget,
+  ): ProcessIdentityResolution['status'] {
     if (!candidate) return 'not_found';
-    if (
-      (candidate.rawStatus === 'confirmed' || candidate.rawStatus === 'probable') &&
-      candidate.confidenceScore >= 50
+    if (candidate.confidenceScore <= 0) return 'not_found';
+    const qualityWarnings = this.identityQualityWarnings(candidate, candidates, target);
+    const hasExactProcessId = this.hasExactProcessIdTarget(target, candidate);
+    if (qualityWarnings.length === 0 &&
+      (
+        (candidate.rawStatus === 'confirmed' && candidate.confidenceScore >= 80) ||
+        (hasExactProcessId && candidate.confidenceScore >= 50)
+      )
     ) {
       return 'verified';
     }
-    if (candidate.confidenceScore <= 0) return 'not_found';
     return 'ambiguous';
   }
 
@@ -1254,9 +1329,9 @@ export class SkillExecutor {
           : [];
         const candidates = rows.map(row => this.rowToIdentityCandidate(row));
         const top = candidates[0];
-        const warning = top?.identityWarning && top.identityWarning !== 'ok' ? top.identityWarning : undefined;
+        const qualityWarnings = this.identityQualityWarnings(top, candidates, target);
         resolution = {
-          status: this.normalizeIdentityStatus(top),
+          status: this.normalizeIdentityStatus(top, candidates, target),
           requestedName: target.requestedName,
           canonicalPackageName: top?.canonicalPackageName,
           recommendedProcessNameParam: top?.recommendedProcessNameParam,
@@ -1264,7 +1339,7 @@ export class SkillExecutor {
           confidenceScore: top?.confidenceScore ?? 0,
           rawStatus: top?.rawStatus,
           evidenceSources: this.splitSources(top?.targetMatchSources, top?.supportingSources),
-          warnings: warning ? [warning] : [],
+          warnings: qualityWarnings,
           candidates,
         };
       }
@@ -1305,15 +1380,35 @@ export class SkillExecutor {
   private buildIdentityBlockedResult(
     skillId: string,
     skill: SkillDefinition,
+    traceId: string,
+    traceSide: IdentityTraceSide,
     startTime: number,
     gate: IdentityGateResult,
   ): SkillExecutionResult {
     const error = gate.error || `Process identity gate blocked skill: ${skillId}`;
+    const identityResolution = buildIdentityResolutionFromProcessGate({
+      traceId,
+      traceSide,
+      target: gate.target,
+      resolution: gate.resolution,
+      ...(gate.config.policy === 'required' && !gate.resolution
+        ? { statusOverride: 'missing' as const, warnings: [error] }
+        : {}),
+    });
     return {
       skillId,
       skillName: skill.meta.display_name,
       success: false,
-      displayResults: [],
+      displayResults: [{
+        stepId: 'process_identity_gate',
+        title: 'Process identity gate blocked',
+        level: 'detail',
+        layer: 'diagnosis',
+        format: 'text',
+        data: {
+          text: error,
+        },
+      }],
       diagnostics: [{
         id: 'process_identity_gate_blocked',
         diagnosis: error,
@@ -1330,6 +1425,7 @@ export class SkillExecutor {
         ],
         source: 'rule',
       }],
+      ...(identityResolution ? { identityResolution } : {}),
       executionTimeMs: Date.now() - startTime,
       error,
     };
@@ -1410,6 +1506,7 @@ export class SkillExecutor {
     inherited: Record<string, any> = {}
   ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
+    const traceSide = this.resolveTraceSide(inherited);
 
     const skill = this.skillRegistry.get(skillId);
     if (!skill) {
@@ -1437,8 +1534,14 @@ export class SkillExecutor {
         skillId,
         data: { error: gate.error },
       });
-      return this.buildIdentityBlockedResult(skillId, skill, startTime, gate);
+      return this.buildIdentityBlockedResult(skillId, skill, traceId, traceSide, startTime, gate);
     }
+    const identityResolution = buildIdentityResolutionFromProcessGate({
+      traceId,
+      traceSide,
+      target: gate.target,
+      resolution: gate.resolution,
+    });
 
     // Validate and coerce input parameters against skill.inputs declarations
     const validated = validateSkillInputs(skillId, skill.inputs, gate.params);
@@ -1454,6 +1557,7 @@ export class SkillExecutor {
         success: false,
         displayResults: [],
         diagnostics: [],
+        ...(identityResolution ? { identityResolution } : {}),
         executionTimeMs: Date.now() - startTime,
         error: `Input validation failed: ${msg}`,
       };
@@ -1486,6 +1590,7 @@ export class SkillExecutor {
         success: false,
         displayResults: [],
         diagnostics: [],
+        ...(identityResolution ? { identityResolution } : {}),
         executionTimeMs: Date.now() - startTime,
         error: `Skipped: ${prereqCheck.error}`,
       };
@@ -1517,6 +1622,7 @@ export class SkillExecutor {
                 success: false,
                 displayResults: [],
                 diagnostics: [],
+                ...(identityResolution ? { identityResolution } : {}),
                 executionTimeMs: Date.now() - startTime,
                 error: atomicResult.error,
               };
@@ -1537,6 +1643,7 @@ export class SkillExecutor {
                 success: false,
                 displayResults: [],
                 diagnostics: [],
+                ...(identityResolution ? { identityResolution } : {}),
                 executionTimeMs: Date.now() - startTime,
                 error: 'No SQL or steps defined for atomic skill',
               };
@@ -1560,6 +1667,7 @@ export class SkillExecutor {
                 success: false,
                 displayResults: [],
                 diagnostics: [],
+                ...(identityResolution ? { identityResolution } : {}),
                 executionTimeMs: Date.now() - startTime,
                 error: `No steps defined for skill: ${skillId}`,
               };
@@ -1577,6 +1685,7 @@ export class SkillExecutor {
             success: false,
             displayResults: [],
             diagnostics: [],
+            ...(identityResolution ? { identityResolution } : {}),
             executionTimeMs: Date.now() - startTime,
             error: `Skill type '${skill.type}' is metadata-only and not executable by the single-trace SkillExecutor: ${skillId}`,
           };
@@ -1610,6 +1719,7 @@ export class SkillExecutor {
         aiSummary,
         synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
         rawResults: context.results,
+        ...(identityResolution ? { identityResolution } : {}),
         executionTimeMs: Date.now() - startTime,
       };
 
@@ -1626,6 +1736,7 @@ export class SkillExecutor {
         success: false,
         displayResults: [],
         diagnostics: [],
+        ...(identityResolution ? { identityResolution } : {}),
         executionTimeMs: Date.now() - startTime,
         error: error.message,
       };
@@ -4126,7 +4237,8 @@ export class SkillExecutor {
    */
   public static toDataEnvelopes(
     result: SkillExecutionResult,
-    columnDefinitions?: Record<string, Partial<ColumnDefinition>[]>
+    columnDefinitions?: Record<string, Partial<ColumnDefinition>[]>,
+    provenance?: { traceId?: string; traceSide?: DataEnvelopeTraceSide },
   ): DataEnvelope[] {
     return result.displayResults.map(dr => {
       // Prefer external columnDefinitions, fallback to embedded columnDefinitions in DisplayResult
@@ -4138,8 +4250,51 @@ export class SkillExecutor {
         ...drAny,
         metadataConfig: drAny.metadataConfig || (Array.isArray(drAny.metadataFields) ? { fields: drAny.metadataFields } : undefined),
       };
-      return displayResultToEnvelope(drForEnvelope as any, result.skillId, explicitColumns);
+      return SkillExecutor.attachTraceProvenanceToEnvelope(
+        SkillExecutor.attachIdentityResolutionToEnvelope(
+          displayResultToEnvelope(drForEnvelope as any, result.skillId, explicitColumns),
+          result.identityResolution,
+        ),
+        provenance,
+      );
     });
+  }
+
+  public static attachTraceProvenanceToEnvelope(
+    envelope: DataEnvelope,
+    provenance?: { traceId?: string; traceSide?: DataEnvelopeTraceSide },
+  ): DataEnvelope {
+    if (!provenance?.traceId && !provenance?.traceSide) return envelope;
+    return {
+      ...envelope,
+      meta: {
+        ...envelope.meta,
+        ...(provenance.traceId && !envelope.meta.traceId ? { traceId: provenance.traceId } : {}),
+        ...(provenance.traceSide && !envelope.meta.traceSide ? { traceSide: provenance.traceSide } : {}),
+      },
+    };
+  }
+
+  public static attachIdentityResolutionToEnvelope(
+    envelope: DataEnvelope,
+    identityResolution?: IdentityResolutionV1,
+  ): DataEnvelope {
+    if (!identityResolution) return envelope;
+    const traceSide = identityResolution.target.traceSide === 'current' || identityResolution.target.traceSide === 'reference'
+      ? identityResolution.target.traceSide
+      : undefined;
+    return {
+      ...envelope,
+      meta: {
+        ...envelope.meta,
+        ...(!envelope.meta.traceId ? { traceId: identityResolution.target.traceId } : {}),
+        ...(traceSide && !envelope.meta.traceSide ? { traceSide } : {}),
+        identityRefId: identityResolution.identityRefId,
+        identityStatus: identityResolution.status,
+        identityWarnings: identityResolution.warnings,
+        identityResolution,
+      },
+    };
   }
 
   /**

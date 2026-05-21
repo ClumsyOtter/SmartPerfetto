@@ -1178,7 +1178,10 @@ export abstract class BaseAgent extends EventEmitter {
               ? `interval_${String(context.timeRange.start)}`
               : undefined;
 
-        const dataEnvelopes = SkillExecutor.toDataEnvelopes(result).map((env) => {
+        const dataEnvelopes = SkillExecutor.toDataEnvelopes(result, undefined, {
+          traceId: context.traceId,
+          traceSide: 'current',
+        }).map((env) => {
           const executionId =
             typeof additional.executionId === 'string' ? additional.executionId :
             typeof additional.taskId === 'string' ? additional.taskId :
@@ -1224,6 +1227,7 @@ export abstract class BaseAgent extends EventEmitter {
             // Keep params compact; this is for provenance/debugging, not full replay.
             paramsKeys: Object.keys(execParams).slice(0, 40),
             ...(derivedGroup && { group: derivedGroup }),
+            ...(result.identityResolution && { identityResolution: result.identityResolution }),
           },
         };
       } catch (error: any) {

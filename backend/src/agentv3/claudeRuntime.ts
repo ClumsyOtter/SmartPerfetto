@@ -36,14 +36,14 @@ import {
 import { extractFindingsFromText, extractFindingsFromSkillResult, mergeFindings } from './claudeFindingExtractor';
 import {
   createQuickConfig,
-	  createSdkEnv,
-	  explainClaudeRuntimeError,
-	  getCredentialSourceHint,
-	  getSdkBinaryOption,
-	  isClaudeQuotaError,
-	  loadClaudeConfig,
-	  resolveEffort,
-	  resolveRuntimeConfig,
+  createSdkEnv,
+  explainClaudeRuntimeError,
+  getCredentialSourceHint,
+  getSdkBinaryOption,
+  isClaudeQuotaError,
+  loadClaudeConfig,
+  resolveEffort,
+  resolveRuntimeConfig,
   type ClaudeAgentConfig,
 } from './claudeConfig';
 import { detectFocusApps } from './focusAppDetector';
@@ -1798,15 +1798,15 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         terminationReason,
         terminationMessage,
       };
-	    } catch (error) {
-	      const rawErrorMessage = (error as Error).message || 'Unknown error';
-	      const errMsg = explainClaudeRuntimeError(
-	        rawErrorMessage,
-	        this.config.outputLanguage,
-	        getCredentialSourceHint(options.providerId, providerScopeFromOptions(options)),
-	      );
-	      const quotaExceeded = isClaudeQuotaError(rawErrorMessage);
-	      console.error('[ClaudeRuntime] Analysis failed:', errMsg);
+    } catch (error) {
+      const rawErrorMessage = (error as Error).message || 'Unknown error';
+      const errMsg = explainClaudeRuntimeError(
+        rawErrorMessage,
+        this.config.outputLanguage,
+        getCredentialSourceHint(options.providerId, providerScopeFromOptions(options)),
+      );
+      const quotaExceeded = isClaudeQuotaError(rawErrorMessage);
+      console.error('[ClaudeRuntime] Analysis failed:', errMsg);
 
       // P1-3: Preserve partial findings and generate partial conclusion on mid-stream errors
       const partialFindings = mergeFindings(allFindings);
@@ -1841,12 +1841,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           conclusion: partialConclusion,
           confidence: this.estimateConfidence(partialFindings) * 0.7, // penalize for incomplete
           rounds,
-	          totalDurationMs: Date.now() - startTime,
-	          partial: true,
-	          terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
-	          terminationMessage: errMsg,
-	        };
-	      }
+          totalDurationMs: Date.now() - startTime,
+          partial: true,
+          terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
+          terminationMessage: errMsg,
+        };
+      }
 
       this.emitUpdate({
         type: 'error',
@@ -1865,12 +1865,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           `分析过程中出错: ${errMsg}`,
           `An error occurred during analysis: ${errMsg}`,
         ),
-	        confidence: 0,
-	        rounds,
-	        totalDurationMs: Date.now() - startTime,
-	        terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
-	        terminationMessage: errMsg,
-	      };
+        confidence: 0,
+        rounds,
+        totalDurationMs: Date.now() - startTime,
+        terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
+        terminationMessage: errMsg,
+      };
     } finally {
       this.activeAnalyses.delete(sessionId);
       runSnapshots.release(sessionId);
@@ -2209,15 +2209,15 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         terminationReason,
         terminationMessage,
       };
-	    } catch (error) {
-	      const rawErrorMessage = (error as Error).message || 'Unknown error';
-	      const errMsg = explainClaudeRuntimeError(
-	        rawErrorMessage,
-	        this.config.outputLanguage,
-	        getCredentialSourceHint(options.providerId, providerScopeFromOptions(options)),
-	      );
-	      const quotaExceeded = isClaudeQuotaError(rawErrorMessage);
-	      console.error('[ClaudeRuntime] Quick analysis failed:', errMsg);
+    } catch (error) {
+      const rawErrorMessage = (error as Error).message || 'Unknown error';
+      const errMsg = explainClaudeRuntimeError(
+        rawErrorMessage,
+        this.config.outputLanguage,
+        getCredentialSourceHint(options.providerId, providerScopeFromOptions(options)),
+      );
+      const quotaExceeded = isClaudeQuotaError(rawErrorMessage);
+      console.error('[ClaudeRuntime] Quick analysis failed:', errMsg);
       this.emitUpdate({
         type: 'error',
         content: {
@@ -2235,12 +2235,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           `快速问答过程中出错: ${errMsg}`,
           `An error occurred during fast Q&A: ${errMsg}`,
         ),
-	        confidence: 0,
-	        rounds: 0,
-	        totalDurationMs: Date.now() - startTime,
-	        terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
-	        terminationMessage: errMsg,
-	      };
+        confidence: 0,
+        rounds: 0,
+        totalDurationMs: Date.now() - startTime,
+        terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
+        terminationMessage: errMsg,
+      };
     } finally {
       this.activeAnalyses.delete(sessionId);
       try {

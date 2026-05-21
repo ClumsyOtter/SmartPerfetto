@@ -5,6 +5,16 @@
 export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
 export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
 export type ConclusionClusterFrameListMode = 'none' | 'top' | 'full';
+export type ConclusionClaimKind =
+  | 'numeric'
+  | 'categorical'
+  | 'time_range'
+  | 'identity'
+  | 'causal'
+  | 'comparison'
+  | 'inference'
+  | 'recommendation';
+export type ConclusionClaimSupportLevel = 'verified' | 'partial' | 'inference' | 'unsupported';
 
 export interface ConclusionContractConclusionItem {
   rank: number;
@@ -36,20 +46,29 @@ export interface ConclusionContractEvidenceItem {
 }
 
 export interface ConclusionContractClaimReference {
-  evidenceRefId: string;
+  evidenceRefId?: string;
   rowIndex?: number;
   rowSelector?: Record<string, string | number | boolean>;
   column?: string;
   value?: string | number | boolean;
   sourceRef?: string;
   sourceToolCallId?: string;
+  /** Canonical durable artifact id for artifact-backed claims. */
+  artifactId?: string;
+  /** Compatibility alias from existing artifact rows; normalize to artifactId. */
+  sourceArtifactId?: string;
 }
 
 export interface ConclusionContractClaimItem {
   id?: string;
   conclusionId?: string;
   text: string;
+  kind?: ConclusionClaimKind;
   references: ConclusionContractClaimReference[];
+  artifactRefs?: Array<{ artifactId: string; rowIndex?: number; rowSelector?: Record<string, unknown> }>;
+  relationRefs?: string[];
+  /** Model-produced hint only; visible verdicts come from verifier output. */
+  supportLevel?: ConclusionClaimSupportLevel;
 }
 
 export interface ConclusionContractMetadata {

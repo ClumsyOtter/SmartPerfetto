@@ -22,6 +22,13 @@ export interface RendererOptions {
   format?: OutputFormat;
 }
 
+interface ClaimVerificationSummary {
+  status?: string;
+  checkedClaimCount?: number;
+  unsupportedClaimCount?: number;
+  issueCount?: number;
+}
+
 export type OutputFormat = 'text' | 'json' | 'ndjson';
 export type TextJsonFormat = Extract<OutputFormat, 'text' | 'json'>;
 
@@ -46,7 +53,12 @@ export interface Renderer {
   format: OutputFormat;
   onEvent(update: StreamingUpdate): void;
   /** Called once after the SDK result arrives — prints the conclusion block. */
-  printConclusion(conclusion: string, meta: { confidence?: number; rounds?: number; durationMs?: number }): void;
+  printConclusion(conclusion: string, meta: {
+    confidence?: number;
+    rounds?: number;
+    durationMs?: number;
+    claimVerification?: ClaimVerificationSummary;
+  }): void;
   /** Called on fatal errors that abort the run. */
   printError(message: string): void;
   /** Called last to summarize report path + any diagnostics. */
@@ -152,7 +164,12 @@ export function createRenderer(opts: RendererOptions): Renderer {
 
   function printConclusion(
     conclusion: string,
-    meta: { confidence?: number; rounds?: number; durationMs?: number }
+    meta: {
+      confidence?: number;
+      rounds?: number;
+      durationMs?: number;
+      claimVerification?: ClaimVerificationSummary;
+    }
   ): void {
     closeAnswerStream();
     const bar = '─'.repeat(Math.min(60, (process.stdout.columns || 80) - 4));
@@ -193,6 +210,7 @@ function createMachineRenderer(format: 'json' | 'ndjson'): Renderer {
     confidence?: number;
     rounds?: number;
     durationMs?: number;
+    claimVerification?: ClaimVerificationSummary;
   } | null = null;
 
   function emit(obj: Record<string, unknown>, stream: NodeJS.WriteStream = process.stdout): void {
@@ -210,7 +228,12 @@ function createMachineRenderer(format: 'json' | 'ndjson'): Renderer {
 
   function printConclusion(
     conclusion: string,
-    meta: { confidence?: number; rounds?: number; durationMs?: number },
+    meta: {
+      confidence?: number;
+      rounds?: number;
+      durationMs?: number;
+      claimVerification?: ClaimVerificationSummary;
+    },
   ): void {
     conclusionPayload = { conclusion, ...meta };
     if (format === 'ndjson') {

@@ -19,6 +19,9 @@ import * as path from 'path';
 const projectRoot = path.resolve(__dirname, '../..');
 const backendContractPath = path.join(projectRoot, 'backend/src/types/dataContract.ts');
 const conclusionContractPath = path.join(projectRoot, 'backend/src/agent/core/conclusionContract.ts');
+const evidenceContractPath = path.join(projectRoot, 'backend/src/types/evidenceContract.ts');
+const claimVerificationPath = path.join(projectRoot, 'backend/src/types/claimVerification.ts');
+const identityContractPath = path.join(projectRoot, 'backend/src/types/identityContract.ts');
 const frontendOutputPath = path.join(
   projectRoot,
   'perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/data_contract.types.ts'
@@ -73,6 +76,13 @@ function extractConstArrayValues(content: string, constName: string): string[] {
 console.log('Reading backend data contract...');
 const backendContent = fs.readFileSync(backendContractPath, 'utf-8');
 const conclusionContractContent = fs.readFileSync(conclusionContractPath, 'utf-8').trim();
+const evidenceContractContent = fs.readFileSync(evidenceContractPath, 'utf-8').trim();
+const claimVerificationContent = fs.readFileSync(claimVerificationPath, 'utf-8').trim();
+const identityContractContent = fs.readFileSync(identityContractPath, 'utf-8')
+  .trim()
+  // EvidenceContract and IdentityContract are separate backend modules but
+  // generated frontend types are concatenated into one file.
+  .replace(/export type TraceTimestampNs = string \| number;\n\n/, '');
 
 // Transform content for frontend
 console.log('Transforming for frontend compatibility...');
@@ -108,6 +118,17 @@ parts.push(`// =================================================================
 // =============================================================================
 
 ${conclusionContractContent}
+`);
+
+parts.push(`// =============================================================================
+// Evidence / Verifier / Identity Contract Types
+// =============================================================================
+
+${evidenceContractContent}
+
+${claimVerificationContent}
+
+${identityContractContent}
 `);
 
 // Column Types Section
@@ -247,6 +268,27 @@ export interface DataEnvelopeMeta {
 
   /** Stable hash of the producing tool parameters */
   paramsHash?: string;
+
+  /** Canonical artifact id when this envelope represents artifact-backed rows */
+  artifactId?: string;
+
+  /** Compatibility alias from existing artifact rows */
+  sourceArtifactId?: string;
+
+  /** Identity sidecar reference for process/thread-sensitive evidence */
+  identityRefId?: string;
+
+  /** Identity status carried from the resolver sidecar */
+  identityStatus?: IdentityResolutionStatus;
+
+  /** Identity warnings that must survive report/export/verifier paths */
+  identityWarnings?: string[];
+
+  /** Full Identity Contract sidecar when this envelope was produced behind a resolver gate */
+  identityResolution?: IdentityResolutionV1;
+
+  /** Raw SQL identity warning for direct SQL paths that bypass Skill identity gate */
+  processIdentityWarning?: string;
 
   /** Matched analysis plan phase ID when this data was produced */
   planPhaseId?: string;
@@ -588,8 +630,17 @@ export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
   data: {
     summary: string;
+    conclusion?: string;
     conclusionContract?: ConclusionContract;
+    claimSupport?: ClaimSupportV1[];
+    claimVerificationResult?: ClaimVerificationResult;
+    identityResolutions?: IdentityResolutionV1[];
     reportUrl?: string;
+    resultSnapshotId?: string;
+    confidence?: number;
+    rounds?: number;
+    totalDurationMs?: number;
+    partial?: boolean;
     findings: DiagnosticFinding[];
     suggestions: string[];
   };

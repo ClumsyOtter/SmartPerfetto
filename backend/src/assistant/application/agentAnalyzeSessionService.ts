@@ -21,6 +21,9 @@ import {
   type EnhancedSessionContext,
   sessionContextManager as defaultSessionContextManager,
 } from '../../agent/context/enhancedSessionContext';
+import type { ClaimSupportV1 } from '../../types/evidenceContract';
+import type { ClaimVerificationResult } from '../../types/claimVerification';
+import type { IdentityResolutionV1 } from '../../types/identityContract';
 import { type SessionLogger } from '../../services/sessionLogger';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
 import {
@@ -88,6 +91,9 @@ export interface AnalyzeManagedSession extends ManagedAssistantSession {
   hypotheses: Hypothesis[];
   agentDialogue: AnalyzeSessionAgentDialogueItem[];
   dataEnvelopes: any[];
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
   agentResponses: AnalyzeSessionAgentResponseItem[];
   conversationOrdinal: number;
   conversationSteps: AnalyzeSessionConversationStep[];
@@ -449,7 +455,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
               restoredContext
             );
             const restoredSequence = Math.max(0, restoredTurns.length);
-            const restoredRun = restoredSequence > 0
+            const fallbackRestoredRun = restoredSequence > 0
               ? {
                   runId: `run-${requestedSessionId}-${restoredSequence}-recovered`,
                   requestId: `recovered-${requestedSessionId}-${restoredSequence}`,
@@ -460,6 +466,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
                   status: 'completed' as const,
                 }
               : undefined;
+            const restoredRun = stateSnapshot?.lastRun || stateSnapshot?.activeRun || fallbackRestoredRun;
 
             const restoredLogger = this.createSessionLogger(requestedSessionId);
             restoredLogger.setMetadata({
@@ -535,13 +542,16 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
               hypotheses: stateSnapshot?.hypotheses || runtimeArrays?.hypotheses || [],
               agentDialogue: stateSnapshot?.agentDialogue || [],
               dataEnvelopes: stateSnapshot?.dataEnvelopes || runtimeArrays?.dataEnvelopes || [],
+              claimSupport: stateSnapshot?.claimSupport,
+              claimVerificationResult: stateSnapshot?.claimVerificationResult,
+              identityResolutions: stateSnapshot?.identityResolutions,
               agentResponses: stateSnapshot?.agentResponses || [],
               conversationOrdinal: stateSnapshot?.conversationOrdinal || 0,
               conversationSteps:
                 stateSnapshot?.conversationSteps || runtimeArrays?.conversationSteps || [],
               runSequence: stateSnapshot?.runSequence || restoredSequence,
-              activeRun: restoredRun,
-              lastRun: restoredRun,
+              activeRun: stateSnapshot?.activeRun || restoredRun,
+              lastRun: stateSnapshot?.lastRun || restoredRun,
               queryHistory:
                 stateSnapshot?.queryHistory || runtimeArrays?.queryHistory || restoredQueryHistory,
               conclusionHistory:
@@ -616,6 +626,8 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
       hypotheses: [],
       agentDialogue: [],
       dataEnvelopes: [],
+      claimSupport: [],
+      identityResolutions: [],
       agentResponses: [],
       conversationOrdinal: 0,
       conversationSteps: [],

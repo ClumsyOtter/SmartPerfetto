@@ -57,4 +57,27 @@ describe('AssistantApplicationService cleanup', () => {
     expect(removed).toEqual([managed.sessionId]);
     expect(service.getSession(managed.sessionId)).toBeUndefined();
   });
+
+  it('treats quota_exceeded sessions as terminal for cleanup', () => {
+    const service = new AssistantApplicationService<ManagedAssistantSession>();
+    const managed = session({
+      status: 'quota_exceeded',
+      lastActivityAt: 1_777_000_000_000,
+    });
+    service.setSession(managed.sessionId, managed);
+
+    const removed = service.cleanupIdleSessions({
+      now: 1_777_000_010_000,
+      terminalMaxIdleMs: 1_000,
+      nonTerminalMaxIdleMs: 60_000,
+      shouldCleanup: (_sessionId, _session, context) => {
+        expect(context.isTerminal).toBe(true);
+        expect(context.isAbandonedNonTerminal).toBe(false);
+        return true;
+      },
+    });
+
+    expect(removed).toEqual([managed.sessionId]);
+    expect(service.getSession(managed.sessionId)).toBeUndefined();
+  });
 });

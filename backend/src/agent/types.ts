@@ -16,6 +16,10 @@
 // Tool Layer Types
 // =============================================================================
 
+import type { ClaimSupportV1 } from '../types/evidenceContract';
+import type { ClaimVerificationResult } from '../types/claimVerification';
+import type { IdentityResolutionV1 } from '../types/identityContract';
+
 export interface ToolParameter {
   name: string;
   type: 'string' | 'number' | 'boolean' | 'timestamp' | 'array' | 'object';
@@ -689,6 +693,10 @@ export interface SubAgentResult {
   suggestions?: string[];
   data?: any;
   message?: string;
+  conclusionContract?: unknown;
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
   confidence?: number;
   executionTimeMs?: number;
   tokensUsed?: { input: number; output: number };

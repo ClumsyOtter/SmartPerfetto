@@ -125,6 +125,7 @@ function buildTurnMarkdownExport(
     '',
     body || '*(no turn markdown)*',
     '',
+    buildAnalysisQualityMarkdown(sp, turn),
   ].join('\n');
 }
 
@@ -142,6 +143,8 @@ function buildMarkdownExport(sp: ReturnType<typeof loadSession>['sp'], config: N
     '',
     readIfExists(sp.conclusion) || '*(no conclusion)*',
     '',
+    buildAnalysisQualityMarkdown(sp),
+    '',
   ];
 
   const turnFiles = fs.existsSync(sp.turnsDir)
@@ -156,17 +159,68 @@ function buildMarkdownExport(sp: ReturnType<typeof loadSession>['sp'], config: N
   return lines.join('\n');
 }
 
+function buildAnalysisQualityMarkdown(
+  sp: ReturnType<typeof loadSession>['sp'],
+  turn?: number,
+): string {
+  const turnPrefix = turn === undefined
+    ? undefined
+    : path.join(sp.turnsDir, String(turn).padStart(3, '0'));
+  const claimSupportPath = turnPrefix ? `${turnPrefix}.claim-support.json` : sp.claimSupport;
+  const claimVerificationPath = turnPrefix ? `${turnPrefix}.claim-verification.json` : sp.claimVerification;
+  const identityResolutionsPath = turnPrefix ? `${turnPrefix}.identity-resolutions.json` : sp.identityResolutions;
+  const claimSupportRaw = readJsonIfExists(claimSupportPath, []);
+  const verifier = readJsonIfExists(claimVerificationPath, null) as any;
+  const identitiesRaw = readJsonIfExists(identityResolutionsPath, []);
+  const claimSupport = Array.isArray(claimSupportRaw) ? claimSupportRaw : [];
+  const identities = Array.isArray(identitiesRaw) ? identitiesRaw : [];
+  const hasVerifier = verifier && typeof verifier === 'object';
+  if (!hasVerifier && claimSupport.length === 0 && identities.length === 0) {
+    return '';
+  }
+
+  const lines = [
+    '## Claim Verification',
+    '',
+    `- Verifier: ${hasVerifier ? verifier.status || 'not_checked' : 'not_checked'}`,
+    `- Checked claims: ${hasVerifier ? verifier.checkedClaimCount ?? 0 : 0}`,
+    `- Unsupported claims: ${hasVerifier ? verifier.unsupportedClaimCount ?? 0 : 0}`,
+    `- Claim support entries: ${claimSupport.length}`,
+    `- Identity sidecars: ${identities.length}`,
+    ...(fs.existsSync(claimSupportPath) ? [`- Claim support file: ${claimSupportPath}`] : []),
+    ...(fs.existsSync(claimVerificationPath) ? [`- Claim verification file: ${claimVerificationPath}`] : []),
+    ...(fs.existsSync(identityResolutionsPath) ? [`- Identity resolutions file: ${identityResolutionsPath}`] : []),
+  ];
+  const issues = Array.isArray(verifier?.issues) ? verifier.issues : [];
+  if (issues.length > 0) {
+    lines.push('', '### Issues', '');
+    for (const issue of issues.slice(0, 8)) {
+      lines.push(`- ${issue.claimId || 'unknown'} \`${issue.code || 'issue'}\`: ${issue.message || ''}`.trim());
+    }
+    if (issues.length > 8) {
+      lines.push(`- ${issues.length - 8} more issues omitted from markdown export.`);
+    }
+  }
+  return lines.join('\n');
+}
+
 function buildJsonExport(sp: ReturnType<typeof loadSession>['sp'], config: NonNullable<ReturnType<typeof loadSession>['config']>): Record<string, unknown> {
   return {
     ok: true,
     config,
     conclusion: readIfExists(sp.conclusion),
+    claimSupport: readJsonIfExists(sp.claimSupport, []),
+    claimVerificationResult: readJsonIfExists(sp.claimVerification, null),
+    identityResolutions: readJsonIfExists(sp.identityResolutions, []),
     transcript: readTranscript(sp.transcript),
     files: {
       sessionDir: sp.dir,
       reportHtml: fs.existsSync(sp.report) ? sp.report : null,
       turnReports: listTurnReports(sp),
       conclusion: fs.existsSync(sp.conclusion) ? sp.conclusion : null,
+      claimSupport: fs.existsSync(sp.claimSupport) ? sp.claimSupport : null,
+      claimVerification: fs.existsSync(sp.claimVerification) ? sp.claimVerification : null,
+      identityResolutions: fs.existsSync(sp.identityResolutions) ? sp.identityResolutions : null,
       transcript: fs.existsSync(sp.transcript) ? sp.transcript : null,
     },
   };
@@ -179,17 +233,24 @@ function buildTurnJsonExport(
 ): Record<string, unknown> {
   const htmlPath = turnReportPath(sp, turn);
   const mdPath = path.join(sp.turnsDir, `${String(turn).padStart(3, '0')}.md`);
+  const turnPrefix = path.join(sp.turnsDir, String(turn).padStart(3, '0'));
   const transcript = readTranscript(sp.transcript);
   return {
     ok: true,
     config,
     turn,
     turnMarkdown: readIfExists(mdPath),
+    claimSupport: readJsonIfExists(`${turnPrefix}.claim-support.json`, []),
+    claimVerificationResult: readJsonIfExists(`${turnPrefix}.claim-verification.json`, null),
+    identityResolutions: readJsonIfExists(`${turnPrefix}.identity-resolutions.json`, []),
     transcriptTurn: transcript.find((entry: any) => entry?.turn === turn) ?? null,
     files: {
       sessionDir: sp.dir,
       reportHtml: fs.existsSync(htmlPath) ? htmlPath : null,
       turnMarkdown: fs.existsSync(mdPath) ? mdPath : null,
+      claimSupport: fs.existsSync(`${turnPrefix}.claim-support.json`) ? `${turnPrefix}.claim-support.json` : null,
+      claimVerification: fs.existsSync(`${turnPrefix}.claim-verification.json`) ? `${turnPrefix}.claim-verification.json` : null,
+      identityResolutions: fs.existsSync(`${turnPrefix}.identity-resolutions.json`) ? `${turnPrefix}.identity-resolutions.json` : null,
       transcript: fs.existsSync(sp.transcript) ? sp.transcript : null,
     },
   };
@@ -209,6 +270,14 @@ function readIfExists(file: string): string {
     return fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
   } catch {
     return '';
+  }
+}
+
+function readJsonIfExists(file: string, fallback: unknown): unknown {
+  try {
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf-8')) : fallback;
+  } catch {
+    return fallback;
   }
 }
 

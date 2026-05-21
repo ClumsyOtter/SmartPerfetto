@@ -31,6 +31,22 @@ interface AgentResumeRoutesDeps {
   buildTurnSummary: (turn: any) => unknown;
 }
 
+function restoredSessionStatus(
+  restoredRun: AnalyzeSessionRunContext | undefined,
+  hasRecoveredResult: boolean,
+): 'completed' | 'failed' | 'quota_exceeded' {
+  if (restoredRun?.status === 'quota_exceeded') return 'quota_exceeded';
+  if (restoredRun?.status === 'failed') return 'failed';
+  if (
+    restoredRun?.status === 'pending' ||
+    restoredRun?.status === 'running'
+  ) {
+    return 'failed';
+  }
+  if (restoredRun?.status === 'completed' || hasRecoveredResult) return 'completed';
+  return 'completed';
+}
+
 export function registerAgentResumeRoutes(
   router: express.Router,
   deps: AgentResumeRoutesDeps
@@ -187,7 +203,7 @@ export function registerAgentResumeRoutes(
       const latestTurn = restoredTurns.length > 0 ? restoredTurns[restoredTurns.length - 1] : null;
       const recoveredResult = deps.buildRecoveredResultFromContext(sessionId, restoredContext);
       const restoredRunSequence = Math.max(0, restoredTurns.length);
-      const restoredRun: AnalyzeSessionRunContext | undefined = restoredRunSequence > 0
+      const fallbackRestoredRun: AnalyzeSessionRunContext | undefined = restoredRunSequence > 0
         ? {
             runId: `run-${sessionId}-${restoredRunSequence}-recovered`,
             requestId: `recovered-${sessionId}-${restoredRunSequence}`,
@@ -198,6 +214,8 @@ export function registerAgentResumeRoutes(
             status: 'completed',
           }
         : undefined;
+      const restoredRun = (snapshot?.lastRun || snapshot?.activeRun || fallbackRestoredRun) as AnalyzeSessionRunContext | undefined;
+      const restoredStatus = restoredSessionStatus(restoredRun, Boolean(recoveredResult));
       const owner = normalizeResourceOwner(persistedSession.metadata);
 
       // Unified snapshot restoration — all fields populated from single source
@@ -221,7 +239,10 @@ export function registerAgentResumeRoutes(
         sessionId,
         sseClients: [],
         result: recoveredResult || undefined,
-        status: 'completed',
+        status: restoredStatus,
+        error: restoredStatus === 'failed' && restoredRun?.status !== 'failed'
+          ? 'Session was interrupted before completion and cannot be resumed as completed'
+          : undefined,
         traceId: effectiveTraceId,
         tenantId: owner.tenantId,
         workspaceId: owner.workspaceId,
@@ -232,6 +253,9 @@ export function registerAgentResumeRoutes(
         providerSnapshotChangeReason: providerSnapshotChanged
           ? 'provider_snapshot_hash_mismatch'
           : undefined,
+        referenceTraceId: snapshot?.referenceTraceId,
+        comparisonSource: snapshot?.comparisonSource,
+        comparisonReportSection: snapshot?.comparisonReportSection,
         query: latestTurn?.query || persistedSession.question,
         createdAt: persistedSession.createdAt,
         lastActivityAt: Date.now(),
@@ -240,14 +264,17 @@ export function registerAgentResumeRoutes(
         hypotheses: snapshot?.hypotheses || [],
         agentDialogue: snapshot?.agentDialogue || [],
         dataEnvelopes: snapshot?.dataEnvelopes || [],
+        claimSupport: snapshot?.claimSupport,
+        claimVerificationResult: snapshot?.claimVerificationResult,
+        identityResolutions: snapshot?.identityResolutions,
         agentResponses: snapshot?.agentResponses || [],
         conversationOrdinal: snapshot?.conversationOrdinal || 0,
         conversationSteps: snapshot?.conversationSteps || [],
         queryHistory: snapshot?.queryHistory || [],
         conclusionHistory: snapshot?.conclusionHistory || [],
         runSequence: snapshot?.runSequence || restoredRunSequence,
-        activeRun: restoredRun,
-        lastRun: restoredRun,
+        activeRun: (snapshot?.activeRun as AnalyzeSessionRunContext | undefined) || restoredRun,
+        lastRun: (snapshot?.lastRun as AnalyzeSessionRunContext | undefined) || restoredRun,
         sseEventSeq: 0,
         sseEventBuffer: [],
       });
@@ -256,7 +283,7 @@ export function registerAgentResumeRoutes(
         success: true,
         sessionId,
         traceId: effectiveTraceId,
-        status: 'completed',
+        status: restoredStatus,
         message: providerSnapshotChanged
           ? 'Session restored from persistence with a fresh SDK runtime because provider configuration changed'
           : 'Session restored from persistence',

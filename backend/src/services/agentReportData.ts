@@ -34,6 +34,9 @@ interface ReportResultLike {
   hypotheses: AgentDrivenReportData['hypotheses'];
   conclusion: string;
   conclusionContract?: unknown;
+  claimSupport?: AgentDrivenReportData['result']['claimSupport'];
+  claimVerificationResult?: AgentDrivenReportData['result']['claimVerificationResult'];
+  identityResolutions?: AgentDrivenReportData['result']['identityResolutions'];
   confidence: number;
   rounds: number;
   totalDurationMs: number;

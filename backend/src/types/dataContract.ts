@@ -322,6 +322,27 @@ export interface DataEnvelopeMeta {
   /** Stable hash of the producing tool parameters */
   paramsHash?: string;
 
+  /** Canonical artifact id when this envelope represents artifact-backed rows */
+  artifactId?: string;
+
+  /** Compatibility alias from existing artifact rows */
+  sourceArtifactId?: string;
+
+  /** Identity sidecar reference for process/thread-sensitive evidence */
+  identityRefId?: string;
+
+  /** Identity status carried from the resolver sidecar */
+  identityStatus?: import('./identityContract').IdentityResolutionStatus;
+
+  /** Identity warnings that must survive report/export/verifier paths */
+  identityWarnings?: string[];
+
+  /** Full Identity Contract sidecar when this envelope was produced behind a resolver gate */
+  identityResolution?: import('./identityContract').IdentityResolutionV1;
+
+  /** Raw SQL identity warning for direct SQL paths that bypass Skill identity gate */
+  processIdentityWarning?: string;
+
   /** Matched analysis plan phase ID when this data was produced */
   planPhaseId?: string;
 
@@ -441,6 +462,13 @@ export function createDataEnvelope<T = DataPayload>(
     queryHash?: string;
     sourceToolCallId?: string;
     paramsHash?: string;
+    artifactId?: string;
+    sourceArtifactId?: string;
+    identityRefId?: string;
+    identityStatus?: import('./identityContract').IdentityResolutionStatus;
+    identityWarnings?: string[];
+    identityResolution?: import('./identityContract').IdentityResolutionV1;
+    processIdentityWarning?: string;
     planPhaseId?: string;
     planPhaseTitle?: string;
     planPhaseGoal?: string;
@@ -468,6 +496,13 @@ export function createDataEnvelope<T = DataPayload>(
       queryHash: options.queryHash,
       sourceToolCallId: options.sourceToolCallId,
       paramsHash: options.paramsHash,
+      artifactId: options.artifactId,
+      sourceArtifactId: options.sourceArtifactId,
+      identityRefId: options.identityRefId,
+      identityStatus: options.identityStatus,
+      identityWarnings: options.identityWarnings,
+      identityResolution: options.identityResolution,
+      processIdentityWarning: options.processIdentityWarning,
       planPhaseId: options.planPhaseId,
       planPhaseTitle: options.planPhaseTitle,
       planPhaseGoal: options.planPhaseGoal,
@@ -904,8 +939,17 @@ export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
   data: {
     summary: string;
+    conclusion?: string;
     conclusionContract?: import('../agent/core/conclusionContract').ConclusionContract;
+    claimSupport?: import('./evidenceContract').ClaimSupportV1[];
+    claimVerificationResult?: import('./claimVerification').ClaimVerificationResult;
+    identityResolutions?: import('./identityContract').IdentityResolutionV1[];
     reportUrl?: string;
+    resultSnapshotId?: string;
+    confidence?: number;
+    rounds?: number;
+    totalDurationMs?: number;
+    partial?: boolean;
     findings: DiagnosticFinding[];
     suggestions: string[];
   };

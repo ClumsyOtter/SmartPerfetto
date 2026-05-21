@@ -30,6 +30,9 @@ export interface CompletedAnalysisSnapshotInput {
   traceLabel?: string;
   conclusion?: string;
   conclusionContract?: unknown;
+  claimSupport?: import('../types/evidenceContract').ClaimSupportV1[];
+  claimVerificationResult?: import('../types/claimVerification').ClaimVerificationResult;
+  identityResolutions?: import('../types/identityContract').IdentityResolutionV1[];
   confidence?: number;
   partial?: boolean;
   terminationReason?: string;
@@ -440,6 +443,9 @@ export function buildCompletedAnalysisResultSnapshot(
       ...(partialReasons.length > 0 ? { partialReasons } : {}),
     },
     ...(input.conclusionContract ? { conclusionContract: input.conclusionContract } : {}),
+    ...(input.claimSupport ? { claimSupport: input.claimSupport } : {}),
+    ...(input.claimVerificationResult ? { claimVerificationResult: input.claimVerificationResult } : {}),
+    ...(input.identityResolutions ? { identityResolutions: input.identityResolutions } : {}),
     metrics,
     evidenceRefs: evidenceRefsFromInput(input),
     status: input.partial || metrics.length === 0 ? 'partial' : 'ready',

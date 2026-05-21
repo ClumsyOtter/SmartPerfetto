@@ -42,6 +42,11 @@ export function writeReportHtml(sp: SessionPaths, html: string): void {
   fs.writeFileSync(sp.report, html, 'utf-8');
 }
 
+export function writeJsonFile(sp: SessionPaths, filePath: string, value: unknown): void {
+  ensureSessionLayout(sp);
+  atomicWriteFileSync(filePath, JSON.stringify(value ?? null, null, 2));
+}
+
 export function turnReportPath(sp: SessionPaths, turn: number): string {
   return path.join(sp.turnsDir, `${String(turn).padStart(3, '0')}.html`);
 }

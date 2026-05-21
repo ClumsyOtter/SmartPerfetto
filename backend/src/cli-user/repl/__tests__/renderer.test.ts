@@ -39,6 +39,30 @@ describe('CLI renderer', () => {
     expect(lines[2]).toMatchObject({ type: 'complete', ok: true, sessionId: 's2' });
   });
 
+  test('machine conclusion includes deterministic verifier verdict', () => {
+    const output = captureStdout(() => {
+      const renderer = createRenderer({ verbose: false, useColor: false, format: 'ndjson' });
+      renderer.printConclusion('done', {
+        confidence: 0.9,
+        claimVerification: {
+          status: 'passed',
+          checkedClaimCount: 1,
+          unsupportedClaimCount: 0,
+          issueCount: 0,
+        },
+      });
+    });
+
+    expect(JSON.parse(output)).toMatchObject({
+      type: 'conclusion',
+      conclusion: 'done',
+      claimVerification: {
+        status: 'passed',
+        checkedClaimCount: 1,
+      },
+    });
+  });
+
   test('machine completion reflects failed analysis status', () => {
     const output = captureStdout(() => {
       const renderer = createRenderer({ verbose: false, useColor: false, format: 'json' });

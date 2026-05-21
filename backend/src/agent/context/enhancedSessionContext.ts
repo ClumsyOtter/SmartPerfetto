@@ -631,6 +631,19 @@ export class EnhancedSessionContext {
   }
 
   /**
+   * Attach route-level post-processing metadata (claim support, verifier output,
+   * etc.) to the latest completed turn so resume/status APIs do not drop it.
+   */
+  annotateLatestCompletedTurn(patch: Partial<SubAgentResult>): void {
+    for (let i = this.turns.length - 1; i >= 0; i--) {
+      const turn = this.turns[i];
+      if (!turn.completed || !turn.result) continue;
+      turn.result = { ...turn.result, ...patch };
+      return;
+    }
+  }
+
+  /**
    * Get a specific finding by ID
    */
   getFinding(id: string): Finding | undefined {

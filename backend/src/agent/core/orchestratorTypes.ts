@@ -33,6 +33,9 @@ import type { AdbCollaborationConfig, AdbContext } from '../../services/adb';
 import type { IncrementalScope } from './incrementalAnalyzer';
 import type { EnhancedSessionContext } from '../context/enhancedSessionContext';
 import type { ConclusionContract } from './conclusionContract';
+import type { ClaimSupportV1 } from '../../types/evidenceContract';
+import type { ClaimVerificationResult } from '../../types/claimVerification';
+import type { IdentityResolutionV1 } from '../../types/identityContract';
 import type { CodeAwareMode } from '../../services/codebase/codeAwareFeature';
 
 // =============================================================================
@@ -217,6 +220,9 @@ export interface AnalysisResult {
   hypotheses: Hypothesis[];
   conclusion: string;
   conclusionContract?: ConclusionContract;
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
   confidence: number;
   rounds: number;
   totalDurationMs: number;

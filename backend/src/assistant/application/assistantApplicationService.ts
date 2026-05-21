@@ -101,7 +101,10 @@ export class AssistantApplicationService<T extends ManagedAssistantSession> {
 
     for (const [sessionId, session] of this.sessions.entries()) {
       const idle = now - (session.lastActivityAt || session.createdAt);
-      const isTerminal = session.status === 'completed' || session.status === 'failed';
+      const isTerminal =
+        session.status === 'completed' ||
+        session.status === 'failed' ||
+        session.status === 'quota_exceeded';
       const isAbandonedNonTerminal =
         (session.status === 'pending' || session.status === 'running') &&
         session.sseClients.length === 0;

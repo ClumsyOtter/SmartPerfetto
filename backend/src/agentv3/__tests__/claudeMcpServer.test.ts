@@ -95,6 +95,7 @@ jest.mock('../artifactStore', () => ({
         planPhaseGoal: artifact?.planPhaseGoal,
         sourceToolCallId: artifact?.sourceToolCallId,
         paramsHash: artifact?.paramsHash,
+        identityResolution: artifact?.identityResolution,
       };
     }),
     get: jest.fn(function(this: any, id: string) {
@@ -168,7 +169,12 @@ function createTestServer(options: { referenceTraceId?: string; sceneType?: any;
     query: jest.fn(async (_traceId: string, _sql: string) => ({ columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 5 })),
   };
   const mockSkillExecutor = {
-    execute: jest.fn(async (skillId: string, _traceId: string, _params?: Record<string, any>) => ({
+    execute: jest.fn(async (
+      skillId: string,
+      _traceId: string,
+      _params?: Record<string, any>,
+      _overrides?: Record<string, any>,
+    ) => ({
       skillId,
       success: true,
       displayResults: [{
@@ -408,6 +414,143 @@ describe('createClaudeMcpServer', () => {
       expect(result.planPhaseTitle).toBe('概览数据表');
       expect(result.planPhaseAttribution).toBe('inferred');
       expect(analysisPlan.current?.phases.find(p => p.id === 'p2')?.status).toBe('in_progress');
+    });
+
+    it('preserves identity sidecars when fetching skill artifacts', async () => {
+      const { tools, mockSkillExecutor } = createTestServer({ lightweight: true });
+      mockSkillExecutor.execute.mockResolvedValueOnce({
+        skillId: 'process_identity_skill',
+        success: true,
+        displayResults: [{
+          stepId: 'root',
+          title: 'Identity Result',
+          layer: 'overview',
+          format: 'table',
+          data: { rows: [[1]], columns: ['process_name'] },
+        }],
+        identityResolution: {
+          version: 'identity_contract@1',
+          identityRefId: 'identity:test',
+          target: { traceId: 'test-trace-123', source: 'skill_param' },
+          status: 'verified',
+          processes: [],
+          threads: [],
+          warnings: [],
+        },
+        diagnostics: [{ severity: 'warning', message: 'identity warning' }],
+        synthesizeData: [{
+          stepId: 'synth',
+          stepName: 'Synthesize Rows',
+          success: true,
+          data: [{ frame_id: 1, blocked_ms: 120 }],
+        }],
+        executionTimeMs: 5,
+      } as any);
+
+      const skillResult = await callTool(tools, 'invoke_skill', {
+        skillId: 'process_identity_skill',
+        params: { process_name: 'com.example' },
+      });
+      const fetched = await callTool(tools, 'fetch_artifact', {
+        artifactId: skillResult.artifacts[0].id,
+        detail: 'rows',
+      });
+      const fetchedDiagnostics = await callTool(tools, 'fetch_artifact', {
+        artifactId: skillResult.diagnosticsArtifactId,
+        detail: 'rows',
+      });
+      const fetchedSynthesize = await callTool(tools, 'fetch_artifact', {
+        artifactId: skillResult.synthesizeArtifacts[0].artifactId,
+        detail: 'rows',
+      });
+
+      expect(fetched.identityResolution).toEqual(expect.objectContaining({
+        identityRefId: 'identity:test',
+        status: 'verified',
+      }));
+      expect(fetchedDiagnostics.identityResolution).toEqual(expect.objectContaining({
+        identityRefId: 'identity:test',
+        status: 'verified',
+      }));
+      expect(fetchedSynthesize.identityResolution).toEqual(expect.objectContaining({
+        identityRefId: 'identity:test',
+        status: 'verified',
+      }));
+    });
+
+    it('creates fetchable diagnostics artifacts without display results', async () => {
+      const { tools, mockSkillExecutor } = createTestServer({ lightweight: true });
+      mockSkillExecutor.execute.mockResolvedValueOnce({
+        skillId: 'diagnostics_identity_skill',
+        success: true,
+        displayResults: [],
+        identityResolution: {
+          version: 'identity_contract@1',
+          identityRefId: 'identity:diagnostics',
+          target: { traceId: 'test-trace-123', source: 'skill_param' },
+          status: 'verified',
+          processes: [],
+          threads: [],
+          warnings: [],
+        },
+        diagnostics: [{ severity: 'warning', message: 'identity warning' }],
+        executionTimeMs: 5,
+      } as any);
+
+      const skillResult = await callTool(tools, 'invoke_skill', {
+        skillId: 'diagnostics_identity_skill',
+        params: { process_name: 'com.example' },
+      });
+      const fetchedDiagnostics = await callTool(tools, 'fetch_artifact', {
+        artifactId: skillResult.diagnosticsArtifactId,
+        detail: 'rows',
+      });
+
+      expect(skillResult.diagnosticsArtifactId).toBeTruthy();
+      expect(fetchedDiagnostics.identityResolution).toEqual(expect.objectContaining({
+        identityRefId: 'identity:diagnostics',
+        status: 'verified',
+      }));
+    });
+
+    it('creates fetchable synthesize artifacts without display results', async () => {
+      const { tools, mockSkillExecutor } = createTestServer({ lightweight: true });
+      mockSkillExecutor.execute.mockResolvedValueOnce({
+        skillId: 'synthesize_identity_skill',
+        success: true,
+        displayResults: [],
+        identityResolution: {
+          version: 'identity_contract@1',
+          identityRefId: 'identity:synthesize',
+          target: { traceId: 'test-trace-123', source: 'skill_param' },
+          status: 'verified',
+          processes: [],
+          threads: [],
+          warnings: [],
+        },
+        synthesizeData: [{
+          stepId: 'synth',
+          stepName: 'Synthesize Rows',
+          success: true,
+          data: [{ frame_id: 1, blocked_ms: 120 }],
+        }],
+        executionTimeMs: 5,
+      } as any);
+
+      const skillResult = await callTool(tools, 'invoke_skill', {
+        skillId: 'synthesize_identity_skill',
+        params: { process_name: 'com.example' },
+      });
+      const fetchedSynthesize = await callTool(tools, 'fetch_artifact', {
+        artifactId: skillResult.synthesizeArtifacts[0].artifactId,
+        detail: 'rows',
+      });
+
+      expect(skillResult.synthesizeArtifacts).toHaveLength(1);
+      expect(fetchedSynthesize.identityResolution).toEqual(expect.objectContaining({
+        identityRefId: 'identity:synthesize',
+        status: 'verified',
+      }));
     });
   });
 
@@ -1633,12 +1776,14 @@ describe('createClaudeMcpServer', () => {
         'scrolling_analysis',
         'test-trace-123',
         { process_name: 'com.example', package: 'com.example' },
+        { __traceSide: 'current' },
       );
       expect(mockSkillExecutor.execute).toHaveBeenNthCalledWith(
         2,
         'scrolling_analysis',
         'ref-trace-456',
         { process_name: 'com.example', package: 'com.example' },
+        { __traceSide: 'reference' },
       );
       expect(result.success).toBe(true);
       expect(result.current).toMatchObject({

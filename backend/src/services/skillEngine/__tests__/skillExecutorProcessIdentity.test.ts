@@ -14,6 +14,9 @@ const resolverSkill: SkillDefinition = {
   inputs: [
     { name: 'package', type: 'string', required: false },
     { name: 'process_name', type: 'string', required: false },
+    { name: 'thread_name', type: 'string', required: false },
+    { name: 'upid', type: 'integer', required: false },
+    { name: 'pid', type: 'integer', required: false },
     { name: 'max_rows', type: 'integer', required: false },
   ],
   sql: 'SELECT 1 AS resolver_probe',
@@ -53,9 +56,25 @@ const packageTargetSkill: SkillDefinition = {
   sql: "SELECT '${package}' AS package_name, '${process_name}' AS leaked_process_name",
 };
 
+const threadTargetSkill: SkillDefinition = {
+  name: 'target_thread_skill',
+  version: '1.0',
+  type: 'atomic',
+  meta: { display_name: 'Target Thread', description: 'Target Thread' },
+  identity: {
+    policy: 'required',
+    scope: 'process',
+    rewriteTo: 'upid',
+  },
+  inputs: [
+    { name: 'thread_name', type: 'string', required: true },
+  ],
+  sql: "SELECT '${thread_name}' AS thread_name",
+};
+
 function createExecutor(query: jest.Mock): SkillExecutor {
   const executor = new SkillExecutor({ query });
-  executor.registerSkills([resolverSkill, targetSkill, packageTargetSkill]);
+  executor.registerSkills([resolverSkill, targetSkill, packageTargetSkill, threadTargetSkill]);
   return executor;
 }
 
@@ -120,13 +139,120 @@ describe('SkillExecutor process identity gate', () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 
+  it('blocks required process skills when resolver returns only a probable identity match', async () => {
+    const query = jest.fn().mockResolvedValueOnce({
+      columns: ['rank', 'confidence_score', 'identity_status', 'canonical_package_name', 'recommended_process_name_param', 'upid', 'target_match_sources', 'supporting_sources', 'identity_warning'],
+      rows: [[1, 55, 'probable', 'com.example', 'com.example:provider', 42, 'android_process_metadata.package_name', '', 'ok']],
+      durationMs: 1,
+    });
+
+    const result = await createExecutor(query).execute('target_process_skill', 'trace', {
+      process_name: 'com.example',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.identityResolution?.status).toBe('ambiguous');
+    expect(result.identityResolution?.warnings).toContain('probable identity match requires additional confirmation before parameter rewrite');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks pid-only probable matches because pid can be reused', async () => {
+    const query = jest.fn().mockResolvedValueOnce({
+      columns: ['rank', 'confidence_score', 'identity_status', 'canonical_package_name', 'recommended_process_name_param', 'upid', 'pid', 'target_match_sources', 'supporting_sources', 'identity_warning'],
+      rows: [[1, 55, 'probable', 'com.example', 'com.example', 42, 4242, 'pid', '', 'ok']],
+      durationMs: 1,
+    });
+
+    const result = await createExecutor(query).execute('target_process_skill', 'trace', {
+      pid: 4242,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.identityResolution?.status).toBe('ambiguous');
+    expect(result.identityResolution?.warnings).toContain('probable identity match requires additional confirmation before parameter rewrite');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks thread-only matches even when the resolver reports high confidence', async () => {
+    const query = jest.fn().mockResolvedValueOnce({
+      columns: ['rank', 'confidence_score', 'identity_status', 'canonical_package_name', 'recommended_process_name_param', 'upid', 'target_match_sources', 'supporting_sources', 'identity_warning', 'thread_name', 'thread_target_matched'],
+      rows: [[1, 90, 'confirmed', 'com.example', 'com.example', 42, 'thread.name', 'frame_timeline.upid', 'ok', 'main', 1]],
+      durationMs: 1,
+    });
+
+    const result = await createExecutor(query).execute('target_thread_skill', 'trace', {
+      thread_name: 'main',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.identityResolution?.status).toBe('ambiguous');
+    expect(result.identityResolution?.warnings).toContain('thread-only identity target is not enough to verify a unique process');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks required process skills when top identity candidates are too close', async () => {
+    const query = jest.fn().mockResolvedValueOnce({
+      columns: ['rank', 'confidence_score', 'identity_status', 'canonical_package_name', 'recommended_process_name_param', 'upid', 'target_match_sources', 'supporting_sources', 'identity_warning'],
+      rows: [
+        [1, 95, 'confirmed', 'com.example', 'com.example', 42, 'process.name', 'frame_timeline.upid', 'ok'],
+        [2, 90, 'confirmed', 'com.example', 'com.example:remote', 43, 'process.name', 'frame_timeline.upid', 'ok'],
+      ],
+      durationMs: 1,
+    });
+
+    const result = await createExecutor(query).execute('target_process_skill', 'trace', {
+      process_name: 'com.example',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.identityResolution?.status).toBe('ambiguous');
+    expect(result.identityResolution?.warnings).toContain('multiple close process identity candidates require manual confirmation');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
   it('blocks required process skills before querying when target is missing', async () => {
     const query = jest.fn();
     const result = await createExecutor(query).execute('target_process_skill', 'trace', {});
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('no package/process/upid target');
+    expect(result.identityResolution).toEqual(expect.objectContaining({
+      status: 'missing',
+    }));
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('carries identity sidecars through generic DataEnvelope conversion', () => {
+    const envelopes = SkillExecutor.toDataEnvelopes({
+      skillId: 'target_process_skill',
+      skillName: 'Target',
+      success: true,
+      displayResults: [{
+        stepId: 'root',
+        title: 'Result',
+        layer: 'overview',
+        level: 'detail',
+        format: 'table',
+        data: { columns: ['process_name'], rows: [['com.example']] },
+      }],
+      diagnostics: [],
+      identityResolution: {
+        version: 'identity_contract@1',
+        identityRefId: 'identity:test',
+        target: { traceId: 'trace', source: 'skill_param' },
+        status: 'verified',
+        processes: [],
+        threads: [],
+        warnings: [],
+      },
+      executionTimeMs: 1,
+    });
+
+    expect(envelopes[0].meta).toEqual(expect.objectContaining({
+      identityRefId: 'identity:test',
+      identityStatus: 'verified',
+      identityResolution: expect.objectContaining({ identityRefId: 'identity:test' }),
+    }));
   });
 
   it('does not cache transient resolver failures', async () => {

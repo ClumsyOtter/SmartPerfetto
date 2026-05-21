@@ -32,7 +32,7 @@ export interface Stage1RunnerDeps {
     params: Record<string, any>,
   ) => Promise<SkillExecutionResult>;
   /** Wraps the static SkillExecutor.toDataEnvelopes(...). */
-  toEnvelopes: (result: SkillExecutionResult) => DataEnvelope[];
+  toEnvelopes: (result: SkillExecutionResult, traceId: string) => DataEnvelope[];
 }
 
 export interface Stage1RunResult {
@@ -72,7 +72,7 @@ export class SceneStage1Runner {
       );
     }
 
-    const envelopes = this.deps.toEnvelopes(rawResult);
+    const envelopes = this.deps.toEnvelopes(rawResult, traceId);
 
     if (onEnvelope) {
       for (const env of envelopes) {

@@ -30,9 +30,6 @@ import {
   skillRegistry,
   ensureSkillRegistryInitialized,
 } from '../../../services/skillEngine/skillLoader';
-import {
-  displayResultToEnvelope,
-} from '../../../types/dataContract';
 import type { SkillExecutionResult } from '../../../services/skillEngine/types';
 import type { FrameMechanismRecord } from '../../types/jankCause';
 
@@ -370,18 +367,12 @@ export class DirectSkillExecutor {
       : null;
 
     // Build DataEnvelopes from displayResults
-    const dataEnvelopes = result.displayResults
-      .map(dr => {
+    const dataEnvelopes = SkillExecutor.toDataEnvelopes(result, undefined, {
+      traceId: this.traceId,
+      traceSide: 'current',
+    })
+      .map(env => {
         try {
-          // Pass column definitions from DisplayResult to preserve hidden/type/format etc.
-          const explicitColumns = dr.columnDefinitions as any;
-          // Bridge metadataFields -> metadataConfig.fields for v2 DataEnvelope
-          const drAny = dr as any;
-          const drForEnvelope = {
-            ...drAny,
-            metadataConfig: drAny.metadataConfig || (Array.isArray(drAny.metadataFields) ? { fields: drAny.metadataFields } : undefined),
-          };
-          const env = displayResultToEnvelope(drForEnvelope as any, result.skillId, explicitColumns);
           // Ensure uniqueness per execution so the frontend doesn't dedupe away repeated
           // per-interval/per-frame executions of the same (skillId, stepId).
           env.meta.source = `${env.meta.source}#${taskId}`;
@@ -410,6 +401,7 @@ export class DirectSkillExecutor {
         ...(interval?.metadata?.sourceEntityType && { sourceEntityType: interval.metadata.sourceEntityType }),
         ...(interval?.metadata?.sourceEntityId && { sourceEntityId: String(interval.metadata.sourceEntityId) }),
         ...(frameMechanismRecord && { frameMechanismRecord }),
+        ...(result.identityResolution && { identityResolution: result.identityResolution }),
       },
     };
 

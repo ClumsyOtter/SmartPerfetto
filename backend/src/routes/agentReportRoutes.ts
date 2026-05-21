@@ -13,6 +13,7 @@ interface AgentReportRoutesDeps {
   normalizeNarrativeForClient: (narrative: string) => string;
   buildClientFindings: (findings: any[], scenes: any[]) => any[];
   buildSessionResultContract: (session: any, clientFindings: any[]) => unknown;
+  getCompletedPayload?: (session: any) => any;
 }
 
 export function registerAgentReportRoutes(
@@ -27,7 +28,7 @@ export function registerAgentReportRoutes(
       return sendResourceNotFound(res, 'Session not found');
     }
 
-    if (session.status !== 'completed') {
+    if (session.status !== 'completed' && session.status !== 'quota_exceeded') {
       return res.status(400).json({
         success: false,
         error: 'Session is not completed yet',
@@ -44,7 +45,9 @@ export function registerAgentReportRoutes(
       });
     }
 
-    const conclusion = deps.normalizeNarrativeForClient(result.conclusion);
+    const completedPayload = deps.getCompletedPayload?.(session);
+    const conclusion = completedPayload?.normalizedConclusion
+      || deps.normalizeNarrativeForClient(result.conclusion);
     const findings = Array.isArray(result.findings) ? result.findings : [];
     const clientFindings = deps.buildClientFindings(findings, session.scenes || []);
     const resultContract = deps.buildSessionResultContract(session, clientFindings);
@@ -77,7 +80,16 @@ export function registerAgentReportRoutes(
         confidence: result.confidence,
         totalDurationMs: result.totalDurationMs,
         rounds: result.rounds,
+        partial: result.partial,
+        terminationReason: result.terminationReason,
+        terminationMessage: result.terminationMessage,
       },
+      reportUrl: completedPayload?.finalArtifacts?.reportUrl,
+      reportError: completedPayload?.finalArtifacts?.reportError,
+      resultSnapshotId: completedPayload?.finalArtifacts?.resultSnapshotId,
+      claimSupport: completedPayload?.qualityArtifacts?.claimSupport || result.claimSupport,
+      claimVerificationResult: completedPayload?.qualityArtifacts?.claimVerificationResult || result.claimVerificationResult,
+      identityResolutions: completedPayload?.qualityArtifacts?.identityResolutions || result.identityResolutions,
       findings: findings.map((f: any) => ({
         id: f.id,
         category: f.category,

@@ -68,8 +68,8 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
   try {
     const sessionContext = sessionContextManager.get(sessionId, traceId);
 
-	    const snapshot = typeof session.orchestrator.takeSnapshot === 'function'
-	      ? session.orchestrator.takeSnapshot(sessionId, traceId, {
+      const snapshot = typeof session.orchestrator.takeSnapshot === 'function'
+        ? session.orchestrator.takeSnapshot(sessionId, traceId, {
           referenceTraceId: session.referenceTraceId,
           comparisonSource: session.comparisonSource,
           comparisonReportSection: session.comparisonReportSection,
@@ -79,14 +79,19 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
           agentDialogue: session.agentDialogue || [],
           agentResponses: session.agentResponses || [],
           dataEnvelopes: session.dataEnvelopes || [],
+          claimSupport: session.result?.claimSupport || (session as any).claimSupport,
+          claimVerificationResult: session.result?.claimVerificationResult || (session as any).claimVerificationResult,
+          identityResolutions: session.result?.identityResolutions || (session as any).identityResolutions,
           hypotheses: session.hypotheses || [],
-	          agentRuntimeProviderId: session.providerId,
-	          agentRuntimeProviderSnapshotHash: session.providerSnapshotHash,
-	          codeAwareMode: (session as {codeAwareMode?: unknown}).codeAwareMode as any,
-	          codebaseIds: (session as {codebaseIds?: string[]}).codebaseIds,
-	          codebaseSnapshot: buildCodebaseSnapshot((session as {codebaseIds?: string[]}).codebaseIds),
-	          codeLookupSummary: CodeLookupLedger.restore(sessionId, 12_000, 2).toSnapshotSummary(),
-	          runSequence: session.runSequence || 0,
+            agentRuntimeProviderId: session.providerId,
+            agentRuntimeProviderSnapshotHash: session.providerSnapshotHash,
+            codeAwareMode: (session as {codeAwareMode?: unknown}).codeAwareMode as any,
+            codebaseIds: (session as {codebaseIds?: string[]}).codebaseIds,
+            codebaseSnapshot: buildCodebaseSnapshot((session as {codebaseIds?: string[]}).codebaseIds),
+            codeLookupSummary: CodeLookupLedger.restore(sessionId, 12_000, 2).toSnapshotSummary(),
+            runSequence: session.runSequence || 0,
+          activeRun: session.activeRun,
+          lastRun: session.lastRun,
           conversationOrdinal: session.conversationOrdinal || 0,
         })
       : null;

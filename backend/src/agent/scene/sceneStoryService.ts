@@ -87,7 +87,7 @@ export interface SceneStoryServiceDeps {
   /** Session lookup. */
   getSession: (sessionId: string) => SceneStorySession | undefined;
   /** Wraps the static SkillExecutor.toDataEnvelopes for unit testability. */
-  toEnvelopes?: (result: SkillExecutionResult) => DataEnvelope[];
+  toEnvelopes?: (result: SkillExecutionResult, traceId: string) => DataEnvelope[];
 
   /** Disk cache for file-backed traces (sha256 → SceneReport, 7d TTL). */
   reportStore: SceneReportStore;
@@ -140,7 +140,7 @@ export interface SceneStoryPreviewResult {
 export class SceneStoryService {
   private readonly runners: Map<string, SceneAnalysisJobRunner> = new Map();
   private readonly inProgress: Set<string> = new Set();
-  private readonly toEnvelopes: (result: SkillExecutionResult) => DataEnvelope[];
+  private readonly toEnvelopes: (result: SkillExecutionResult, traceId: string) => DataEnvelope[];
 
   /**
    * Concurrent-request dedupe: while a pipeline for an owner-scoped
@@ -152,7 +152,10 @@ export class SceneStoryService {
   private readonly pendingByHash: Map<string, Promise<SceneReport>> = new Map();
 
   constructor(private readonly deps: SceneStoryServiceDeps) {
-    this.toEnvelopes = deps.toEnvelopes ?? ((result) => SkillExecutor.toDataEnvelopes(result));
+    this.toEnvelopes = deps.toEnvelopes ?? ((result, traceId) => SkillExecutor.toDataEnvelopes(result, undefined, {
+      traceId,
+      traceSide: 'current',
+    }));
   }
 
   /**

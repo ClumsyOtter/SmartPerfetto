@@ -170,6 +170,12 @@ async function main() {
   assertFile(run.turnReportPath, 'run turn report');
   assert(run.reportPath.startsWith(path.join(sessionHome, 'sessions')), 'run report should live under CLI session home');
   assert(run.turnReportPath.startsWith(path.join(sessionHome, 'sessions')), 'run turn report should live under CLI session home');
+  assertFile(path.join(run.sessionDir, 'claim-support.json'), 'run claim-support sidecar');
+  assertFile(path.join(run.sessionDir, 'claim-verification.json'), 'run claim-verification sidecar');
+  assertFile(path.join(run.sessionDir, 'identity-resolutions.json'), 'run identity-resolutions sidecar');
+  assertFile(path.join(run.sessionDir, 'turns', '001.claim-support.json'), 'run turn claim-support sidecar');
+  const runClaimVerification = parseJson(fs.readFileSync(path.join(run.sessionDir, 'claim-verification.json'), 'utf-8'));
+  assert.equal(runClaimVerification.schemaVersion, 'claim_verifier@1');
 
   const sessionId = run.sessionId;
   const ask = parseJson(runCli(
@@ -195,21 +201,36 @@ async function main() {
   assert.equal(reportJson.config.sessionId, sessionId);
   assert.equal(reportJson.config.turnCount, 3);
   assert.match(reportJson.conclusion, /CLI E2E fake conclusion/);
+  assert(Array.isArray(reportJson.claimSupport), 'report json should include claimSupport sidecar');
+  assert.equal(reportJson.claimVerificationResult.schemaVersion, 'claim_verifier@1');
+  assert(Array.isArray(reportJson.identityResolutions), 'report json should include identityResolutions sidecar');
 
-  const reportMdPath = path.join(outputDir, 'report.md');
-  runCli('report export md', ['report', 'export', sessionId, '--format', 'md', '--out', reportMdPath]);
-  assert.match(fs.readFileSync(reportMdPath, 'utf-8'), /SmartPerfetto CLI Report/);
+    const reportMdPath = path.join(outputDir, 'report.md');
+    runCli('report export md', ['report', 'export', sessionId, '--format', 'md', '--out', reportMdPath]);
+    const reportMd = fs.readFileSync(reportMdPath, 'utf-8');
+    assert.match(reportMd, /SmartPerfetto CLI Report/);
+    assert.match(reportMd, /## Claim Verification/);
 
   const reportHtmlPath = path.join(outputDir, 'report.html');
   runCli('report export html', ['report', 'export', sessionId, '--format', 'html', '--out', reportHtmlPath]);
-  assert.match(fs.readFileSync(reportHtmlPath, 'utf-8'), /SmartPerfetto CLI E2E Report/);
+  const exportedHtml = fs.readFileSync(reportHtmlPath, 'utf-8');
+  assert.match(exportedHtml, /SmartPerfetto Agent-Driven/);
+  assert.match(exportedHtml, /断言验证结果|Claim Verification/);
 
   const turnReportJsonPath = path.join(outputDir, 'turn-001.json');
   runCli('report export turn json', ['report', 'export', sessionId, '--turn', '1', '--format', 'json', '--out', turnReportJsonPath]);
-  const turnReportJson = parseJson(fs.readFileSync(turnReportJsonPath, 'utf-8'));
-  assert.equal(turnReportJson.ok, true);
-  assert.equal(turnReportJson.turn, 1);
-  assert.match(turnReportJson.turnMarkdown, /分析启动慢的原因/);
+    const turnReportJson = parseJson(fs.readFileSync(turnReportJsonPath, 'utf-8'));
+    assert.equal(turnReportJson.ok, true);
+    assert.equal(turnReportJson.turn, 1);
+    assert.match(turnReportJson.turnMarkdown, /分析启动慢的原因/);
+    assert(Array.isArray(turnReportJson.claimSupport), 'turn json should include claimSupport sidecar');
+    assert.equal(turnReportJson.claimVerificationResult.schemaVersion, 'claim_verifier@1');
+
+    const turnReportMdPath = path.join(outputDir, 'turn-001.md');
+    runCli('report export turn md', ['report', 'export', sessionId, '--turn', '1', '--format', 'md', '--out', turnReportMdPath]);
+    const turnReportMd = fs.readFileSync(turnReportMdPath, 'utf-8');
+    assert.match(turnReportMd, /SmartPerfetto CLI Turn Report/);
+    assert.match(turnReportMd, /## Claim Verification/);
 
   const refTracePath = path.join(workRoot, 'reference.perfetto-trace');
   fs.copyFileSync(tracePath, refTracePath);

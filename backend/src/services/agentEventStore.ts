@@ -127,8 +127,17 @@ function ensureAgentEventGraph(
   );
 }
 
-function terminalStatusForEvent(eventType: string): 'completed' | 'failed' | null {
-  if (eventType === 'analysis_completed') return 'completed';
+function terminalStatusForEvent(eventType: string, eventData?: string): 'completed' | 'failed' | 'quota_exceeded' | null {
+  if (eventType === 'analysis_completed') {
+    try {
+      const parsed = JSON.parse(eventData || '{}');
+      const status = parsed?.data?.terminalRunStatus ?? parsed?.terminalRunStatus;
+      if (status === 'quota_exceeded') return 'quota_exceeded';
+    } catch {
+      // Fall through to the historical completed mapping for old event payloads.
+    }
+    return 'completed';
+  }
   if (eventType === 'error') return 'failed';
   return null;
 }
@@ -156,7 +165,7 @@ export function persistSerializedAgentEvent(
       event.createdAt,
     );
 
-    const terminalStatus = terminalStatusForEvent(event.eventType);
+    const terminalStatus = terminalStatusForEvent(event.eventType, event.eventData);
     if (terminalStatus) {
       db.prepare(`
         UPDATE analysis_runs

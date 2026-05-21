@@ -40,6 +40,11 @@ export interface ProcessIdentityCandidate {
   targetMatchSources?: string;
   supportingSources?: string;
   identityWarning?: string;
+  threadUtid?: number;
+  threadTid?: number;
+  threadName?: string;
+  threadRole?: 'app_main' | 'render_thread' | 'unknown';
+  threadTargetMatched?: boolean;
 }
 
 export interface ProcessIdentityResolution {

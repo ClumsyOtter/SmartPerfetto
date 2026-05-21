@@ -44,7 +44,6 @@ import {
   VALID_DISPLAY_LAYERS,
   DiagnosticFinding,
   DataEnvelope,
-  layeredResultToEnvelopes,
   generateEventId,
 } from '../../../types/dataContract';
 
@@ -240,7 +239,10 @@ export class ModuleExpertInvoker extends EventEmitter {
 
         if (this.config.useDataEnvelopeFormat) {
           // v2.0 format: emit 'data' event with DataEnvelope(s)
-          const envelopes = layeredResultToEnvelopes(layeredResult);
+          const envelopes = SkillExecutor.toDataEnvelopes(result, undefined, {
+            traceId,
+            traceSide: 'current',
+          });
           this.emit('skill_event', {
             type: 'data',
             id: generateEventId(skill.name),

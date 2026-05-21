@@ -14,6 +14,7 @@
  */
 
 import type { ColumnDefinition } from '../../types/dataContract';
+import type { IdentityResolutionV1 } from '../../types/identityContract';
 
 // =============================================================================
 // 基础类型
@@ -516,6 +517,9 @@ export interface SkillExecutionResult {
 
   // 原始结果（用于调试）
   rawResults?: Record<string, StepResult>;
+
+  // Identity Contract sidecar produced by the process/thread identity gate.
+  identityResolution?: IdentityResolutionV1;
 
   executionTimeMs: number;
   error?: string;

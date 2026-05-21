@@ -15,6 +15,9 @@
  *           ├── conclusion.md           (latest turn's conclusion)
  *           ├── transcript.jsonl
  *           ├── stream.jsonl            (raw StreamingUpdate log)
+ *           ├── claim-support.json      (latest Evidence Contract claim support)
+ *           ├── claim-verification.json (latest deterministic verifier result)
+ *           ├── identity-resolutions.json
  *           ├── report.html             (latest HTML report)
  *           └── turns/NNN.md            (per-turn full answer)
  *
@@ -64,6 +67,9 @@ export interface SessionPaths {
   conclusion: string;
   transcript: string;
   stream: string;
+  claimSupport: string;
+  claimVerification: string;
+  identityResolutions: string;
   report: string;
   turnsDir: string;
 }
@@ -109,6 +115,9 @@ export function sessionPaths(paths: CliPaths, sessionId: string): SessionPaths {
     conclusion: path.join(dir, 'conclusion.md'),
     transcript: path.join(dir, 'transcript.jsonl'),
     stream: path.join(dir, 'stream.jsonl'),
+    claimSupport: path.join(dir, 'claim-support.json'),
+    claimVerification: path.join(dir, 'claim-verification.json'),
+    identityResolutions: path.join(dir, 'identity-resolutions.json'),
     report: path.join(dir, 'report.html'),
     turnsDir: path.join(dir, 'turns'),
   };

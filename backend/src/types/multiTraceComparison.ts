@@ -195,6 +195,9 @@ export interface AnalysisResultSnapshot {
   traceMetadata: TraceComparisonMetadata;
   summary: AnalysisSummary;
   conclusionContract?: unknown;
+  claimSupport?: import('./evidenceContract').ClaimSupportV1[];
+  claimVerificationResult?: import('./claimVerification').ClaimVerificationResult;
+  identityResolutions?: import('./identityContract').IdentityResolutionV1[];
   metrics: NormalizedMetricValue[];
   evidenceRefs: EvidenceRef[];
   status: AnalysisResultSnapshotStatus;

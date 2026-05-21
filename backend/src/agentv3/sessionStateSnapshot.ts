@@ -24,6 +24,9 @@ import type { AnalysisNote, AnalysisPlanV3, Hypothesis, UncertaintyFlag } from '
 import type { StoredArtifact } from './artifactStore';
 import type { ArchitectureInfo } from '../agent/detectors/types';
 import type { DataEnvelope } from '../types/dataContract';
+import type { ClaimSupportV1 } from '../types/evidenceContract';
+import type { ClaimVerificationResult } from '../types/claimVerification';
+import type { IdentityResolutionV1 } from '../types/identityContract';
 import type { CodeAwareMode } from '../services/codebase/codeAwareFeature';
 import type { CodeLookupSummary } from '../services/codebase/codeLookupLedger';
 
@@ -84,6 +87,17 @@ export interface AgentResponseEntry {
   timestamp: number;
 }
 
+export interface SnapshotRunContext {
+  runId: string;
+  requestId: string;
+  sequence: number;
+  query: string;
+  startedAt: number;
+  completedAt?: number;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'quota_exceeded';
+  error?: string;
+}
+
 // =============================================================================
 // SessionStateSnapshot — the core snapshot type
 // =============================================================================
@@ -121,6 +135,9 @@ export interface SessionStateSnapshot {
 
   // --- Data ---
   dataEnvelopes: DataEnvelope[];
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
   /**
    * Protocol-format hypotheses (from AnalysisResult) for report generation.
    * These use the agentProtocol.Hypothesis shape (id, description, status, confidence).
@@ -184,6 +201,8 @@ export interface SessionStateSnapshot {
   // --- Run Tracking ---
   runSequence: number;
   conversationOrdinal: number;
+  activeRun?: SnapshotRunContext;
+  lastRun?: SnapshotRunContext;
 }
 
 // =============================================================================
@@ -210,6 +229,9 @@ export interface SessionFieldsForSnapshot {
   agentDialogue: AgentDialogueEntry[];
   agentResponses: AgentResponseEntry[];
   dataEnvelopes: DataEnvelope[];
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
   /** Protocol-format hypotheses from AnalysisResult. */
   hypotheses: any[];
   /** Provider profile that supplied runtime credentials for this turn; null means env/default fallback. */
@@ -222,4 +244,6 @@ export interface SessionFieldsForSnapshot {
   codeLookupSummary?: CodeLookupSummary;
   runSequence: number;
   conversationOrdinal: number;
+  activeRun?: SnapshotRunContext;
+  lastRun?: SnapshotRunContext;
 }

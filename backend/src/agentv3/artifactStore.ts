@@ -16,6 +16,8 @@
  * - full: complete original data structure
  */
 
+import type { IdentityResolutionV1 } from '../types/identityContract';
+
 export interface StoredArtifact {
   id: string;
   skillId: string;
@@ -32,6 +34,8 @@ export interface StoredArtifact {
   planPhaseGoal?: string;
   sourceToolCallId?: string;
   paramsHash?: string;
+  /** Process/thread identity sidecar produced with this artifact's source Skill. */
+  identityResolution?: IdentityResolutionV1;
   /** In comparison mode, which trace this artifact came from (provenance tracking) */
   sourceTrace?: import('./types').TraceSource;
 }
@@ -50,6 +54,7 @@ export interface ArtifactSummary {
   planPhaseTitle?: string;
   planPhaseGoal?: string;
   sourceToolCallId?: string;
+  identityResolution?: IdentityResolutionV1;
 }
 
 /**
@@ -97,6 +102,7 @@ export class ArtifactStore {
     planPhaseGoal?: string;
     sourceToolCallId?: string;
     paramsHash?: string;
+    identityResolution?: IdentityResolutionV1;
   }): string {
     const id = `art-${++this.counter}`;
     const now = Date.now();
@@ -158,6 +164,7 @@ export class ArtifactStore {
       planPhaseTitle: artifact.planPhaseTitle,
       planPhaseGoal: artifact.planPhaseGoal,
       sourceToolCallId: artifact.sourceToolCallId,
+      identityResolution: artifact.identityResolution,
     };
   }
 
@@ -226,6 +233,7 @@ export class ArtifactStore {
           planPhaseGoal: artifact.planPhaseGoal,
           sourceToolCallId: artifact.sourceToolCallId,
           paramsHash: artifact.paramsHash,
+          identityResolution: artifact.identityResolution,
         };
       }
       case 'full': {
@@ -249,6 +257,7 @@ export class ArtifactStore {
           planPhaseGoal: artifact.planPhaseGoal,
           sourceToolCallId: artifact.sourceToolCallId,
           paramsHash: artifact.paramsHash,
+          identityResolution: artifact.identityResolution,
           ...(truncatedFull ? { truncated: true, totalRows: fullRows.length, hint: 'Use detail="rows" with offset/limit for complete data' } : {}),
         };
       }

@@ -34,6 +34,8 @@ import { getHTMLReportGenerator } from '../../services/htmlReportGenerator';
 import { buildAgentDrivenReportData } from '../../services/agentReportData';
 import { normalizeResultForReport } from '../../services/agentResultNormalizer';
 import { persistAgentTurn } from '../../services/persistAgentSession';
+import { runClaimVerification } from '../../services/verifier/claimVerificationRunner';
+import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { backendLogPath } from '../../runtimePaths';
 import { RagStore } from '../../services/ragStore';
 import { SymbolResolver, type ResolvedSymbolCandidate } from '../../services/symbol/symbolResolver';
@@ -47,6 +49,7 @@ import type { StreamingUpdate } from '../../agent/types';
 import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
 import type { QueryResult } from '../../services/traceProcessorService';
 import type { CodeAwareMode } from '../../services/codebase/codeAwareFeature';
+import { validateDataEnvelope, type DataEnvelope } from '../../types/dataContract';
 
 export interface RunTurnInput {
   tracePath?: string;
@@ -78,6 +81,17 @@ export interface RunTurnOutput {
   providerId?: string | null;
   agentRuntimeKind?: BackendAgentRuntimeKind;
   providerSnapshotHash?: string | null;
+}
+
+export function envelopesFromStreamingUpdate(update: StreamingUpdate): DataEnvelope[] {
+  if (update.type !== 'data') return [];
+  const raw = Array.isArray(update.content) ? update.content : [update.content];
+  return raw.filter((item): item is DataEnvelope =>
+    Boolean(item && typeof item === 'object' && validateDataEnvelope(item).length === 0));
+}
+
+export function shouldExposeLiveStreamingUpdate(update: StreamingUpdate): boolean {
+  return update.type !== 'conclusion' && update.type !== 'answer_token';
 }
 
 /**
@@ -178,6 +192,11 @@ export class CliAnalyzeService {
     // Subscribe to live updates. Wrap in off()-on-finally to avoid handler leaks
     // if runTurn is called multiple times within one CLI process (REPL path).
     const handler = (update: StreamingUpdate) => {
+      const envelopes = envelopesFromStreamingUpdate(update);
+      if (envelopes.length > 0) {
+        session.dataEnvelopes.push(...envelopes);
+      }
+      if (!shouldExposeLiveStreamingUpdate(update)) return;
       try {
         input.onEvent(update);
       } catch (err) {
@@ -200,6 +219,29 @@ export class CliAnalyzeService {
     }
     (session as unknown as {codeAwareMode?: CodeAwareMode; codebaseIds?: string[]}).codeAwareMode = input.codeAwareMode;
     (session as unknown as {codeAwareMode?: CodeAwareMode; codebaseIds?: string[]}).codebaseIds = input.codebaseIds;
+    const normalized = normalizeResultForReport(result);
+    result.conclusion = normalized.conclusion;
+    if (normalized.conclusionContract) {
+      result.conclusionContract = normalized.conclusionContract;
+    }
+    const qualityArtifacts = runClaimVerification({
+      conclusionContract: normalized.conclusionContract,
+      dataEnvelopes: session.dataEnvelopes as any,
+      comparisonReportSection: session.comparisonReportSection,
+      policy: 'record_only',
+    });
+    result.claimSupport = qualityArtifacts.claimSupport;
+    result.claimVerificationResult = qualityArtifacts.claimVerificationResult;
+    result.identityResolutions = qualityArtifacts.identityResolutions;
+    session.claimSupport = qualityArtifacts.claimSupport;
+    session.claimVerificationResult = qualityArtifacts.claimVerificationResult;
+    session.identityResolutions = qualityArtifacts.identityResolutions;
+    sessionContextManager.get(sessionId, traceId)?.annotateLatestCompletedTurn({
+      conclusionContract: normalized.conclusionContract,
+      claimSupport: qualityArtifacts.claimSupport,
+      claimVerificationResult: qualityArtifacts.claimVerificationResult,
+      identityResolutions: qualityArtifacts.identityResolutions,
+    });
 
     // Persist to SQLite BEFORE building the report — the snapshot is stashed on
     // the session as `_lastSnapshot` and read by the HTML generator. Routes
@@ -270,6 +312,9 @@ export class CliAnalyzeService {
           hypotheses: normalized.hypotheses,
           conclusion: normalized.conclusion,
           conclusionContract: normalized.conclusionContract,
+          claimSupport: normalized.claimSupport ?? result.claimSupport,
+          claimVerificationResult: normalized.claimVerificationResult ?? result.claimVerificationResult,
+          identityResolutions: normalized.identityResolutions ?? result.identityResolutions,
           confidence: normalized.confidence,
           rounds: normalized.rounds,
           totalDurationMs: normalized.totalDurationMs,
@@ -419,6 +464,18 @@ async function runCliE2eFakeTurn(input: RunTurnInput, traceId: string): Promise<
         codeReferences: codeAware.codeReferences,
       } as AnalysisResult['conclusionContract'] & {codeReferences: CliE2eFakeCodeReference[]}
     : undefined;
+  const claimSupport: NonNullable<AnalysisResult['claimSupport']> = [];
+  const claimVerificationResult: NonNullable<AnalysisResult['claimVerificationResult']> = {
+    schemaVersion: 'claim_verifier@1',
+    status: 'not_checked',
+    policy: 'record_only',
+    notCheckedReason: 'CLI E2E fake mode does not emit structured claims',
+    passed: false,
+    checkedClaimCount: 0,
+    unsupportedClaimCount: 0,
+    claimResults: [],
+    issues: [],
+  };
   return {
     sessionId,
     traceId,
@@ -434,6 +491,9 @@ async function runCliE2eFakeTurn(input: RunTurnInput, traceId: string): Promise<
       query: input.query,
       conclusion: fakeConclusion,
       conclusionContract,
+      claimSupport,
+      claimVerificationResult,
+      identityResolutions: [],
       totalDurationMs,
     }),
     result: {
@@ -452,6 +512,9 @@ async function runCliE2eFakeTurn(input: RunTurnInput, traceId: string): Promise<
       hypotheses: [],
       conclusion: fakeConclusion,
       ...(conclusionContract ? { conclusionContract } : {}),
+      claimSupport,
+      claimVerificationResult,
+      identityResolutions: [],
       confidence: 1,
       rounds: 1,
       totalDurationMs,
@@ -519,6 +582,9 @@ function buildCliE2eFakeReportHtml(input: {
   query: string;
   conclusion: string;
   conclusionContract?: unknown;
+  claimSupport?: AnalysisResult['claimSupport'];
+  claimVerificationResult?: AnalysisResult['claimVerificationResult'];
+  identityResolutions?: AnalysisResult['identityResolutions'];
   totalDurationMs: number;
 }): string {
   return getHTMLReportGenerator().generateAgentDrivenHTML({
@@ -540,6 +606,9 @@ function buildCliE2eFakeReportHtml(input: {
       hypotheses: [],
       conclusion: input.conclusion,
       ...(input.conclusionContract ? {conclusionContract: input.conclusionContract} : {}),
+      claimSupport: input.claimSupport,
+      claimVerificationResult: input.claimVerificationResult,
+      identityResolutions: input.identityResolutions,
       confidence: 1,
       rounds: 1,
       totalDurationMs: input.totalDurationMs,

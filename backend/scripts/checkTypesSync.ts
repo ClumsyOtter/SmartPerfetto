@@ -20,12 +20,14 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
 
 // Paths
 const projectRoot = path.resolve(__dirname, '../..');
 const backendContractPath = path.join(projectRoot, 'backend/src/types/dataContract.ts');
 const conclusionContractPath = path.join(projectRoot, 'backend/src/agent/core/conclusionContract.ts');
+const evidenceContractPath = path.join(projectRoot, 'backend/src/types/evidenceContract.ts');
+const claimVerificationPath = path.join(projectRoot, 'backend/src/types/claimVerification.ts');
+const identityContractPath = path.join(projectRoot, 'backend/src/types/identityContract.ts');
 const frontendTypesPath = path.join(
   projectRoot,
   'perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/data_contract.types.ts'
@@ -164,6 +166,20 @@ interface ConclusionContractSyncExpectation {
   analysisCompletedUsesConclusionContract: boolean;
 }
 
+interface AnalysisQualitySyncExpectation {
+  hasClaimSupportType: boolean;
+  hasClaimVerificationType: boolean;
+  hasIdentityResolutionType: boolean;
+  dataEnvelopeMetaHasIdentitySidecar: boolean;
+  dataEnvelopeMetaHasArtifactIds: boolean;
+  dataEnvelopeMetaHasIdentityStatus: boolean;
+  dataEnvelopeMetaHasProcessIdentityWarning: boolean;
+  analysisCompletedHasClaimSupport: boolean;
+  analysisCompletedHasVerifier: boolean;
+  analysisCompletedHasIdentityResolutions: boolean;
+  claimReferencesHaveArtifactIds: boolean;
+}
+
 function extractConclusionContractExpectations(content: string): ConclusionContractSyncExpectation {
   const metadataBlockMatch = content.match(/export interface ConclusionContractMetadata\s*\{([\s\S]*?)\n\}/m);
   const metadataBlock = metadataBlockMatch ? metadataBlockMatch[1] : '';
@@ -189,6 +205,51 @@ function buildExpectedConclusionContractSync(
   };
 }
 
+function frontendContractFragment(content: string, options?: { removeTraceTimestampAlias?: boolean }): string {
+  const trimmed = content.trim();
+  return options?.removeTraceTimestampAlias
+    ? trimmed.replace(/export type TraceTimestampNs = string \| number;\n\n/, '')
+    : trimmed;
+}
+
+function findOutOfSyncContractFragments(frontendContent: string, fragments: Array<{ name: string; content: string }>): string[] {
+  const normalizedFrontend = normalizeForComparison(frontendContent);
+  return fragments
+    .filter(fragment => !normalizedFrontend.includes(normalizeForComparison(fragment.content)))
+    .map(fragment => fragment.name);
+}
+
+function extractAnalysisQualityExpectations(content: string): AnalysisQualitySyncExpectation {
+  const dataEnvelopeMetaMatch = content.match(/export interface DataEnvelopeMeta\s*\{([\s\S]*?)\n\}/m);
+  const dataEnvelopeMetaBlock = dataEnvelopeMetaMatch ? dataEnvelopeMetaMatch[1] : '';
+  const analysisCompletedMatch = content.match(/export interface AnalysisCompletedEvent\s*\{([\s\S]*?)\n\}/m);
+  const analysisCompletedBlock = analysisCompletedMatch ? analysisCompletedMatch[1] : '';
+  const claimRefMatch = content.match(/export interface ConclusionContractClaimReference\s*\{([\s\S]*?)\n\}/m);
+  const claimRefBlock = claimRefMatch ? claimRefMatch[1] : '';
+  return {
+    hasClaimSupportType: /\bexport interface ClaimSupportV1\s*\{/.test(content),
+    hasClaimVerificationType: /\bexport interface ClaimVerificationResult\s*\{/.test(content),
+    hasIdentityResolutionType: /\bexport interface IdentityResolutionV1\s*\{/.test(content),
+    dataEnvelopeMetaHasIdentitySidecar:
+      /\bidentityRefId\s*\?:\s*string\s*;/.test(dataEnvelopeMetaBlock) &&
+      /\bidentityResolution\s*\?:\s*IdentityResolutionV1\s*;/.test(dataEnvelopeMetaBlock),
+    dataEnvelopeMetaHasArtifactIds:
+      /\bartifactId\s*\?:\s*string\s*;/.test(dataEnvelopeMetaBlock) &&
+      /\bsourceArtifactId\s*\?:\s*string\s*;/.test(dataEnvelopeMetaBlock),
+    dataEnvelopeMetaHasIdentityStatus:
+      /\bidentityStatus\s*\?:\s*IdentityResolutionStatus\s*;/.test(dataEnvelopeMetaBlock) &&
+      /\bidentityWarnings\s*\?:\s*string\[\]\s*;/.test(dataEnvelopeMetaBlock),
+    dataEnvelopeMetaHasProcessIdentityWarning:
+      /\bprocessIdentityWarning\s*\?:\s*string\s*;/.test(dataEnvelopeMetaBlock),
+    analysisCompletedHasClaimSupport: /\bclaimSupport\s*\?:\s*ClaimSupportV1\[\]\s*;/.test(analysisCompletedBlock),
+    analysisCompletedHasVerifier: /\bclaimVerificationResult\s*\?:\s*ClaimVerificationResult\s*;/.test(analysisCompletedBlock),
+    analysisCompletedHasIdentityResolutions: /\bidentityResolutions\s*\?:\s*IdentityResolutionV1\[\]\s*;/.test(analysisCompletedBlock),
+    claimReferencesHaveArtifactIds:
+      /\bartifactId\s*\?:\s*string\s*;/.test(claimRefBlock) &&
+      /\bsourceArtifactId\s*\?:\s*string\s*;/.test(claimRefBlock),
+  };
+}
+
 /**
  * Main check function
  */
@@ -211,10 +272,19 @@ async function checkTypesSync(): Promise<boolean> {
     console.error(`❌ Conclusion contract file not found: ${conclusionContractPath}`);
     process.exit(2);
   }
+  for (const filePath of [evidenceContractPath, claimVerificationPath, identityContractPath]) {
+    if (!fs.existsSync(filePath)) {
+      console.error(`❌ Analysis quality contract file not found: ${filePath}`);
+      process.exit(2);
+    }
+  }
 
   // Read files
   const backendContent = fs.readFileSync(backendContractPath, 'utf-8');
   const conclusionContractContent = fs.readFileSync(conclusionContractPath, 'utf-8');
+  const evidenceContractContent = fs.readFileSync(evidenceContractPath, 'utf-8');
+  const claimVerificationContent = fs.readFileSync(claimVerificationPath, 'utf-8');
+  const identityContractContent = fs.readFileSync(identityContractPath, 'utf-8');
   const frontendContent = fs.readFileSync(frontendTypesPath, 'utf-8');
 
   // Extract and compare type definitions
@@ -261,6 +331,39 @@ async function checkTypesSync(): Promise<boolean> {
     return false;
   }
 
+  const actualAnalysisQualitySync = extractAnalysisQualityExpectations(frontendContent);
+  const mismatchedAnalysisQualityKeys = Object.keys(actualAnalysisQualitySync).filter((key) => {
+    const typedKey = key as keyof AnalysisQualitySyncExpectation;
+    return actualAnalysisQualitySync[typedKey] !== true;
+  });
+  if (mismatchedAnalysisQualityKeys.length > 0) {
+    console.log('❌ Analysis quality contract typing is OUT OF SYNC!\n');
+    for (const key of mismatchedAnalysisQualityKeys) {
+      const typedKey = key as keyof AnalysisQualitySyncExpectation;
+      console.log(`  ${key}: actual=${actualAnalysisQualitySync[typedKey]}`);
+    }
+    console.log('\n👉 Run: npm run generate:frontend-types');
+    return false;
+  }
+
+    const outOfSyncFragments = findOutOfSyncContractFragments(frontendContent, [
+    { name: 'conclusionContract.ts', content: frontendContractFragment(conclusionContractContent) },
+      { name: 'evidenceContract.ts', content: frontendContractFragment(evidenceContractContent) },
+    { name: 'claimVerification.ts', content: frontendContractFragment(claimVerificationContent) },
+    {
+      name: 'identityContract.ts',
+      content: frontendContractFragment(identityContractContent, { removeTraceTimestampAlias: true }),
+    },
+  ]);
+  if (outOfSyncFragments.length > 0) {
+    console.log('❌ Analysis quality contract source fragments are OUT OF SYNC!\n');
+    for (const name of outOfSyncFragments) {
+      console.log(`  ${name}: generated frontend fragment does not match backend source`);
+    }
+    console.log('\n👉 Run: npm run generate:frontend-types');
+    return false;
+  }
+
   // Additional check: verify file was generated (not manually edited)
   const hasAutoGenComment = frontendContent.includes('AUTO-GENERATED from backend/src/types/dataContract.ts');
   if (!hasAutoGenComment) {
@@ -280,6 +383,7 @@ async function checkTypesSync(): Promise<boolean> {
   console.log(`  DisplayLevel: ${types.displayLevels.split(' | ').length} values`);
   console.log(`  DisplayFormat: ${types.displayFormats.split(' | ').length} values`);
   console.log('  ConclusionContract: synced (sceneId/clusterPolicy + analysis_completed reference)');
+  console.log('  AnalysisQualityContracts: synced (Evidence/Verifier/Identity + SSE fields)');
 
   return true;
 }

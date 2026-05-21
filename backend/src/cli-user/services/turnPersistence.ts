@@ -13,6 +13,7 @@
  * touches one place.
  */
 
+import * as path from 'path';
 import type { CliPaths, SessionPaths } from '../io/paths';
 import type { Renderer } from '../repl/renderer';
 import type { CliSessionConfig, CliSessionIndexEntry } from '../types';
@@ -20,6 +21,7 @@ import type { RunTurnOutput } from './cliAnalyzeService';
 import {
   writeConfig,
   writeConclusion,
+  writeJsonFile,
   writeReportHtml,
   writeTurnReportHtml,
   writeTurnMarkdown,
@@ -58,6 +60,7 @@ export function commitTurnOutputs(input: CommitTurnInput): void {
 
   writeConclusion(sp, conclusion);
   writeTurnMarkdown(sp, turn, reportAppendix?.markdown ? `${turnMarkdown}\n\n${reportAppendix.markdown}` : turnMarkdown);
+  writeAnalysisQualitySidecars(sp, turn, result);
 
   let turnReportPath: string | undefined;
   const reportHtml = result.reportHtml && reportAppendix?.html
@@ -87,6 +90,14 @@ export function commitTurnOutputs(input: CommitTurnInput): void {
     confidence: result.result.confidence,
     rounds: result.result.rounds,
     durationMs: result.result.totalDurationMs,
+    claimVerification: result.result.claimVerificationResult
+      ? {
+        status: result.result.claimVerificationResult.status,
+        checkedClaimCount: result.result.claimVerificationResult.checkedClaimCount,
+        unsupportedClaimCount: result.result.claimVerificationResult.unsupportedClaimCount,
+        issueCount: result.result.claimVerificationResult.issues?.length || 0,
+      }
+      : undefined,
   });
   renderer.printCompletion({
     reportPath: reportPathForUser,
@@ -95,6 +106,16 @@ export function commitTurnOutputs(input: CommitTurnInput): void {
     sessionId,
     success: result.result.success,
   });
+}
+
+function writeAnalysisQualitySidecars(sp: SessionPaths, turn: number, result: RunTurnOutput): void {
+  const turnPrefix = path.join(sp.turnsDir, String(turn).padStart(3, '0'));
+  writeJsonFile(sp, sp.claimSupport, result.result.claimSupport || []);
+  writeJsonFile(sp, `${turnPrefix}.claim-support.json`, result.result.claimSupport || []);
+  writeJsonFile(sp, sp.claimVerification, result.result.claimVerificationResult || null);
+  writeJsonFile(sp, `${turnPrefix}.claim-verification.json`, result.result.claimVerificationResult || null);
+  writeJsonFile(sp, sp.identityResolutions, result.result.identityResolutions || []);
+  writeJsonFile(sp, `${turnPrefix}.identity-resolutions.json`, result.result.identityResolutions || []);
 }
 
 function appendHtmlToBody(html: string, appendixHtml: string): string {

@@ -91,6 +91,32 @@ function snapshot(overrides: Partial<AnalysisResultSnapshot>): AnalysisResultSna
         references: [{ evidenceRefId: 'env-a', sourceRef: '表 1' }],
       }],
     },
+    claimSupport: [{
+      claimId: 'Q1',
+      kind: 'numeric',
+      text: 'Startup analyzed',
+      anchors: [],
+      supportLevel: 'verified',
+    }],
+    claimVerificationResult: {
+      schemaVersion: 'claim_verifier@1',
+      status: 'passed',
+      policy: 'record_only',
+      passed: true,
+      checkedClaimCount: 1,
+      unsupportedClaimCount: 0,
+      claimResults: [{ claimId: 'Q1', status: 'verified' }],
+      issues: [],
+    },
+    identityResolutions: [{
+      version: 'identity_contract@1',
+      identityRefId: 'identity-a',
+      target: { traceId: 'trace-a', source: 'derived' },
+      status: 'verified',
+      processes: [],
+      threads: [],
+      warnings: [],
+    }],
     metrics: [
       {
         key: 'startup.total_ms',
@@ -150,6 +176,18 @@ describe('AnalysisResultSnapshotRepository', () => {
     }));
     expect(loaded?.conclusionContract).toEqual(expect.objectContaining({
       claims: [expect.objectContaining({ id: 'Q1' })],
+    }));
+    expect(loaded?.claimSupport?.[0]).toEqual(expect.objectContaining({
+      claimId: 'Q1',
+      supportLevel: 'verified',
+    }));
+    expect(loaded?.claimVerificationResult).toEqual(expect.objectContaining({
+      schemaVersion: 'claim_verifier@1',
+      status: 'passed',
+    }));
+    expect(loaded?.identityResolutions?.[0]).toEqual(expect.objectContaining({
+      identityRefId: 'identity-a',
+      status: 'verified',
     }));
     expect(loaded?.metrics).toHaveLength(1);
     expect(loaded?.metrics[0]).toEqual(expect.objectContaining({

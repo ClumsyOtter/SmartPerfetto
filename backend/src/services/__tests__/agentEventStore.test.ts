@@ -121,4 +121,32 @@ describe('agent event store', () => {
       db.close();
     }
   });
+
+  it('preserves quota_exceeded terminal status from analysis_completed payloads', () => {
+    persistSerializedAgentEvent(scope({ runId: 'run-quota', sessionId: 'session-quota' }), {
+      cursor: 1,
+      eventType: 'analysis_completed',
+      eventData: JSON.stringify({
+        type: 'analysis_completed',
+        data: {
+          terminalRunStatus: 'quota_exceeded',
+          partial: true,
+        },
+      }),
+      createdAt: 1_777_000_002_000,
+    });
+
+    const db = openEnterpriseDb();
+    try {
+      expect(db.prepare('SELECT status, completed_at FROM analysis_runs WHERE id = ?').get('run-quota')).toEqual({
+        status: 'quota_exceeded',
+        completed_at: 1_777_000_002_000,
+      });
+      expect(db.prepare('SELECT status FROM analysis_sessions WHERE id = ?').get('session-quota')).toEqual({
+        status: 'quota_exceeded',
+      });
+    } finally {
+      db.close();
+    }
+  });
 });

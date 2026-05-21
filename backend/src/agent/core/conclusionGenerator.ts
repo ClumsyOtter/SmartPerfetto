@@ -19,6 +19,8 @@ import type { JankCauseSummary, JankCluster } from './jankCauseSummarizer';
 import type {
   ConclusionClusterFrameListMode,
   ConclusionClusterOutputMode,
+  ConclusionClaimKind,
+  ConclusionClaimSupportLevel,
   ConclusionContract,
   ConclusionContractClaimItem,
   ConclusionContractClaimReference,
@@ -2133,18 +2135,80 @@ function parseClaimReferenceFromRecord(record: Record<string, unknown>): Conclus
   const rowSelector = parseClaimRowSelector(readValueFromAliases(record, ['rowSelector', 'row_selector']));
   const column = String(readValueFromAliases(record, ['column', 'col']) || '').trim();
   const value = parseClaimScalar(readValueFromAliases(record, ['value']));
+  const artifactId = String(readValueFromAliases(record, ['artifactId', 'artifact_id']) || '').trim();
+  const sourceArtifactId = String(readValueFromAliases(record, ['sourceArtifactId', 'source_artifact_id']) || '').trim();
 
-  if (!evidenceRefId && !sourceRef && !sourceToolCallId) return null;
+  if (!evidenceRefId && !sourceRef && !sourceToolCallId && !artifactId && !sourceArtifactId) return null;
 
   return {
-    evidenceRefId,
+    ...(evidenceRefId ? { evidenceRefId } : {}),
     ...(rowIndex !== undefined ? { rowIndex } : {}),
     ...(rowSelector ? { rowSelector } : {}),
     ...(column ? { column } : {}),
     ...(value !== undefined ? { value } : {}),
     ...(sourceRef ? { sourceRef } : {}),
     ...(sourceToolCallId ? { sourceToolCallId } : {}),
+    ...(artifactId ? { artifactId } : {}),
+    ...(sourceArtifactId ? { sourceArtifactId } : {}),
   };
+}
+
+function parseClaimKind(value: unknown): ConclusionClaimKind | undefined {
+  const normalized = String(value || '').trim();
+  const allowed: ConclusionClaimKind[] = [
+    'numeric',
+    'categorical',
+    'time_range',
+    'identity',
+    'causal',
+    'comparison',
+    'inference',
+    'recommendation',
+  ];
+  return allowed.includes(normalized as ConclusionClaimKind)
+    ? normalized as ConclusionClaimKind
+    : undefined;
+}
+
+function parseClaimSupportLevel(value: unknown): ConclusionClaimSupportLevel | undefined {
+  const normalized = String(value || '').trim();
+  const allowed: ConclusionClaimSupportLevel[] = ['verified', 'partial', 'inference', 'unsupported'];
+  return allowed.includes(normalized as ConclusionClaimSupportLevel)
+    ? normalized as ConclusionClaimSupportLevel
+    : undefined;
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value
+    .map(item => String(item || '').trim())
+    .filter(Boolean);
+  return out.length > 0 ? Array.from(new Set(out)) : undefined;
+}
+
+function parseClaimArtifactRefs(value: unknown): Array<{ artifactId: string; rowIndex?: number; rowSelector?: Record<string, unknown> }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs = value
+    .map(item => toRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .map(item => {
+      const artifactId = String(readValueFromAliases(item, [
+        'artifactId',
+        'artifact_id',
+        'sourceArtifactId',
+        'source_artifact_id',
+      ]) || '').trim();
+      if (!artifactId) return undefined;
+      const rowIndex = parseNumberFromUnknown(readValueFromAliases(item, ['rowIndex', 'row_index']));
+      const rowSelector = toRecord(readValueFromAliases(item, ['rowSelector', 'row_selector'])) || undefined;
+      return {
+        artifactId,
+        ...(rowIndex !== undefined ? { rowIndex } : {}),
+        ...(rowSelector ? { rowSelector } : {}),
+      };
+    })
+    .filter((item): item is { artifactId: string; rowIndex?: number; rowSelector?: Record<string, unknown> } => Boolean(item));
+  return refs.length > 0 ? refs : undefined;
 }
 
 function parseClaimItemsFromUnknown(value: unknown): ConclusionContractClaimItem[] {
@@ -2165,7 +2229,8 @@ function parseClaimItemsFromUnknown(value: unknown): ConclusionContractClaimItem
           .map(ref => parseClaimReferenceFromRecord(ref))
           .filter((ref): ref is ConclusionContractClaimReference => Boolean(ref))
       : [];
-    if (references.length === 0) return;
+    const artifactRefs = parseClaimArtifactRefs(readValueFromAliases(record, ['artifactRefs', 'artifact_refs']));
+    if (references.length === 0 && (!artifactRefs || artifactRefs.length === 0)) return;
 
     const claimId = String(readValueFromAliases(record, ['id', 'claimId', 'claim_id']) || '').trim();
     const conclusionId = normalizeConclusionId(
@@ -2173,12 +2238,19 @@ function parseClaimItemsFromUnknown(value: unknown): ConclusionContractClaimItem
       idx + 1
     );
     const text = String(readValueFromAliases(record, ['text', 'statement', 'claim']) || '').trim() || `claim ${idx + 1}`;
+    const kind = parseClaimKind(readValueFromAliases(record, ['kind', 'claimKind', 'claim_kind']));
+    const supportLevel = parseClaimSupportLevel(readValueFromAliases(record, ['supportLevel', 'support_level']));
+    const relationRefs = parseStringArray(readValueFromAliases(record, ['relationRefs', 'relation_refs']));
 
     claims.push({
       ...(claimId ? { id: claimId } : {}),
       conclusionId,
       text,
+      ...(kind ? { kind } : {}),
       references,
+      ...(artifactRefs ? { artifactRefs } : {}),
+      ...(relationRefs ? { relationRefs } : {}),
+      ...(supportLevel ? { supportLevel } : {}),
     });
   });
   return claims;
@@ -2189,6 +2261,8 @@ function formatClaimReferenceMarkdown(ref: ConclusionContractClaimReference): st
   if (ref.evidenceRefId) parts.push(`evidence_ref_id=${ref.evidenceRefId}`);
   if (ref.sourceRef) parts.push(`source_ref=${ref.sourceRef}`);
   if (ref.sourceToolCallId) parts.push(`source_tool_call_id=${ref.sourceToolCallId}`);
+  if (ref.artifactId) parts.push(`artifact_id=${ref.artifactId}`);
+  if (ref.sourceArtifactId) parts.push(`source_artifact_id=${ref.sourceArtifactId}`);
   if (typeof ref.rowIndex === 'number') parts.push(`row_index=${ref.rowIndex}`);
   if (ref.rowSelector) parts.push(`row_selector=${JSON.stringify(ref.rowSelector)}`);
   if (ref.column) parts.push(`column=${ref.column}`);
@@ -2577,26 +2651,36 @@ function sanitizeConclusionContract(
     .map((item, idx) => {
       const references = (item.references || [])
         .map(ref => ({
-          evidenceRefId: sanitizeText(ref.evidenceRefId),
+          ...(ref.evidenceRefId ? { evidenceRefId: sanitizeText(ref.evidenceRefId) } : {}),
           ...(typeof ref.rowIndex === 'number' && Number.isFinite(ref.rowIndex) ? { rowIndex: ref.rowIndex } : {}),
           ...(ref.rowSelector ? { rowSelector: parseClaimRowSelector(ref.rowSelector) } : {}),
           ...(ref.column ? { column: sanitizeText(ref.column) } : {}),
           ...(ref.value !== undefined ? { value: parseClaimScalar(ref.value) } : {}),
           ...(ref.sourceRef ? { sourceRef: sanitizeText(ref.sourceRef) } : {}),
           ...(ref.sourceToolCallId ? { sourceToolCallId: sanitizeText(ref.sourceToolCallId) } : {}),
+          ...(ref.artifactId ? { artifactId: sanitizeText(ref.artifactId) } : {}),
+          ...(ref.sourceArtifactId ? { sourceArtifactId: sanitizeText(ref.sourceArtifactId) } : {}),
         }))
         .filter(ref => (
-          (ref.evidenceRefId || ref.sourceRef || ref.sourceToolCallId) &&
+          (ref.evidenceRefId || ref.sourceRef || ref.sourceToolCallId || ref.artifactId || ref.sourceArtifactId) &&
           (ref.value === undefined || typeof ref.value === 'string' || typeof ref.value === 'number' || typeof ref.value === 'boolean')
         )) as ConclusionContractClaimReference[];
+      const kind = parseClaimKind(item.kind);
+      const artifactRefs = parseClaimArtifactRefs(item.artifactRefs);
+      const relationRefs = parseStringArray(item.relationRefs);
+      const supportLevel = parseClaimSupportLevel(item.supportLevel);
       return {
         ...(item.id ? { id: sanitizeText(item.id) } : {}),
         ...(item.conclusionId ? { conclusionId: normalizeConclusionId(item.conclusionId, idx + 1) } : {}),
         text: sanitizeText(item.text) || `claim ${idx + 1}`,
+        ...(kind ? { kind } : {}),
         references,
+        ...(artifactRefs ? { artifactRefs } : {}),
+        ...(relationRefs ? { relationRefs } : {}),
+        ...(supportLevel ? { supportLevel } : {}),
       };
     })
-    .filter(item => item.text && item.references.length > 0)
+    .filter(item => item.text && (item.references.length > 0 || Boolean(item.artifactRefs?.length)))
     .slice(0, 50);
 
   const uncertainties = dedupe(contract.uncertainties).slice(0, 6);
@@ -3672,7 +3756,7 @@ function buildInsightFirstPrompt(params: {
   }
   parts.push('- evidence_chain 必须按 C1/C2/C3 对齐（C1=结论1）：每项包含 conclusion_id 和 evidence 文本，且包含至少 1 个 evidence id（ev_xxxxxxxxxxxx）。');
   parts.push('- claims 必须列出结论中出现的关键数值/实体判断，用于前端逐句核验；没有可核验数据时传空数组。');
-  parts.push('- claims 每项包含：id(Q1...), conclusion_id(C1...), text, references。');
+  parts.push('- claims 每项包含：id(Q1...), conclusion_id(C1...), text, kind, references；kind 从 numeric/categorical/time_range/identity/causal/comparison/inference/recommendation 中选择。');
   parts.push('- claims[].references 每项包含：evidence_ref_id（优先使用 data:* 证据 ID）, source_ref（如 表 1/摘要 1）, source_tool_call_id（如可见）, row_index（0-based，不是第几行的 1-based 编号）, row_selector（行号不稳定时使用）, column, value。');
   parts.push('- metadata 可包含 confidence（0-100 或 0-1）与 rounds（正整数）。');
   parts.push('- metadata 可包含 cluster_policy 对象：{ output_mode: required|optional|none, frame_list_mode: none|top|full, max_frames_per_cluster?: number }。');

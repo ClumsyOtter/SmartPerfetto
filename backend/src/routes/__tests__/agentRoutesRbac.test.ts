@@ -83,6 +83,51 @@ function restoreEnvValue(key: string, value: string | undefined): void {
   }
 }
 
+function minimalSessionSnapshot(
+  sessionId: string,
+  traceId: string,
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'quota_exceeded',
+): any {
+  const now = Date.now();
+  return {
+    version: 1,
+    snapshotTimestamp: now,
+    sessionId,
+    traceId,
+    conversationSteps: [],
+    queryHistory: [{ turn: 1, query: 'resume this persisted session', timestamp: now }],
+    conclusionHistory: [],
+    agentDialogue: [],
+    agentResponses: [],
+    dataEnvelopes: [],
+    hypotheses: [],
+    analysisNotes: [],
+    analysisPlan: null,
+    planHistory: [],
+    uncertaintyFlags: [],
+    runSequence: 1,
+    conversationOrdinal: 0,
+    activeRun: {
+      runId: `run-${sessionId}-1`,
+      requestId: `req-${sessionId}-1`,
+      sequence: 1,
+      query: 'resume this persisted session',
+      startedAt: now - 100,
+      completedAt: now,
+      status,
+    },
+    lastRun: {
+      runId: `run-${sessionId}-1`,
+      requestId: `req-${sessionId}-1`,
+      sequence: 1,
+      query: 'resume this persisted session',
+      startedAt: now - 100,
+      completedAt: now,
+      status,
+    },
+  };
+}
+
 afterEach(async () => {
   jest.restoreAllMocks();
   setTraceProcessorServiceForTests(null);
@@ -280,12 +325,12 @@ describe('agent route RBAC', () => {
       const scope = { tenantId: 'tenant-a', workspaceId: 'workspace-a', userId: 'analyst-user' };
       leaseStore = getTraceProcessorLeaseStore();
       const leases = leaseStore.listLeases(scope, { traceId });
-      expect(leases).toHaveLength(1);
-      expect(leases[0]).toMatchObject({
+      const analysisLease = leases.find(lease => lease.id === res.body.leaseId);
+      expect(analysisLease).toMatchObject({
         id: res.body.leaseId,
         mode: 'isolated',
       });
-      expect(['active', 'idle']).toContain(leases[0].state);
+      expect(['active', 'idle']).toContain(analysisLease?.state);
     } finally {
       leaseStore?.close();
       setTraceProcessorLeaseStoreForTests(null);
@@ -656,6 +701,195 @@ describe('agent route RBAC', () => {
       });
     } finally {
       sessionContextManager.remove('session-resume-integration');
+      SessionPersistenceService.resetForTests();
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves quota_exceeded status when resuming from a persisted run snapshot', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-resume-quota-'));
+    const traceId = 'trace-resume-quota';
+    const sessionId = 'session-resume-quota';
+    try {
+      const tracePath = path.join(tmpDir, `${traceId}.trace`);
+      await fs.writeFile(tracePath, 'trace bytes');
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+      process.env.UPLOAD_DIR = path.join(tmpDir, 'uploads');
+      SessionPersistenceService.resetForTests();
+
+      await writeTraceMetadata({
+        id: traceId,
+        filename: `${traceId}.trace`,
+        size: 11,
+        uploadedAt: new Date().toISOString(),
+        status: 'ready',
+        path: tracePath,
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      });
+      setTraceProcessorServiceForTests({
+        getOrLoadTrace: jest.fn(async () => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+      } as any);
+
+      const context = new EnhancedSessionContext(sessionId, traceId);
+      context.addTurn('resume this persisted session', {
+        primaryGoal: 'resume_quota',
+        aspects: ['agent_resume'],
+        expectedOutputType: 'diagnosis',
+        complexity: 'moderate',
+      });
+      const persistence = SessionPersistenceService.getInstance();
+      persistence.saveSession({
+        id: sessionId,
+        traceId,
+        traceName: `${traceId}.trace`,
+        question: 'resume this persisted session',
+        createdAt: Date.now() - 1000,
+        updatedAt: Date.now(),
+        messages: [],
+        metadata: {
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          userId: 'analyst-user',
+        },
+      });
+      expect(persistence.saveSessionStateSnapshot(
+        sessionId,
+        minimalSessionSnapshot(sessionId, traceId, 'quota_exceeded'),
+        {
+          sessionContext: context,
+          owner: {
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            userId: 'analyst-user',
+          },
+        },
+      )).toBe(true);
+
+      const resumeRes = await analystHeaders(request(makeApp()).post('/api/agent/v1/resume'))
+        .send({ sessionId, traceId });
+
+      expect(resumeRes.status).toBe(200);
+      expect(resumeRes.body).toEqual(expect.objectContaining({
+        success: true,
+        sessionId,
+        traceId,
+        restored: true,
+        status: 'quota_exceeded',
+      }));
+    } finally {
+      sessionContextManager.remove(sessionId);
+      SessionPersistenceService.resetForTests();
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not restore an interrupted running snapshot as completed', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-resume-running-'));
+    const traceId = 'trace-resume-running';
+    const sessionId = 'session-resume-running';
+    try {
+      const tracePath = path.join(tmpDir, `${traceId}.trace`);
+      await fs.writeFile(tracePath, 'trace bytes');
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+      process.env.UPLOAD_DIR = path.join(tmpDir, 'uploads');
+      SessionPersistenceService.resetForTests();
+
+      await writeTraceMetadata({
+        id: traceId,
+        filename: `${traceId}.trace`,
+        size: 11,
+        uploadedAt: new Date().toISOString(),
+        status: 'ready',
+        path: tracePath,
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      });
+      setTraceProcessorServiceForTests({
+        getOrLoadTrace: jest.fn(async () => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+      } as any);
+
+      const context = new EnhancedSessionContext(sessionId, traceId);
+      context.addTurn(
+        'previous completed analysis',
+        {
+          primaryGoal: 'previous_completed',
+          aspects: ['agent_resume'],
+          expectedOutputType: 'diagnosis',
+          complexity: 'moderate',
+        },
+        {
+          success: true,
+          findings: [],
+          message: 'previous completed conclusion',
+          confidence: 0.8,
+        },
+      );
+      const persistence = SessionPersistenceService.getInstance();
+      persistence.saveSession({
+        id: sessionId,
+        traceId,
+        traceName: `${traceId}.trace`,
+        question: 'resume running session',
+        createdAt: Date.now() - 1000,
+        updatedAt: Date.now(),
+        messages: [],
+        metadata: {
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          userId: 'analyst-user',
+        },
+      });
+      expect(persistence.saveSessionStateSnapshot(
+        sessionId,
+        minimalSessionSnapshot(sessionId, traceId, 'running'),
+        {
+          sessionContext: context,
+          owner: {
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            userId: 'analyst-user',
+          },
+        },
+      )).toBe(true);
+
+      const resumeRes = await analystHeaders(request(makeApp()).post('/api/agent/v1/resume'))
+        .send({ sessionId, traceId });
+
+      expect(resumeRes.status).toBe(200);
+      expect(resumeRes.body).toEqual(expect.objectContaining({
+        success: true,
+        sessionId,
+        traceId,
+        restored: true,
+        status: 'failed',
+      }));
+    } finally {
+      sessionContextManager.remove(sessionId);
       SessionPersistenceService.resetForTests();
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

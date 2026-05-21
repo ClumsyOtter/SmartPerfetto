@@ -15,6 +15,7 @@ import { skillRegistry } from '../services/skillEngine/skillLoader';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { createDataEnvelope, displayResultToEnvelope } from '../types/dataContract';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
+import type { IdentityResolutionV1 } from '../types/identityContract';
 import type { StreamingUpdate } from '../agent/types';
 import { phaseMatchesCall } from './types';
 import type { SqlSchemaEntry, SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanAspectWaiver, PlanPhase, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
@@ -1720,6 +1721,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               injected,
               traceProvenance,
               producer,
+              processIdentityWarning,
             );
           }
           return {
@@ -1750,7 +1752,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         }
 
         if (emitUpdate && success && result.columns.length > 0) {
-          emittedEvidence = emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected, traceProvenance, producer);
+          emittedEvidence = emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected, traceProvenance, producer, processIdentityWarning);
         } else if (emitUpdate && !success) {
           emittedEvidence = emitSqlDiagnosticDataEnvelope(
             emitUpdate,
@@ -1759,6 +1761,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             injected,
             traceProvenance,
             producer,
+            processIdentityWarning,
             outputLanguage,
           );
         }
@@ -1801,6 +1804,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           undefined,
           traceProvenance,
           producer,
+          undefined,
           outputLanguage,
         ) : undefined;
         emitUpdate?.({
@@ -1937,6 +1941,10 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           { skillId, params: effectiveParams },
           localize(outputLanguage, `调用 Skill ${skillId}，收集本阶段结构化证据。`, `Run Skill ${skillId} to collect structured evidence for this phase.`),
         );
+        const skillTraceProvenance = buildTraceProcessorQueryProvenance({
+          traceId,
+          traceSide: 'current',
+        });
 
         emitUpdate?.({
           type: 'progress',
@@ -1979,13 +1987,91 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           logSqlErrorFixPair(errorPair, knowledgeScope).catch(() => {});
         }
 
+        // Artifact mode stores displayResults before emitting DataEnvelopes so
+        // evidence meta can carry the same artifact ids that the model sees.
+        let artifacts: NonNullable<ReturnType<ArtifactStore['generateCompactSummary']>>[] | undefined;
+        let diagnosticsArtifactId: string | undefined;
+        let synthesizeArtifacts: Array<{ artifactId: string; stepId: string; rowCount: number; columns: string[] }> | undefined;
+        const artifactIdsByStepId = new Map<string, string>();
+        if (artifactStore && result.displayResults?.length) {
+          artifacts = result.displayResults.map(dr => {
+            const artId = artifactStore.store({
+              skillId: result.skillId || skillId,
+              stepId: dr.stepId,
+              layer: dr.layer,
+              title: dr.title,
+              data: dr.data,
+              diagnostics: undefined,
+              planPhaseId: producer.planPhaseId,
+              planPhaseTitle: producer.planPhaseTitle,
+              planPhaseGoal: producer.planPhaseGoal,
+              sourceToolCallId: producer.sourceToolCallId,
+              paramsHash: producer.paramsHash,
+              identityResolution: result.identityResolution,
+            });
+            if (dr.stepId) artifactIdsByStepId.set(dr.stepId, artId);
+            const summary = artifactStore.generateCompactSummary(artId);
+            return summary;
+          }).filter((summary): summary is NonNullable<ReturnType<ArtifactStore['generateCompactSummary']>> => Boolean(summary));
+        }
+
+        // Store diagnostics as a separate artifact if present, even for
+        // diagnostics-only skill results that do not emit displayResults.
+        if (artifactStore && result.diagnostics && Array.isArray(result.diagnostics) && result.diagnostics.length > 0) {
+          diagnosticsArtifactId = artifactStore.store({
+            skillId: result.skillId || skillId,
+            stepId: '_diagnostics',
+            layer: 'diagnosis',
+            title: `${skillId} diagnostics`,
+            data: { columns: ['diagnostic'], rows: result.diagnostics.map((d: any) => [d]) },
+            diagnostics: result.diagnostics,
+            planPhaseId: producer.planPhaseId,
+            planPhaseTitle: producer.planPhaseTitle,
+            planPhaseGoal: producer.planPhaseGoal,
+            sourceToolCallId: producer.sourceToolCallId,
+            paramsHash: producer.paramsHash,
+            identityResolution: result.identityResolution,
+          });
+        }
+
+        // Store synthesizeData entries as artifacts too — these contain the
+        // raw step data that would otherwise overflow token limits.
+        if (artifactStore && result.synthesizeData && Array.isArray(result.synthesizeData) && result.synthesizeData.length > 0) {
+          synthesizeArtifacts = result.synthesizeData
+            .filter((sd: any) => sd.data && sd.success !== false)
+            .map((sd: any) => {
+              const normalizedData = normalizeSynthesizeDataForStorage(sd.data);
+              const artId = artifactStore.store({
+                skillId: result.skillId || skillId,
+                stepId: sd.stepId,
+                layer: sd.layer || 'synthesize',
+                title: sd.stepName || sd.stepId,
+                data: normalizedData,
+                planPhaseId: producer.planPhaseId,
+                planPhaseTitle: producer.planPhaseTitle,
+                planPhaseGoal: producer.planPhaseGoal,
+                sourceToolCallId: producer.sourceToolCallId,
+                paramsHash: producer.paramsHash,
+                identityResolution: result.identityResolution,
+              });
+              return {
+                artifactId: artId,
+                stepId: sd.stepId,
+                rowCount: normalizedData.rows?.length ?? 0,
+                columns: normalizedData.columns ?? [],
+              };
+            });
+        }
+
         if (emitUpdate && result.displayResults?.length) {
           emitSkillDataEnvelopes(
             result.displayResults as SkillDisplayResult[],
             result.skillId || skillId,
             emitUpdate,
-            undefined,
+            skillTraceProvenance,
             producer,
+            result.identityResolution,
+            artifactIdsByStepId,
           );
         }
 
@@ -2026,75 +2112,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           }
         }
 
-        // Artifact mode: store displayResults AND synthesizeData as artifacts, return compact references
-        if (artifactStore && result.displayResults?.length) {
-          const artifacts = result.displayResults.map(dr => {
-            const artId = artifactStore.store({
-              skillId: result.skillId || skillId,
-              stepId: dr.stepId,
-              layer: dr.layer,
-              title: dr.title,
-              data: dr.data,
-              diagnostics: undefined,
-              planPhaseId: producer.planPhaseId,
-              planPhaseTitle: producer.planPhaseTitle,
-              planPhaseGoal: producer.planPhaseGoal,
-              sourceToolCallId: producer.sourceToolCallId,
-              paramsHash: producer.paramsHash,
-            });
-            const summary = artifactStore.generateCompactSummary(artId);
-            return summary;
-          });
-
-          // Store diagnostics as a separate artifact if present
-          let diagnosticsArtifactId: string | undefined;
-          if (result.diagnostics && Array.isArray(result.diagnostics) && result.diagnostics.length > 0) {
-            diagnosticsArtifactId = artifactStore.store({
-              skillId: result.skillId || skillId,
-              stepId: '_diagnostics',
-              layer: 'diagnosis',
-              title: `${skillId} diagnostics`,
-              data: { columns: ['diagnostic'], rows: result.diagnostics.map((d: any) => [d]) },
-              diagnostics: result.diagnostics,
-              planPhaseId: producer.planPhaseId,
-              planPhaseTitle: producer.planPhaseTitle,
-              planPhaseGoal: producer.planPhaseGoal,
-              sourceToolCallId: producer.sourceToolCallId,
-              paramsHash: producer.paramsHash,
-            });
-          }
-
-          // Store synthesizeData entries as artifacts too — these contain the raw step data
-          // (e.g. batch_frame_root_cause with 487 rows) that would otherwise overflow token limits.
-          // Claude can fetch them on demand via fetch_artifact with pagination.
-          let synthesizeArtifacts: Array<{ artifactId: string; stepId: string; rowCount: number; columns: string[] }> | undefined;
-          if (result.synthesizeData && Array.isArray(result.synthesizeData) && result.synthesizeData.length > 0) {
-            synthesizeArtifacts = result.synthesizeData
-              .filter((sd: any) => sd.data && sd.success !== false)
-              .map((sd: any) => {
-                // synthesizeData entries have data as array-of-objects or { columns, rows }
-                const normalizedData = normalizeSynthesizeDataForStorage(sd.data);
-                const artId = artifactStore.store({
-                  skillId: result.skillId || skillId,
-                  stepId: sd.stepId,
-                  layer: sd.layer || 'synthesize',
-                  title: sd.stepName || sd.stepId,
-                  data: normalizedData,
-                  planPhaseId: producer.planPhaseId,
-                  planPhaseTitle: producer.planPhaseTitle,
-                  planPhaseGoal: producer.planPhaseGoal,
-                  sourceToolCallId: producer.sourceToolCallId,
-                  paramsHash: producer.paramsHash,
-                });
-                return {
-                  artifactId: artId,
-                  stepId: sd.stepId,
-                  rowCount: normalizedData.rows?.length ?? 0,
-                  columns: normalizedData.columns ?? [],
-                };
-              });
-          }
-
+        // Artifact mode: return compact references whenever any fetchable
+        // artifact was created.
+        if (artifactStore && (artifacts?.length || diagnosticsArtifactId || synthesizeArtifacts?.length)) {
           return {
             content: [{
               type: 'text' as const,
@@ -2103,6 +2123,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 skillId: result.skillId,
                 skillName: result.skillName,
                 ...(result.error ? { error: result.error } : {}),
+                ...(result.identityResolution ? { identityResolution: result.identityResolution } : {}),
                 artifacts,
                 ...(diagnosticsArtifactId ? { diagnosticsArtifactId } : {}),
                 ...(synthesizeArtifacts && synthesizeArtifacts.length > 0
@@ -2124,6 +2145,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               skillId: result.skillId,
               skillName: result.skillName,
               ...(result.error ? { error: result.error } : {}),
+              ...(result.identityResolution ? { identityResolution: result.identityResolution } : {}),
               ...(vendorOverrideHint ? { vendorOverride: vendorOverrideHint } : {}),
               displayResults: result.displayResults?.map(dr => ({
                 stepId: dr.stepId,
@@ -2484,7 +2506,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         success: true,
         detail: effectiveDetail,
         ...result,
-        sourceToolCallId: producer.sourceToolCallId,
+        sourceToolCallId: result?.sourceToolCallId || producer.sourceToolCallId,
+        fetchedByToolCallId: producer.sourceToolCallId,
         paramsHash: producer.paramsHash,
         planPhaseId: producer.planPhaseId,
         planPhaseTitle: producer.planPhaseTitle,
@@ -4253,6 +4276,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               injected,
               traceProvenance,
               producer,
+              processIdentityWarning,
             );
           }
           const text = JSON.stringify({
@@ -4286,6 +4310,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             injected,
             traceProvenance,
             producer,
+            processIdentityWarning,
           );
         } else if (emitUpdate && !success) {
           emittedEvidence = emitSqlDiagnosticDataEnvelope(
@@ -4295,6 +4320,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             injected,
             traceProvenance,
             producer,
+            processIdentityWarning,
           );
         }
 
@@ -4332,6 +4358,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           undefined,
           traceProvenance,
           producer,
+          undefined,
           outputLanguage,
         ) : undefined;
         return {
@@ -4411,8 +4438,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           traceSide: 'reference',
         });
         const [currentResult, refResult] = await Promise.all([
-          skillExecutor.execute(skillId, traceId, effectiveParams),
-          skillExecutor.execute(skillId, referenceTraceId, refParams),
+          skillExecutor.execute(skillId, traceId, effectiveParams, { __traceSide: 'current' }),
+          skillExecutor.execute(skillId, referenceTraceId, refParams, { __traceSide: 'reference' }),
         ]);
         const compareDuration = Date.now() - compareStart;
 
@@ -4441,6 +4468,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               sourceToolCallId: `${baseProducer.sourceToolCallId}:current`,
               producerReason: localize(outputLanguage, `当前 Trace 对比 Skill ${skillId} 结果。`, `Current trace result for comparison Skill ${skillId}.`),
             },
+            currentResult.identityResolution,
           );
         }
         if (emitUpdate && refResult.displayResults?.length) {
@@ -4454,6 +4482,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               sourceToolCallId: `${baseProducer.sourceToolCallId}:reference`,
               producerReason: localize(outputLanguage, `参考 Trace 对比 Skill ${skillId} 结果。`, `Reference trace result for comparison Skill ${skillId}.`),
             },
+            refResult.identityResolution,
           );
         }
 
@@ -4477,6 +4506,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             stepCount: currentResult.displayResults?.length || 0,
             steps: buildStepSummary(currentResult.displayResults || []),
             diagnosticCount: currentResult.diagnostics?.length || 0,
+            identityResolution: currentResult.identityResolution,
             error: currentResult.error,
           },
           reference: {
@@ -4487,6 +4517,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             stepCount: refResult.displayResults?.length || 0,
             steps: buildStepSummary(refResult.displayResults || []),
             diagnosticCount: refResult.diagnostics?.length || 0,
+            identityResolution: refResult.identityResolution,
             error: refResult.error,
           },
           alignment: {
@@ -4740,6 +4771,7 @@ function emitSqlDataEnvelope(
   stdlibInjectedModules?: string[],
   traceProvenance?: TraceProcessorQueryProvenance,
   producer?: EvidenceProducerContext,
+  processIdentityWarning?: string,
 ): { evidenceRefId: string; queryHash: string } {
   const { evidenceRefId, queryHash } = stableSqlEvidenceRefId(sql, columns, rows, traceProvenance, producer);
   const envelope = createDataEnvelope(
@@ -4759,6 +4791,7 @@ function emitSqlDataEnvelope(
       traceId: traceProvenance?.traceId,
       queryHash,
       ...producerEnvelopeOptions(producer),
+      processIdentityWarning,
       intent: 'ad_hoc_sql_verification',
     },
   );
@@ -4788,6 +4821,7 @@ function emitSqlSummaryDataEnvelope(
   stdlibInjectedModules?: string[],
   traceProvenance?: TraceProcessorQueryProvenance,
   producer?: EvidenceProducerContext,
+  processIdentityWarning?: string,
 ): { evidenceRefId: string; queryHash: string } {
   const { evidenceRefId, queryHash } = stableSqlEvidenceRefId(
     sql,
@@ -4816,6 +4850,7 @@ function emitSqlSummaryDataEnvelope(
       traceId: traceProvenance?.traceId,
       queryHash,
       ...producerEnvelopeOptions(producer),
+      processIdentityWarning,
       intent: 'ad_hoc_sql_summary',
     },
   );
@@ -4845,6 +4880,7 @@ function emitSqlDiagnosticDataEnvelope(
   stdlibInjectedModules?: string[],
   traceProvenance?: TraceProcessorQueryProvenance,
   producer?: EvidenceProducerContext,
+  processIdentityWarning?: string,
   outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
 ): { evidenceRefId: string; queryHash: string } {
   const { evidenceRefId, queryHash } = stableSqlEvidenceRefId(
@@ -4875,6 +4911,7 @@ function emitSqlDiagnosticDataEnvelope(
       traceId: traceProvenance?.traceId,
       queryHash,
       ...producerEnvelopeOptions(producer),
+      processIdentityWarning,
       intent: 'ad_hoc_sql_diagnostic',
     },
   );
@@ -4913,12 +4950,20 @@ function emitSkillDataEnvelopes(
   emit: (update: StreamingUpdate) => void,
   traceProvenance?: TraceProcessorQueryProvenance,
   producer?: EvidenceProducerContext,
+  identityResolution?: IdentityResolutionV1,
+  artifactIdsByStepId?: Map<string, string>,
 ): void {
   const envelopes = displayResults
-    .filter(dr => Array.isArray(dr.data?.rows))
+    .filter(dr => Boolean(dr.data))
     .map(dr => {
       const explicitColumns = (dr as any).columnDefinitions;
-      const envelope = displayResultToEnvelope(dr as any, skillId, explicitColumns);
+      const drForEnvelope = {
+        ...(dr as any),
+        metadataConfig: (dr as any).metadataConfig || (Array.isArray((dr as any).metadataFields)
+          ? { fields: (dr as any).metadataFields }
+          : undefined),
+      };
+      const envelope = displayResultToEnvelope(drForEnvelope as any, skillId, explicitColumns);
       const evidenceRefId = stableSkillEvidenceRefId(
         skillId,
         envelope.meta.stepId,
@@ -4927,6 +4972,9 @@ function emitSkillDataEnvelopes(
         traceProvenance,
         producer,
       );
+      const artifactId = envelope.meta.stepId
+        ? artifactIdsByStepId?.get(envelope.meta.stepId)
+        : undefined;
       const withEvidence = {
         ...envelope,
         meta: {
@@ -4934,6 +4982,13 @@ function emitSkillDataEnvelopes(
           evidenceRefId,
           traceSide: traceProvenance?.traceSide,
           traceId: traceProvenance?.traceId,
+          ...(artifactId ? { artifactId, sourceArtifactId: artifactId } : {}),
+          ...(identityResolution ? {
+            identityRefId: identityResolution.identityRefId,
+            identityStatus: identityResolution.status,
+            identityWarnings: identityResolution.warnings,
+            identityResolution,
+          } : {}),
           ...producerEnvelopeOptions(producer),
           intent: 'skill_structured_result',
         },

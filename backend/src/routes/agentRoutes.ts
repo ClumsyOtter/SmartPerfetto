@@ -87,7 +87,7 @@ import { registerAgentResumeRoutes } from './agentResumeRoutes';
 import { registerAgentSessionCatalogRoutes } from './agentSessionCatalogRoutes';
 import { registerTeachingRoutes } from './agentTeachingRoutes';
 import { AssistantApplicationService } from '../assistant/application/assistantApplicationService';
-import { StreamProjector, SSE_RING_BUFFER_SIZE } from '../assistant/stream/streamProjector';
+import { StreamProjector, SSE_RING_BUFFER_SIZE, type BufferedSseEvent } from '../assistant/stream/streamProjector';
 import {
   appendReplayableSseEvent,
   hasTerminalReplayAfter,
@@ -114,6 +114,7 @@ import {
 } from '../assistant/application/agentAnalyzeSessionService';
 import { buildAssistantResultContract } from '../assistant/contracts/assistantResultContract';
 import { persistCompletedAnalysisResultSnapshot } from '../services/analysisResultSnapshotPipeline';
+import { runClaimVerification } from '../services/verifier/claimVerificationRunner';
 // Agent-Driven Architecture v2.0 - Intervention & Focus
 import type { UserDecision, AnalysisDirective } from '../agent/core/interventionController';
 import type { FocusInteraction } from '../agent/context/focusStore';
@@ -123,6 +124,10 @@ import {
   generateEventId,
   type DataEnvelope,
 } from '../types/dataContract';
+import type { ConclusionContract } from '../agent/core/conclusionContract';
+import type { ClaimSupportV1 } from '../types/evidenceContract';
+import type { ClaimVerificationResult } from '../types/claimVerification';
+import type { IdentityResolutionV1 } from '../types/identityContract';
 import { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { skillRegistry, ensureSkillRegistryInitialized } from '../services/skillEngine/skillLoader';
 import type { ConversationTurn, Finding, Intent } from '../agent/types';
@@ -410,6 +415,9 @@ interface AnalysisSession {
     response: any;
     timestamp: number;
   }>;
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
   conversationOrdinal: number;
   conversationSteps: Array<{
     eventId: string;
@@ -595,6 +603,57 @@ function sendReplayableSessionEvent(
   });
   streamProjector.sendEvent(res, eventType, payload, event.seqId);
   return event.seqId;
+}
+
+function appendAndPersistReplayableSessionEvent(
+  session: AnalysisSession,
+  eventType: string,
+  payload: unknown,
+): BufferedSseEvent {
+  const event = appendReplayableSseEvent(session, eventType, payload);
+  persistBufferedAgentEvent(session, {
+    cursor: event.seqId,
+    eventType: event.eventType,
+    eventData: event.eventData,
+    createdAt: Date.now(),
+  });
+  return event;
+}
+
+function writeBufferedSessionEvent(res: express.Response, event: BufferedSseEvent): void {
+  res.write(`id: ${event.seqId}\n`);
+  res.write(`event: ${event.eventType}\n`);
+  res.write(`data: ${event.eventData}\n\n`);
+}
+
+function loadPersistedCompletedAnalysisSseEvents(session: AnalysisSession): BufferedSseEvent[] {
+  const scope = agentEventScopeFromSession(session);
+  if (!scope) return [];
+  const events = listSerializedAgentEventsAfter(scope, scope.runId, 0)
+    .filter(event =>
+      event.eventType === 'snapshot_created' ||
+      event.eventType === 'analysis_completed' ||
+      event.eventType === 'scene_reconstruction_completed' ||
+      event.eventType === 'end')
+    .map(event => ({
+      seqId: event.cursor,
+      eventType: event.eventType,
+      eventData: event.eventData,
+    }));
+  if (!events.some(event => event.eventType === 'analysis_completed') ||
+      !events.some(event => event.eventType === 'end')) {
+    return [];
+  }
+  session.sseEventSeq = Math.max(session.sseEventSeq || 0, ...events.map(event => event.seqId));
+  const existing = new Set(session.sseEventBuffer.map(event => `${event.seqId}:${event.eventType}`));
+  for (const event of events) {
+    const key = `${event.seqId}:${event.eventType}`;
+    if (!existing.has(key)) session.sseEventBuffer.push(event);
+  }
+  if (session.sseEventBuffer.length > SSE_RING_BUFFER_SIZE) {
+    session.sseEventBuffer.splice(0, session.sseEventBuffer.length - SSE_RING_BUFFER_SIZE);
+  }
+  return events;
 }
 
 type TurnHistorySource = 'memory' | 'persistence';
@@ -836,6 +895,10 @@ function buildRecoveredResultFromContext(
     partial: turn.result.partial,
     terminationReason: turn.result.terminationReason as AgentRuntimeAnalysisResult['terminationReason'],
     terminationMessage: turn.result.terminationMessage,
+    conclusionContract: turn.result.conclusionContract as AgentRuntimeAnalysisResult['conclusionContract'],
+    claimSupport: turn.result.claimSupport,
+    claimVerificationResult: turn.result.claimVerificationResult,
+    identityResolutions: turn.result.identityResolutions,
   };
 }
 
@@ -1559,16 +1622,8 @@ function handleSessionStream(req: express.Request, res: express.Response, sessio
     recoverResultForSessionIfNeeded(sessionId, session);
     if (session.result) {
       sendAgentDrivenResult(res, session);
-      sendReplayableSessionEvent(
-        session,
-        res,
-        'end',
-        {
-          timestamp: Date.now(),
-          ...buildStreamObservability(session),
-        }
-      );
       res.end();
+      assistantAppService.removeSseClient(sessionId, res);
       return;
     }
   }
@@ -1669,16 +1724,36 @@ router.get('/:sessionId/status', (req, res) => {
           sceneId: sceneIdHint,
         }) ||
         undefined;
+      const qualityArtifacts = recoveredResult.claimSupport &&
+        recoveredResult.claimVerificationResult &&
+        recoveredResult.identityResolutions
+        ? {
+          claimSupport: recoveredResult.claimSupport,
+          claimVerificationResult: recoveredResult.claimVerificationResult,
+          identityResolutions: recoveredResult.identityResolutions,
+        }
+        : ensureAnalysisQualityArtifacts(session, conclusionContract, recoveredResult);
+      const completedPayload = ensureCompletedAnalysisResultPayload(session);
+      const finalArtifacts = completedPayload?.finalArtifacts;
+      const normalizedCompletedConclusion = completedPayload?.normalizedConclusion || conclusion;
+      const normalizedCompletedContract =
+        completedPayload?.normalizedConclusionContract || conclusionContract;
       response.result = {
-        answer: conclusion,
-        conclusion,
-        conclusionContract,
+        answer: normalizedCompletedConclusion,
+        conclusion: normalizedCompletedConclusion,
+        conclusionContract: normalizedCompletedContract,
+        claimSupport: qualityArtifacts.claimSupport,
+        claimVerificationResult: qualityArtifacts.claimVerificationResult,
+        identityResolutions: qualityArtifacts.identityResolutions,
         confidence: recoveredResult.confidence,
         totalDurationMs: recoveredResult.totalDurationMs,
         rounds: recoveredResult.rounds,
         partial: recoveredResult.partial,
         terminationReason: recoveredResult.terminationReason,
         terminationMessage: recoveredResult.terminationMessage,
+        reportUrl: finalArtifacts?.reportUrl,
+        reportError: finalArtifacts?.reportError,
+        resultSnapshotId: finalArtifacts?.resultSnapshotId,
         findings: recoveredResult.findings,
         findingsCount: recoveredResult.findings.length,
         resultContract,
@@ -2756,6 +2831,7 @@ registerAgentReportRoutes(router, {
   normalizeNarrativeForClient,
   buildClientFindings,
   buildSessionResultContract,
+  getCompletedPayload: ensureCompletedAnalysisResultPayload,
 });
 
 // ============================================================================
@@ -2850,9 +2926,15 @@ async function runAgentDrivenAnalysis(
       normalizeAgentDrivenUpdate(update),
     );
 
-    // Broadcast the original event so the frontend receives raw events
-    // (answer_token, thought, agent_response, conclusion, etc.) for rendering.
-    broadcastToAgentDrivenClients(sessionId, normalizedUpdate);
+    // Final narrative is emitted through analysis_completed after deterministic
+    // evidence/claim verification has run. Suppress early conclusion events so
+    // clients do not render an unverified terminal answer.
+    const shouldBroadcastOriginalUpdate =
+      normalizedUpdate.type !== 'conclusion' &&
+      normalizedUpdate.type !== 'answer_token';
+    if (shouldBroadcastOriginalUpdate) {
+      broadcastToAgentDrivenClients(sessionId, normalizedUpdate);
+    }
 
     // Also derive a conversation_step for the timeline/observability layer.
     const conversationStep = buildConversationStepUpdate(session, normalizedUpdate);
@@ -2905,7 +2987,7 @@ async function runAgentDrivenAnalysis(
     // (answer_token, thought, conclusion, etc.) are already broadcast above
     // and remapping would cause duplicate delivery to the frontend.
     const eventType = mapToAgentDrivenEventType(normalizedUpdate);
-    if (eventType !== normalizedUpdate.type) {
+    if (shouldBroadcastOriginalUpdate && eventType !== normalizedUpdate.type) {
       broadcastToAgentDrivenClients(sessionId, {
         type: eventType,
         content: normalizedUpdate.content,
@@ -2987,6 +3069,7 @@ async function runAgentDrivenAnalysis(
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);
 
     session.result = result;
+    delete (session as any).completedAnalysisFinalArtifacts;
     // Accumulate hypotheses across turns (deduplicate by id)
     const existingIds = new Set(session.hypotheses.map(h => h.id));
     for (const h of result.hypotheses) {
@@ -2999,10 +3082,6 @@ async function runAgentDrivenAnalysis(
       }
     }
     const terminalRunStatus = terminalRunStatusForResult(result);
-    session.status = terminalRunStatus === 'quota_exceeded'
-      ? 'quota_exceeded'
-      : result.success ? 'completed' : 'failed';
-    markSessionRunStatus(session, terminalRunStatus);
 
     // Record conclusion in cross-turn history
     if (!session.conclusionHistory) session.conclusionHistory = [];
@@ -3045,12 +3124,39 @@ async function runAgentDrivenAnalysis(
       }
     }
 
+    if (result.success || result.partial === true) {
+      const sceneIdHint = resolveConclusionSceneIdHint({
+        sessionId,
+        query,
+        findings: result.findings,
+      });
+      const normalizedConclusionContract = (
+        result.conclusionContract ||
+        deriveConclusionContractForNarrative(result.conclusion, {
+          mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
+          sceneId: sceneIdHint,
+        }) ||
+        undefined
+      ) as ConclusionContract | undefined;
+      if (normalizedConclusionContract) {
+        result.conclusionContract = normalizedConclusionContract;
+      }
+      ensureAnalysisQualityArtifacts(session, normalizedConclusionContract);
+    }
+
+    session.status = terminalRunStatus === 'quota_exceeded'
+      ? 'quota_exceeded'
+      : result.success ? 'completed' : 'failed';
+    markSessionRunStatus(session, terminalRunStatus);
+
     // Log completion details
     logger.info('AgentDrivenAnalysis', 'Agent-driven analysis completed', {
       confidence: result.confidence,
       rounds: result.rounds,
       findingsCount: result.findings.length,
       hypothesesCount: result.hypotheses.length,
+      claimSupportCount: result.claimSupport?.length || 0,
+      claimVerifierStatus: result.claimVerificationResult?.status,
       partial: result.partial,
       terminationReason: result.terminationReason,
       runId: session.activeRun?.runId,
@@ -3075,20 +3181,12 @@ async function runAgentDrivenAnalysis(
     // Send final result
     const clientCount = session.sseClients.length;
     logger.info('AgentRoutes', 'Sending agent-driven result', { clientCount });
+    ensureCompletedAnalysisSseEvents(session);
 
     session.sseClients.forEach((client, index) => {
       try {
         logger.info('AgentRoutes', `Sending agent-driven result to client ${index + 1}/${clientCount}`);
         sendAgentDrivenResult(client, session);
-        sendReplayableSessionEvent(
-          session,
-          client,
-          'end',
-          {
-            timestamp: Date.now(),
-            ...buildStreamObservability(session),
-          }
-        );
       } catch (e: any) {
         logger.error('AgentRoutes', `Error sending agent-driven result to client ${index + 1}`, e);
       }
@@ -4743,58 +4841,114 @@ function augmentConclusionUpdateWithEvidenceIndex(
   };
 }
 
-/**
- * Send agent-driven analysis result to SSE client
- */
-function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) {
-  const result = session.result;
-  if (!result) return;
-  const observability = buildStreamObservability(session);
-  const replayOnlyScene = isSceneReplayOnlyQuery(session.query);
-  const hasEvidenceBackedConclusion = result.success || result.partial === true;
-  const normalizedConclusion = replayOnlyScene
-    ? buildSceneReplayNarrative(session.scenes || [])
-    : hasEvidenceBackedConclusion ? appendEvidenceIndexIfMissing(
-      normalizeNarrativeForClient(result.conclusion),
-      session.dataEnvelopes || [],
-    ) : normalizeNarrativeForClient(result.conclusion);
-  const sceneIdHint = replayOnlyScene
-    ? undefined
-    : resolveConclusionSceneIdHint({
-      sessionId: session.sessionId,
-      query: session.query,
-      findings: result.findings,
-    });
-  // Fallback: re-derive contract if the orchestrator didn't populate it.
-  // Note: mode heuristic uses rounds (available here) as proxy for turnCount
-  // (which only the orchestrator knows). Both signal "multi-interaction" analysis.
-  const normalizedConclusionContract = replayOnlyScene
-    ? undefined
-    : hasEvidenceBackedConclusion ? (
-      result.conclusionContract ||
-      deriveConclusionContractForNarrative(result.conclusion, {
-        mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
-        sceneId: sceneIdHint,
-      }) ||
-      undefined
-    ) : undefined;
-  const resultForClient =
-    normalizedConclusion === result.conclusion && normalizedConclusionContract === result.conclusionContract
-      ? result
-      : { ...result, conclusion: normalizedConclusion, conclusionContract: normalizedConclusionContract };
-  const clientFindings = replayOnlyScene ? [] : buildClientFindings(result.findings, session.scenes || []);
-  const resultContract = buildSessionResultContract(session, clientFindings);
+function ensureAnalysisQualityArtifacts(
+  session: AnalysisSession,
+  conclusionContract?: ConclusionContract,
+  resultOverride?: AgentRuntimeAnalysisResult,
+): {
+  claimSupport?: ClaimSupportV1[];
+  claimVerificationResult?: ClaimVerificationResult;
+  identityResolutions?: IdentityResolutionV1[];
+} {
+  const result = resultOverride || session.result;
+  if (!result) return {};
 
-  // Generate HTML report
-  let reportUrl: string | undefined;
-  let reportError: string | undefined;
-  const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  let resultSnapshotId: string | undefined;
-  let resultSnapshotEventData: Record<string, unknown> | undefined;
-  let reportLease: TraceProcessorLeaseRecord | null = null;
-  if (!hasEvidenceBackedConclusion) {
-    reportError = `analysis did not complete successfully (${result.terminationReason || 'failed'})`;
+  if (
+    result.claimSupport &&
+    result.claimVerificationResult &&
+    result.identityResolutions
+  ) {
+    session.claimSupport = result.claimSupport;
+    session.claimVerificationResult = result.claimVerificationResult;
+    session.identityResolutions = result.identityResolutions;
+    const context = sessionContextManager.get(session.sessionId, session.traceId);
+    context?.annotateLatestCompletedTurn({
+      conclusionContract,
+      claimSupport: result.claimSupport,
+      claimVerificationResult: result.claimVerificationResult,
+      identityResolutions: result.identityResolutions,
+    });
+    return {
+      claimSupport: result.claimSupport,
+      claimVerificationResult: result.claimVerificationResult,
+      identityResolutions: result.identityResolutions,
+    };
+  }
+
+  const artifacts = runClaimVerification({
+    conclusionContract,
+    dataEnvelopes: session.dataEnvelopes || [],
+    comparisonReportSection: session.comparisonReportSection,
+    policy: 'record_only',
+  });
+
+  result.claimSupport = artifacts.claimSupport;
+  result.claimVerificationResult = artifacts.claimVerificationResult;
+  result.identityResolutions = artifacts.identityResolutions;
+  const context = sessionContextManager.get(session.sessionId, session.traceId);
+  context?.annotateLatestCompletedTurn({
+    conclusionContract,
+    claimSupport: artifacts.claimSupport,
+    claimVerificationResult: artifacts.claimVerificationResult,
+    identityResolutions: artifacts.identityResolutions,
+  });
+  session.claimSupport = artifacts.claimSupport;
+  session.claimVerificationResult = artifacts.claimVerificationResult;
+  session.identityResolutions = artifacts.identityResolutions;
+  return {
+    claimSupport: artifacts.claimSupport,
+    claimVerificationResult: artifacts.claimVerificationResult,
+    identityResolutions: artifacts.identityResolutions,
+  };
+}
+
+interface CompletedAnalysisFinalArtifacts {
+  reportId?: string;
+  reportUrl?: string;
+  reportError?: string;
+  resultSnapshotId?: string;
+  resultSnapshotEventData?: Record<string, unknown>;
+  generatedAt: number;
+}
+
+interface CompletedAnalysisResultPayload {
+  result: AgentRuntimeAnalysisResult;
+  replayOnlyScene: boolean;
+  normalizedConclusion: string;
+  normalizedConclusionContract?: ConclusionContract;
+  qualityArtifacts: {
+    claimSupport?: ClaimSupportV1[];
+    claimVerificationResult?: ClaimVerificationResult;
+    identityResolutions?: IdentityResolutionV1[];
+  };
+  clientFindings: ReturnType<typeof buildClientFindings>;
+  resultContract: ReturnType<typeof buildSessionResultContract>;
+  finalArtifacts: CompletedAnalysisFinalArtifacts;
+}
+
+function ensureCompletedAnalysisFinalArtifacts(
+  session: AnalysisSession,
+  input: {
+    result: AgentRuntimeAnalysisResult;
+    hasEvidenceBackedConclusion: boolean;
+    normalizedConclusion: string;
+    normalizedConclusionContract?: ConclusionContract;
+    qualityArtifacts: CompletedAnalysisResultPayload['qualityArtifacts'];
+    resultForClient: AgentRuntimeAnalysisResult;
+  },
+): CompletedAnalysisFinalArtifacts {
+  const cached = (session as any).completedAnalysisFinalArtifacts as CompletedAnalysisFinalArtifacts | undefined;
+  if (cached) return cached;
+
+  const result = input.result;
+  const finalArtifacts: CompletedAnalysisFinalArtifacts = { generatedAt: Date.now() };
+  let reportId: string | undefined;
+
+  if (!input.hasEvidenceBackedConclusion) {
+    finalArtifacts.reportError = `analysis did not complete successfully (${result.terminationReason || 'failed'})`;
   } else {
+    let reportLease: TraceProcessorLeaseRecord | null = null;
+    reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       if (enterpriseLeasesEnabled()) {
         const scope = leaseScopeFromSession(session);
@@ -4829,18 +4983,15 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       }
 
       const generator = getHTMLReportGenerator();
-      // Report assembly (cumulative findings dedup, empty-conclusion fallback,
-      // snapshot-first analysisNotes/Plan/Flags) lives in the shared builder so
-      // the CLI path produces identical output.
       const reportData = buildAgentDrivenReportData({
         session,
-        result: resultForClient as any,
+        result: input.resultForClient as any,
       });
       console.log(`[AgentRoutes] Generating HTML report, data keys:`, {
         hasResult: !!result,
-        conclusionLength: normalizedConclusion?.length || 0,
-        conclusionPreview: (normalizedConclusion || '').substring(0, 100),
-        hasConclusionContract: !!normalizedConclusionContract,
+        conclusionLength: input.normalizedConclusion?.length || 0,
+        conclusionPreview: (input.normalizedConclusion || '').substring(0, 100),
+        hasConclusionContract: !!input.normalizedConclusionContract,
         findingsCount: result.findings?.length || 0,
         hypothesesCount: session.hypotheses?.length || 0,
         dialogueCount: session.agentDialogue?.length || 0,
@@ -4852,11 +5003,11 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
         snapshotNotes: (session as any)._lastSnapshot?.analysisNotes?.length ?? 'n/a',
         snapshotPlan: !!(session as any)._lastSnapshot?.analysisPlan,
         snapshotFlags: (session as any)._lastSnapshot?.uncertaintyFlags?.length ?? 'n/a',
+        claimSupportCount: input.qualityArtifacts.claimSupport?.length || 0,
+        claimVerifierStatus: input.qualityArtifacts.claimVerificationResult?.status,
       });
 
       const html = generator.generateAgentDrivenHTML(reportData);
-
-      // Store report
       persistReport(reportId, {
         html,
         generatedAt: Date.now(),
@@ -4869,12 +5020,14 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
         visibility: 'private',
       });
 
-      reportUrl = `/api/reports/${reportId}`;
+      finalArtifacts.reportId = reportId;
+      finalArtifacts.reportUrl = `/api/reports/${reportId}`;
       console.log(`[AgentRoutes] Generated agent-driven HTML report: ${reportId} (${html.length} bytes)`);
     } catch (error: any) {
-      reportError = error.message || 'Unknown error';
+      reportId = undefined;
+      finalArtifacts.reportError = error.message || 'Unknown error';
       console.error('[AgentRoutes] Failed to generate agent-driven HTML report:', {
-        error: reportError,
+        error: finalArtifacts.reportError,
         stack: error.stack?.split('\n').slice(0, 5).join('\n'),
         resultConclusion: result?.conclusion ? `${result.conclusion.length} chars` : 'EMPTY/NULL',
         resultConfidence: result?.confidence,
@@ -4889,7 +5042,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
               scope,
               reportLease.id,
               'report_generation',
-              reportId,
+              finalArtifacts.reportId || reportId || 'report_generation',
             );
           } catch (releaseError: any) {
             console.warn(`[AgentRoutes] Failed to release report_generation lease ${reportLease.id}: ${releaseError.message}`);
@@ -4899,7 +5052,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     }
   }
 
-  if (hasEvidenceBackedConclusion) {
+  if (input.hasEvidenceBackedConclusion) {
     try {
       const resultSnapshot = persistCompletedAnalysisResultSnapshot({
         tenantId: session.tenantId,
@@ -4908,20 +5061,23 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
         traceId: session.traceId,
         sessionId: session.sessionId,
         runId: session.lastRun?.runId || session.activeRun?.runId,
-        reportId: reportUrl ? reportId : undefined,
+        reportId: finalArtifacts.reportId,
         query: session.query,
         traceLabel: session.traceId,
-        conclusion: normalizedConclusion,
-        conclusionContract: normalizedConclusionContract,
+        conclusion: input.normalizedConclusion,
+        conclusionContract: input.normalizedConclusionContract,
+        claimSupport: input.qualityArtifacts.claimSupport,
+        claimVerificationResult: input.qualityArtifacts.claimVerificationResult,
+        identityResolutions: input.qualityArtifacts.identityResolutions,
         confidence: result.confidence,
         partial: result.partial,
         terminationReason: result.terminationReason,
         terminationMessage: result.terminationMessage,
         dataEnvelopes: session.dataEnvelopes,
       });
-      resultSnapshotId = resultSnapshot?.id;
+      finalArtifacts.resultSnapshotId = resultSnapshot?.id;
       if (resultSnapshot) {
-        resultSnapshotEventData = {
+        finalArtifacts.resultSnapshotEventData = {
           snapshotId: resultSnapshot.id,
           status: resultSnapshot.status,
           sceneType: resultSnapshot.sceneType,
@@ -4944,25 +5100,123 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     }
   }
 
-  if (resultSnapshotEventData) {
-    sendReplayableSessionEvent(session, res, 'snapshot_created', {
+  (session as any).completedAnalysisFinalArtifacts = finalArtifacts;
+  return finalArtifacts;
+}
+
+function ensureCompletedAnalysisResultPayload(session: AnalysisSession): CompletedAnalysisResultPayload | undefined {
+  const result = session.result;
+  if (!result) return undefined;
+  const replayOnlyScene = isSceneReplayOnlyQuery(session.query);
+  const hasEvidenceBackedConclusion = result.success || result.partial === true;
+  const normalizedConclusion = replayOnlyScene
+    ? buildSceneReplayNarrative(session.scenes || [])
+    : hasEvidenceBackedConclusion ? appendEvidenceIndexIfMissing(
+      normalizeNarrativeForClient(result.conclusion),
+      session.dataEnvelopes || [],
+    ) : normalizeNarrativeForClient(result.conclusion);
+  const sceneIdHint = replayOnlyScene
+    ? undefined
+    : resolveConclusionSceneIdHint({
+      sessionId: session.sessionId,
+      query: session.query,
+      findings: result.findings,
+    });
+  const normalizedConclusionContract = replayOnlyScene
+    ? undefined
+    : hasEvidenceBackedConclusion ? (
+      result.conclusionContract ||
+      deriveConclusionContractForNarrative(result.conclusion, {
+        mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
+        sceneId: sceneIdHint,
+      }) ||
+      undefined
+    ) : undefined;
+  const qualityArtifacts = hasEvidenceBackedConclusion && !replayOnlyScene
+    ? ensureAnalysisQualityArtifacts(session, normalizedConclusionContract)
+    : {};
+  const resultForClient =
+    normalizedConclusion === result.conclusion &&
+      normalizedConclusionContract === result.conclusionContract &&
+      qualityArtifacts.claimSupport === result.claimSupport &&
+      qualityArtifacts.claimVerificationResult === result.claimVerificationResult &&
+      qualityArtifacts.identityResolutions === result.identityResolutions
+      ? result
+      : {
+        ...result,
+        conclusion: normalizedConclusion,
+        conclusionContract: normalizedConclusionContract,
+        ...qualityArtifacts,
+      };
+  const clientFindings = replayOnlyScene ? [] : buildClientFindings(result.findings, session.scenes || []);
+  const resultContract = buildSessionResultContract(session, clientFindings);
+  const finalArtifacts = ensureCompletedAnalysisFinalArtifacts(session, {
+    result,
+    hasEvidenceBackedConclusion,
+    normalizedConclusion,
+    normalizedConclusionContract,
+    qualityArtifacts,
+    resultForClient: resultForClient as AgentRuntimeAnalysisResult,
+  });
+  return {
+    result,
+    replayOnlyScene,
+    normalizedConclusion,
+    normalizedConclusionContract,
+    qualityArtifacts,
+    clientFindings,
+    resultContract,
+    finalArtifacts,
+  };
+}
+
+/**
+ * Send agent-driven analysis result to SSE client
+ */
+function ensureCompletedAnalysisSseEvents(session: AnalysisSession): BufferedSseEvent[] {
+  const cached = (session as any).completedAnalysisSseEvents as BufferedSseEvent[] | undefined;
+  if (cached?.length) return cached;
+  const persisted = loadPersistedCompletedAnalysisSseEvents(session);
+  if (persisted.length > 0) {
+    (session as any).completedAnalysisSseEvents = persisted;
+    return persisted;
+  }
+
+  const completedPayload = ensureCompletedAnalysisResultPayload(session);
+  if (!completedPayload) return [];
+  const {
+    result,
+    normalizedConclusion,
+    normalizedConclusionContract,
+    qualityArtifacts,
+    clientFindings,
+    resultContract,
+    finalArtifacts,
+  } = completedPayload;
+  const observability = buildStreamObservability(session);
+  const events: BufferedSseEvent[] = [];
+  if (finalArtifacts.resultSnapshotEventData) {
+    events.push(appendAndPersistReplayableSessionEvent(session, 'snapshot_created', {
       type: 'snapshot_created',
       architecture: 'agent-driven',
       ...observability,
-      data: resultSnapshotEventData,
+      data: finalArtifacts.resultSnapshotEventData,
       timestamp: Date.now(),
-    });
+    }));
   }
 
   // Send analysis_completed event with full result. Keep it replayable so a
   // reconnect between conclusion and report generation can recover reportUrl.
-  sendReplayableSessionEvent(session, res, 'analysis_completed', {
+  events.push(appendAndPersistReplayableSessionEvent(session, 'analysis_completed', {
     type: 'analysis_completed',
     architecture: 'agent-driven',
     ...observability,
     data: {
       conclusion: normalizedConclusion,
       conclusionContract: normalizedConclusionContract,
+      claimSupport: qualityArtifacts.claimSupport,
+      claimVerificationResult: qualityArtifacts.claimVerificationResult,
+      identityResolutions: qualityArtifacts.identityResolutions,
       confidence: result.confidence,
       rounds: result.rounds,
       totalDurationMs: result.totalDurationMs,
@@ -4982,8 +5236,8 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       agentDialogueCount: session.agentDialogue.length,
       conversationTimelineCount: session.conversationSteps.length,
       conversationTimeline: session.conversationSteps,
-      reportUrl,
-      reportError,
+      reportUrl: finalArtifacts.reportUrl,
+      reportError: finalArtifacts.reportError,
       comparisonReportSection: session.comparisonReportSection
         ? {
           source: session.comparisonReportSection.source,
@@ -4993,15 +5247,16 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
           evidencePack: session.comparisonReportSection.evidencePack,
         }
         : undefined,
-      resultSnapshotId,
+      resultSnapshotId: finalArtifacts.resultSnapshotId,
       observability,
+      terminalRunStatus: session.status === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
     },
     timestamp: Date.now(),
-  });
+  }));
 
   // Backward-compatible scene reconstruction payload (used by the legacy /scene-reconstruct clients).
   if ((session.scenes?.length || 0) > 0 || (session.trackEvents?.length || 0) > 0) {
-    sendReplayableSessionEvent(session, res, 'scene_reconstruction_completed', {
+    events.push(appendAndPersistReplayableSessionEvent(session, 'scene_reconstruction_completed', {
       type: 'scene_reconstruction_completed',
       ...observability,
       data: {
@@ -5029,7 +5284,20 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
         observability,
       },
       timestamp: Date.now(),
-    });
+    }));
+  }
+
+  events.push(appendAndPersistReplayableSessionEvent(session, 'end', {
+    timestamp: Date.now(),
+    ...observability,
+  }));
+  (session as any).completedAnalysisSseEvents = events;
+  return events;
+}
+
+function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) {
+  for (const event of ensureCompletedAnalysisSseEvents(session)) {
+    writeBufferedSessionEvent(res, event);
   }
 }
 

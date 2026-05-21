@@ -470,7 +470,10 @@ export function createToolFromSkill(
           }
         }
 
-        const dataEnvelopes = SkillExecutor.toDataEnvelopes(result);
+        const dataEnvelopes = SkillExecutor.toDataEnvelopes(result, undefined, {
+          traceId: context.traceId,
+          traceSide: 'current',
+        });
 
         return {
           success: result.success,

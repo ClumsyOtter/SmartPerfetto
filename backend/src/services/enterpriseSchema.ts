@@ -545,6 +545,9 @@ const MIGRATIONS: MigrationStep[] = [
           trace_metadata_json TEXT NOT NULL,
           summary_json TEXT NOT NULL,
           conclusion_contract_json TEXT,
+          claim_support_json TEXT,
+          claim_verification_json TEXT,
+          identity_resolutions_json TEXT,
           status TEXT NOT NULL,
           schema_version TEXT NOT NULL,
           created_at INTEGER NOT NULL,
@@ -679,6 +682,14 @@ const MIGRATIONS: MigrationStep[] = [
     version: 10,
     up: (db) => {
       addColumnIfMissing(db, 'analysis_result_snapshots', 'conclusion_contract_json', 'TEXT');
+    },
+  },
+  {
+    version: 11,
+    up: (db) => {
+      addColumnIfMissing(db, 'analysis_result_snapshots', 'claim_support_json', 'TEXT');
+      addColumnIfMissing(db, 'analysis_result_snapshots', 'claim_verification_json', 'TEXT');
+      addColumnIfMissing(db, 'analysis_result_snapshots', 'identity_resolutions_json', 'TEXT');
     },
   },
 ];

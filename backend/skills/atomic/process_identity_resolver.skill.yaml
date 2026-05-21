@@ -144,6 +144,22 @@ display:
       label: "关键线程"
       type: string
       format: truncate
+    - name: thread_utid
+      label: "命中线程 UTID"
+      type: number
+    - name: thread_tid
+      label: "命中线程 TID"
+      type: number
+    - name: thread_name
+      label: "命中线程"
+      type: string
+      format: truncate
+    - name: thread_role
+      label: "线程角色"
+      type: string
+    - name: thread_target_matched
+      label: "命中目标线程"
+      type: boolean
     - name: layer_packages
       label: "Layer 包名"
       type: string
@@ -233,6 +249,17 @@ sql: |
       MAX(CASE
         WHEN input.target_thread IS NOT NULL
           AND COALESCE(t.name, '') GLOB '*' || input.target_thread || '*'
+        THEN 1
+        WHEN LOWER(COALESCE(input.target_thread, '')) IN ('main', 'ui', 'app_main')
+          AND (t.is_main_thread = 1 OR t.tid = p.pid)
+        THEN 1
+        WHEN LOWER(COALESCE(input.target_thread, '')) IN ('renderthread', 'render_thread', 'render')
+          AND (
+            t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+            OR t.name GLOB '[0-9]*.ui'
+            OR t.name GLOB '[0-9]*.raster'
+            OR t.name GLOB 'Cr*Main'
+          )
         THEN 1 ELSE 0 END) AS target_thread_match,
       GROUP_CONCAT(DISTINCT CASE
         WHEN t.is_main_thread = 1 OR t.tid = p.pid
@@ -246,6 +273,96 @@ sql: |
     JOIN process p USING (upid)
     CROSS JOIN input
     GROUP BY t.upid
+  ),
+  thread_identity_candidates AS (
+    SELECT
+      t.upid,
+      t.utid,
+      t.tid,
+      COALESCE(t.name, '<unnamed>') AS thread_name,
+      CASE
+        WHEN t.is_main_thread = 1 OR t.tid = p.pid THEN 'app_main'
+        WHEN t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+          OR t.name GLOB '[0-9]*.ui'
+          OR t.name GLOB '[0-9]*.raster'
+          OR t.name GLOB 'Cr*Main'
+        THEN 'render_thread'
+        ELSE 'unknown'
+      END AS thread_role,
+      CASE
+        WHEN input.target_thread IS NOT NULL
+          AND COALESCE(t.name, '') GLOB '*' || input.target_thread || '*'
+        THEN 1
+        WHEN LOWER(COALESCE(input.target_thread, '')) IN ('main', 'ui', 'app_main')
+          AND (t.is_main_thread = 1 OR t.tid = p.pid)
+        THEN 1
+        WHEN LOWER(COALESCE(input.target_thread, '')) IN ('renderthread', 'render_thread', 'render')
+          AND (
+            t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+            OR t.name GLOB '[0-9]*.ui'
+            OR t.name GLOB '[0-9]*.raster'
+            OR t.name GLOB 'Cr*Main'
+          )
+        THEN 1 ELSE 0
+      END AS thread_target_matched,
+      ROW_NUMBER() OVER (
+        PARTITION BY t.upid
+        ORDER BY
+          CASE
+            WHEN input.target_thread IS NOT NULL
+              AND COALESCE(t.name, '') GLOB '*' || input.target_thread || '*'
+            THEN 0
+            WHEN LOWER(COALESCE(input.target_thread, '')) IN ('main', 'ui', 'app_main')
+              AND (t.is_main_thread = 1 OR t.tid = p.pid)
+            THEN 0
+            WHEN LOWER(COALESCE(input.target_thread, '')) IN ('renderthread', 'render_thread', 'render')
+              AND (
+                t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+                OR t.name GLOB '[0-9]*.ui'
+                OR t.name GLOB '[0-9]*.raster'
+                OR t.name GLOB 'Cr*Main'
+              )
+            THEN 0 ELSE 1
+          END,
+          CASE WHEN t.is_main_thread = 1 OR t.tid = p.pid THEN 0 ELSE 1 END,
+          CASE
+            WHEN t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+              OR t.name GLOB '[0-9]*.ui'
+              OR t.name GLOB '[0-9]*.raster'
+              OR t.name GLOB 'Cr*Main'
+            THEN 0 ELSE 1
+          END,
+          t.utid
+      ) AS thread_rank
+    FROM thread t
+    JOIN process p USING (upid)
+    CROSS JOIN input
+    WHERE
+      (input.target_thread IS NOT NULL AND COALESCE(t.name, '') GLOB '*' || input.target_thread || '*')
+      OR (LOWER(COALESCE(input.target_thread, '')) IN ('main', 'ui', 'app_main') AND (t.is_main_thread = 1 OR t.tid = p.pid))
+      OR (LOWER(COALESCE(input.target_thread, '')) IN ('renderthread', 'render_thread', 'render') AND (
+        t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+        OR t.name GLOB '[0-9]*.ui'
+        OR t.name GLOB '[0-9]*.raster'
+        OR t.name GLOB 'Cr*Main'
+      ))
+      OR t.is_main_thread = 1
+      OR t.tid = p.pid
+      OR t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+      OR t.name GLOB '[0-9]*.ui'
+      OR t.name GLOB '[0-9]*.raster'
+      OR t.name GLOB 'Cr*Main'
+  ),
+  thread_identity AS (
+    SELECT
+      upid,
+      utid AS thread_utid,
+      tid AS thread_tid,
+      thread_name,
+      thread_role,
+      thread_target_matched
+    FROM thread_identity_candidates
+    WHERE thread_rank = 1
   ),
   frame_rows AS (
     SELECT
@@ -326,6 +443,11 @@ sql: |
       COALESCE(ts.has_rendering_thread, 0) AS has_rendering_thread,
       COALESCE(ts.target_thread_match, 0) AS target_thread_match,
       ts.key_thread_names,
+      ti.thread_utid,
+      ti.thread_tid,
+      ti.thread_name,
+      ti.thread_role,
+      COALESCE(ti.thread_target_matched, 0) AS thread_target_matched,
       COALESCE(fs.frame_rows, 0) AS frame_rows,
       COALESCE(fs.jank_rows, 0) AS jank_rows,
       COALESCE(fs.layer_target_match, 0) AS layer_target_match,
@@ -342,6 +464,7 @@ sql: |
     FROM process_base pb
     CROSS JOIN input
     LEFT JOIN thread_summary ts USING (upid)
+    LEFT JOIN thread_identity ti USING (upid)
     LEFT JOIN frame_summary fs USING (upid)
     LEFT JOIN oom_summary os USING (upid)
     LEFT JOIN battery_top bt
@@ -367,7 +490,8 @@ sql: |
         CASE WHEN target_name IS NOT NULL AND COALESCE(process_name, '') GLOB target_name || '*' THEN 20 ELSE 0 END +
         CASE WHEN target_name IS NOT NULL AND COALESCE(cmdline, '') GLOB target_name || '*' THEN 20 ELSE 0 END +
         CASE WHEN target_name IS NOT NULL AND layer_target_match = 1 AND is_system_like_process = 0 THEN 15 ELSE 0 END +
-        CASE WHEN target_thread IS NOT NULL AND target_thread_match = 1 THEN 20 ELSE 0 END
+        CASE WHEN target_thread IS NOT NULL AND target_thread_match = 1 THEN 20 ELSE 0 END +
+        CASE WHEN target_name IS NULL AND target_upid IS NULL AND target_pid IS NULL AND target_thread IS NOT NULL AND target_thread_match = 1 THEN 35 ELSE 0 END
       ) AS identity_score,
       (
         CASE WHEN frame_rows > 0 THEN 15 ELSE 0 END +
@@ -469,6 +593,11 @@ sql: |
     ROUND(battery_top_ns / 1e6, 2) AS battery_top_ms,
     thread_count,
     key_thread_names,
+    thread_utid,
+    thread_tid,
+    thread_name,
+    thread_role,
+    thread_target_matched,
     layer_packages,
     CASE
       WHEN package_name IS NOT NULL

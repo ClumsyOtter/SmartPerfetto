@@ -238,6 +238,9 @@ describe('enterprise core schema', () => {
       'trace_metadata_json',
       'summary_json',
       'conclusion_contract_json',
+      'claim_support_json',
+      'claim_verification_json',
+      'identity_resolutions_json',
       'status',
       'schema_version',
       'created_at',
@@ -465,6 +468,7 @@ describe('enterprise core schema', () => {
       { version: 8 },
       { version: 9 },
       { version: 10 },
+      { version: 11 },
     ]);
   });
 
