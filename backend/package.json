@@ -29,6 +29,9 @@
   "engines": {
     "node": ">=24.0.0 <25.0.0"
   },
+  "volta": {
+    "node": "24.15.0"
+  },
   "scripts": {
     "predev": "npm run trace-processor:ensure",
     "dev": "tsx watch --clear-screen=false src/index.ts",

@@ -27,6 +27,31 @@ smartperfetto_node_modules_abi() {
   node -p "process.versions.modules" 2>/dev/null || printf 'unknown\n'
 }
 
+smartperfetto_prepend_path_once() {
+  local dir="$1"
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) export PATH="$dir:$PATH" ;;
+  esac
+}
+
+smartperfetto_find_volta() {
+  local candidate
+  if command -v volta >/dev/null 2>&1; then
+    command -v volta
+    return 0
+  fi
+
+  for candidate in "$HOME/.volta/bin/volta" "/opt/homebrew/bin/volta" "/usr/local/bin/volta"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 smartperfetto_load_nvm() {
   local nvm_sh=""
   if [ -n "${NVM_DIR:-}" ] && [ -s "$NVM_DIR/nvm.sh" ]; then
@@ -50,11 +75,36 @@ smartperfetto_load_nvm() {
   command -v nvm >/dev/null 2>&1
 }
 
+smartperfetto_try_switch_volta() {
+  local project_root="$1"
+  local node_spec="$2"
+  local volta_bin
+
+  volta_bin="$(smartperfetto_find_volta)" || return 1
+
+  export VOLTA_HOME="${VOLTA_HOME:-$HOME/.volta}"
+  smartperfetto_prepend_path_once "$VOLTA_HOME/bin"
+
+  echo "Switching to Node.js $node_spec via Volta..."
+  "$volta_bin" fetch "node@$node_spec" >/dev/null 2>&1 || true
+
+  (
+    cd "$project_root" || exit 1
+    [ "$(smartperfetto_node_major)" = "$SMARTPERFETTO_NODE_MAJOR" ]
+  )
+}
+
 smartperfetto_try_switch_node() {
-  local node_spec="$1"
+  local project_root="$1"
+  local node_spec="$2"
+
+  if smartperfetto_try_switch_volta "$project_root" "$node_spec"; then
+    return 0
+  fi
 
   if smartperfetto_load_nvm; then
     echo "Switching to Node.js $node_spec via nvm..."
+    unset npm_config_prefix
     nvm install "$node_spec" || return 1
     nvm use "$node_spec" || return 1
     return 0
@@ -93,7 +143,7 @@ smartperfetto_ensure_node() {
   fi
   echo "=============================================="
 
-  if smartperfetto_try_switch_node "$node_spec"; then
+  if smartperfetto_try_switch_node "$project_root" "$node_spec"; then
     current_major="$(smartperfetto_node_major)"
     if [ "$current_major" = "$SMARTPERFETTO_NODE_MAJOR" ]; then
       echo "Using node: $(node -v) ($(command -v node))"
@@ -104,9 +154,12 @@ smartperfetto_ensure_node() {
   echo "ERROR: failed to activate Node.js $SMARTPERFETTO_NODE_MAJOR."
   echo ""
   echo "Install and use Node.js $SMARTPERFETTO_NODE_MAJOR, then rerun:"
+  echo "  volta setup && volta fetch node@$node_spec"
   echo "  nvm install $node_spec && nvm use $node_spec"
   echo ""
-  echo "If nvm is installed but not initialized, initialize one of these paths first:"
+  echo "If a version manager is installed but not initialized, initialize one of these paths first:"
+  echo "  export VOLTA_HOME=\"\$HOME/.volta\""
+  echo "  export PATH=\"\$VOLTA_HOME/bin:\$PATH\""
   echo "  export NVM_DIR=\"\$HOME/.nvm\""
   echo "  [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\""
   echo '  [ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && . "/opt/homebrew/opt/nvm/nvm.sh"'
