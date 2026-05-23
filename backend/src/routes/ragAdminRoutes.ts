@@ -200,15 +200,15 @@ export function createRagAdminRoutes(store?: RagStore, services: RagAdminRouteSe
     });
   });
 
-  router.post('/codebases/preview', requireCodebaseScope('codebase:manage'), (req, res) => {
+  router.post('/codebases/preview', requireCodebaseScope('codebase:manage'), async (req, res) => {
     const {rootPath} = (req.body ?? {}) as {rootPath?: string};
     if (!rootPath || typeof rootPath !== 'string') {
       return res.status(400).json({success: false, error: '`rootPath` is required'});
     }
-    res.json({success: true, preview: sanitizePreview(gate.preview(rootPath))});
+    res.json({success: true, preview: sanitizePreview(await gate.preview(rootPath))});
   });
 
-  router.post('/codebases/register', requireCodebaseScope('codebase:manage'), (req, res) => {
+  router.post('/codebases/register', requireCodebaseScope('codebase:manage'), async (req, res) => {
     const {
       kind = 'app_source',
       displayName,
@@ -228,7 +228,7 @@ export function createRagAdminRoutes(store?: RagStore, services: RagAdminRouteSe
     if (!rootPath || typeof rootPath !== 'string') {
       return res.status(400).json({success: false, error: '`rootPath` is required'});
     }
-    const preview = gate.preview(rootPath);
+    const preview = await gate.preview(rootPath);
     if (preview.blocked) {
       return res.status(400).json({
         success: false,
@@ -344,18 +344,18 @@ export function createRagAdminRoutes(store?: RagStore, services: RagAdminRouteSe
     });
   });
 
-  router.post('/codebases/:id/reindex', requireCodebaseScope('codebase:manage'), (req, res) => {
+  router.post('/codebases/:id/reindex', requireCodebaseScope('codebase:manage'), async (req, res) => {
     const codebaseId = routeParam(req.params.id);
     const ref = registry.get(codebaseId);
     if (!ref) {
       return res.status(404).json({success: false, error: `Codebase '${codebaseId}' not found`});
     }
     try {
-      const result = ref.kind === 'kernel_source'
+      const result = await (ref.kind === 'kernel_source'
         ? kernelSourceIngester.ingest(codebaseId, req.body ?? {})
         : ref.kind === 'aosp'
           ? aospSourceIngester.ingest(codebaseId, req.body ?? {})
-          : appSourceIngester.ingest(codebaseId, req.body ?? {});
+          : appSourceIngester.ingest(codebaseId, req.body ?? {}));
       res.json({success: true, result});
     } catch (error) {
       res.status(400).json({

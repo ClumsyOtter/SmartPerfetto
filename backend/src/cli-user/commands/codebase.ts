@@ -41,7 +41,7 @@ export async function runCodebasePreviewCommand(args: CodebaseCommandBaseArgs & 
   const rootPath = path.resolve(args.rootPath);
   bootstrap({envFile: args.envFile, sessionDir: args.sessionDir});
   const gate = new PathSecurityGate({allowlistRoots: [rootPath]});
-  const preview = gate.preview(rootPath);
+  const preview = await gate.preview(rootPath);
   console.log(JSON.stringify({
     blocked: preview.blocked,
     blockedReason: preview.blockedReason,
@@ -67,7 +67,7 @@ export async function runCodebaseRegisterCommand(args: CodebaseCommandBaseArgs &
   const rootPath = path.resolve(args.rootPath);
   bootstrap({envFile: args.envFile, sessionDir: args.sessionDir});
   const gate = new PathSecurityGate({allowlistRoots: [rootPath]});
-  const preview = gate.preview(rootPath);
+  const preview = await gate.preview(rootPath);
   if (preview.blocked) {
     console.error(`blocked: ${preview.blockedReason ?? 'path security gate rejected root'}`);
     return 1;
@@ -109,11 +109,11 @@ export async function runCodebaseReindexCommand(args: CodebaseCommandBaseArgs & 
   }
   const store = new RagStore(ragStorePath());
   const gate = new PathSecurityGate({allowlistRoots: [ref.rootRealpath]});
-  const result = ref.kind === 'kernel_source'
+  const result = await (ref.kind === 'kernel_source'
     ? new KernelSourceIngester(store, registry, gate).ingest(args.codebaseId)
     : ref.kind === 'aosp'
       ? new AospSourceIngester(store, registry, gate).ingest(args.codebaseId)
-      : new AppSourceIngester(store, registry, gate).ingest(args.codebaseId);
+      : new AppSourceIngester(store, registry, gate).ingest(args.codebaseId));
   console.log(JSON.stringify(result, null, 2));
   return result.errors.length > 0 ? 1 : 0;
 }
