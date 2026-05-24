@@ -35,8 +35,15 @@ cd backend && npm run build
 - Preserve unrelated local changes; inspect git status before editing.
 - Do not hardcode prompt content in TypeScript. Use `backend/strategies/` and
   `backend/skills/`.
+- Do not hardcode MCP tool lists, Skill counts, scene lists, or AI output
+  sections in adapter docs or TypeScript. Use the registry/frontmatter files
+  and the reference docs as the source of truth.
 - Do not manually edit generated files; fix the generator/template and
   regenerate.
+- Preserve the AI output contract: final conclusions, evidence/claim
+  verification, identity resolution, reports, snapshots, CLI output, and
+  frontend chat projection are separate surfaces. Keep chat readable without
+  deleting report/snapshot provenance.
 - `frontend/` is consumed by Docker, `./start.sh`, and portable packages. After
   AI Assistant plugin UI changes, verify in dev mode and run
   `./scripts/update-frontend.sh`.
@@ -49,6 +56,20 @@ cd backend && npm run build
   `.claude/rules/release.md` plus `.claude/rules/git.md` and
   `.claude/rules/testing.md`.
 
+## Independent Review Gate
+
+For non-trivial tasks such as multi-file edits, architecture changes, or complex
+logic, use Plan -> independent read-only review -> Revise -> Execute.
+
+- If the primary agent is not Codex and a Codex review tool is available, prefer
+  Codex read-only review.
+- If the primary agent is Codex, do not call Codex to review itself. Prefer a
+  read-only reviewer sub-agent/tool.
+- If no stable reviewer is available, or the reviewer times out twice, use a
+  structured self-review plus post-diff review, note the fallback, and rely on
+  the relevant verification tier from `.claude/rules/testing.md`.
+- Reviewers must not edit files.
+
 ## Detailed Rules
 
 Read the relevant detailed rule before touching that area:
@@ -57,6 +78,7 @@ Read the relevant detailed rule before touching that area:
 - `.claude/rules/frontend.md`
 - `.claude/rules/prompts.md`
 - `.claude/rules/skills.md`
+- `.claude/rules/codebase-aware.md`
 - `.claude/rules/product-surface.md`
 - `.claude/rules/release.md`
 - `.claude/rules/testing.md`

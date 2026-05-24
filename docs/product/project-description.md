@@ -25,7 +25,7 @@ LLMs alone cannot solve this because:
 3. **Structured methodology** — Root cause analysis requires multi-phase, cross-subsystem reasoning
 4. **Reliability** — Same trace should produce consistent conclusions
 
-SmartPerfetto solves this by giving the selected runtime precise "instruments" (SQL queries via trace_processor) and structured "methodology" (scene-specific strategies), letting the LLM focus on reasoning and synthesis.
+SmartPerfetto solves this by giving the selected runtime precise "instruments" (SQL queries and YAML Skills via trace_processor), structured "methodology" (scene-specific strategies and final-report contracts), and evidence contracts that keep final claims tied to trace data. The LLM focuses on reasoning and synthesis while deterministic services preserve auditability.
 
 ## Architecture
 
@@ -45,10 +45,10 @@ CLI (smp / smartperfetto) ───────────► same backend runt
 |-----------|---------|
 | **Runtime Selector** | Chooses Claude Agent SDK or OpenAI Agents SDK per session/provider |
 | **ClaudeRuntime / OpenAIRuntime** | Main orchestrators: scene classification → dynamic system prompt → tool loop → verification/report contract |
-| **MCP / Tool Registry** | 20 tools bridging the runtime to trace data (SQL, Skills, schema lookup, planning, hypothesis, comparison) |
-| **Skill Engine** | 164 YAML-defined analysis pipelines producing layered results (L1 overview → L4 deep root cause) |
-| **Scene Classifier** | Keyword-based routing (<1ms) to 12 scene-specific strategies |
-| **Verifier** | 4-layer quality check (heuristic + plan + hypothesis + LLM) with reflection retry |
+| **MCP / Tool Registry** | Registry-driven tools bridging the runtime to trace data (SQL, Skills, schema lookup, planning, hypothesis, memory, code-aware lookup, comparison) |
+| **Skill Engine** | 200+ YAML-defined analysis pipelines producing layered results (L1 overview → L4 deep root cause); inventory is discovered from `backend/skills/` |
+| **Scene Classifier** | Strategy-frontmatter-driven routing to scene-specific strategies |
+| **Result Quality Pipeline** | Final-report contract, evidence contract, claim verification, identity resolution, report generation, CLI artifacts, and analysis-result snapshots |
 | **Artifact Store** | Caches skill results as compact references (~3000 tokens saved per invocation) |
 | **SQL Summarizer** | Compresses SQL results to stats + samples (~85% token savings) |
 
@@ -68,32 +68,23 @@ User Query: "分析滑动卡顿"
     │   ├─ lookup_knowledge("cpu-scheduler") → background knowledge
     │   └─ submit_hypothesis → resolve_hypothesis → evidence-driven conclusions
     │
-    ├─ 4-Layer Verification → evidence check, plan adherence, hypothesis resolution
+    ├─ Result quality pipeline → final-report contract + claim/evidence verification
     │
-    └─ Structured Report → findings + causal chains (Mermaid) + optimization suggestions
+    └─ Structured output → chat projection + HTML report + CLI artifacts + snapshot
         └─ SSE streaming → Frontend real-time display
 ```
 
-### Skill Categories (164 total)
+### Skill Inventory
 
-| Category | Count | Description |
-|----------|-------|-------------|
-| **Atomic** | 87 | Single SQL query (VSync detection, CPU topology, GPU metrics, ...) |
-| **Composite** | 29 | Multi-step analysis (scrolling, startup, ANR, memory, ...) |
-| **Pipeline** | 28 | Rendering pipeline detection + teaching (28 Android render architectures) |
-| **Module** | 18 | Module analysis (app/framework/hardware/kernel) |
-| **Deep** | 2 | CPU profiling, callstack analysis |
+Skill inventory is discovered from `backend/skills/**/*.skill.yaml`. The durable categories are atomic, composite, comparison, deep, pipeline, module, and authoring templates. Use this command when a precise local count is needed:
 
-### MCP Tools (20)
+```bash
+rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
+```
 
-**Always-on (9):**
-execute_sql, invoke_skill, list_skills, detect_architecture, lookup_sql_schema, query_perfetto_source, list_stdlib_modules, lookup_knowledge, recall_patterns
+### MCP Tools
 
-**Conditional — Full analysis (8):**
-submit_plan, update_plan_phase, revise_plan, submit_hypothesis, resolve_hypothesis, write_analysis_note, fetch_artifact, flag_uncertainty
-
-**Conditional — Comparison mode (3):**
-execute_sql_on, compare_skill, get_comparison_context
+The tool surface is registry-driven and request-shaped. Quick analysis exposes a small evidence-oriented subset; full analysis adds planning, hypothesis, knowledge, memory, baseline, and artifact tools; code-aware requests add source lookup and patch proposal tools; comparison requests add current/reference trace tools. See [MCP Tools Reference](../reference/mcp-tools.en.md).
 
 ## Technology Stack
 
@@ -109,17 +100,18 @@ execute_sql_on, compare_skill, get_comparison_context
 
 1. **Content-driven, not code-driven** — Analysis strategies in `.strategy.md`, skills in `.skill.yaml`; new scenarios = new files, zero code changes
 2. **Runtime as autonomous orchestrator** — The selected SDK runtime decides which tools to call, not hardcoded pipelines
-3. **Evidence-first verification** — 4-layer check ensures every CRITICAL finding has data backing
+3. **Evidence-first verification** — final claims are tied to evidence contracts, claim verification, identity resolution, or explicit uncertainty
 4. **Layered results (L1-L4)** — Progressive detail from overview to per-frame root cause
-5. **DataEnvelope v2.0** — Schema-driven rendering; frontend auto-renders 164 skills without per-skill UI code
+5. **DataEnvelope v2.0** — Schema-driven rendering; frontend auto-renders Skill output without per-skill UI code
 6. **Token engineering** — Artifact store + SQL summarizer + progressive prompt dropping keeps context efficient
+7. **Surface separation** — Live chat stays readable while HTML reports, CLI artifacts, and snapshots keep provenance
 
 ## Getting Started
 
 ```bash
 # Configure
 cp backend/.env.example backend/.env
-# Edit with your Anthropic API key
+# Configure a Provider Manager profile or edit env provider credentials
 
 # Start for normal use
 ./start.sh
@@ -128,6 +120,7 @@ cp backend/.env.example backend/.env
 # Or install the standalone CLI
 npm install -g @gracker/smartperfetto
 smp doctor
+smp capture presets
 ```
 
 For current architecture and release boundaries, see [Architecture Overview](../architecture/overview.en.md), [Agent Runtime](../architecture/agent-runtime.en.md), and [Release Runbook](../reference/release.en.md).

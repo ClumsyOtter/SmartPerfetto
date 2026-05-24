@@ -15,6 +15,7 @@ be checked against the public product surfaces below.
 | Docker | `docker compose -f docker-compose.hub.yml up -d` | users who do not want host Node.js | Cannot read host Claude Code local auth |
 | Portable app | GitHub release assets | non-developer Windows/macOS/Linux users | Bundles Node.js 24, native deps, backend, `frontend/`, trace processor |
 | npm CLI | `npm install -g @gracker/smartperfetto`; `smp` | automation and terminal users | Requires host Node.js `>=24 <25`, no Web UI |
+| CLI trace capture | `smp capture ...` | terminal users collecting traces | Uses Android capture presets/configs, optional post-capture `--analyze`, and local turn artifacts |
 | HTTP/SSE API | `/api/agent/v1/*`, `/api/traces/*`, `/api/reports/*` | integrations and frontend | Keep response contracts stable or regenerate frontend types |
 
 ## Runtime And Provider Matrix
@@ -40,16 +41,35 @@ a different provider after the user changes the active profile.
 | Rendering pipeline docs | `docs/rendering_pipelines/` | teaching mode and Skill-linked docs | Treat as runtime-read; update Skill/config references when moving files |
 | Trace processor prebuilts | `prebuilts/trace_processor/` and package assets | CLI, Docker, portable, source fallback | Keep pin, SHA256, package copy rules, and docs in sync |
 
+## AI Result Surfaces
+
+AI analysis output is consumed through several surfaces:
+
+| Surface | Typical path | Notes |
+| --- | --- | --- |
+| Live chat / AI panel | SSE `answer_token`, `conclusion`, `analysis_completed` | Should be readable and avoid raw SQL/audit noise |
+| HTML report | `/api/reports/*`, report export | Keeps evidence, claim verification, identities, and appendix detail |
+| CLI turn artifacts | `~/.smartperfetto/` session/report files | Used by `smp run`, `smp ask`, `smp capture --analyze`, and `smp report` |
+| Analysis-result snapshot | snapshot services and frontend comparison state | Used for multi-result comparison and later review |
+| Frontend generated contract | generated DataEnvelope/analysis types | Regenerate when backend contract types change |
+
+Do not collapse these into one behavior. A readability fix for chat should not
+remove evidence/provenance from reports, snapshots, or CLI artifacts.
+
 ## Feature/Bug Checklist
 
 Before implementing or declaring a fix complete, ask which of these are
 affected:
 
 - Web UI, CLI, API, reports, Docker, portable packages, and source scripts.
+- CLI trace capture, including capture presets/config output and optional
+  post-capture analysis.
 - Claude runtime, OpenAI runtime, Provider Manager, env fallback, local Claude
   auth, and resume/session snapshots.
 - Single-trace, raw trace comparison, multi-analysis-result comparison, and
   report export.
+- Live chat projection, HTML report, CLI artifacts, claim verification,
+  identity resolution, and analysis-result snapshots.
 - Runtime-read content: Skills, Strategies, rendering pipeline docs, SQL schema
   indexes, pre-built UI, and trace processor assets.
 - Node.js 24 boundary: source/npm require Node `>=24 <25`; portable packages

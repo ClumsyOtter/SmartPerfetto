@@ -57,6 +57,7 @@ boundaries. The LLM/agent checklist is in
 | Code-aware analysis | `backend/src/services/codebase/`, `backend/src/services/rag/`, `backend/src/services/symbol/` | Local codebase registry, source ingestion, symbol resolution, lookup filtering, and patch status verification |
 | Trace processor | `backend/src/services/traceProcessorService.ts` | Trace loading, RPC management, SQL query execution |
 | Reports | `backend/src/services/htmlReportGenerator.ts` | HTML report generation |
+| Result quality pipeline | `backend/src/services/agentResultNormalizer.ts`, `finalReportContractGate.ts`, `evidence/`, `verifier/`, `analysisResultSnapshotPipeline.ts` | final report contract, evidence/claim verification, identity resolution, snapshots |
 | CLI | `backend/src/cli-user/` | `smp` / `smartperfetto` commands, session/history/report export |
 | Comparison services | `backend/src/services/comparison*Service.ts` | Shared evidence/report contract for raw-trace and analysis-result comparison |
 
@@ -80,13 +81,19 @@ boundaries. The LLM/agent checklist is in
          -> LookupResponseFilter -> CodeRef metadata
       -> propose_patch -> PatchProposer -> verified / sketch / unverified
 
-4. Backend streams output
+4. Result normalization and quality artifacts
+   raw runtime result -> agentResultNormalizer
+      -> final_report_contract gate
+      -> evidence contract / claim verification / identity resolutions
+
+5. Backend streams output
    SDK events -> runtime bridge -> StreamProjector -> SSE
       -> frontend renders progress, tables, thoughts, answer tokens
 
-5. Finish and report
+6. Finish and report
    conclusion -> analysis_completed -> sanitized CodeRef/patch metadata
-      -> HTML report -> /api/reports/:id
+      -> HTML report + CLI artifacts + analysis-result snapshot
+      -> /api/reports/:id
 ```
 
 CLI `smp run` / `smp ask` / `smp compare` reuse the same session, runtime,
@@ -103,6 +110,23 @@ Skill, report, and trace-processor path. The difference is local storage under
 Provider Manager active profiles override `.env` fallback. Resume must preserve
 the original provider/runtime/comparison identity and must not silently switch
 because the active provider changed later.
+
+## AI Output Contract
+
+The final answer is not a single Markdown string. It is a set of related
+artifacts with different consumers:
+
+| Artifact | Consumer | Boundary |
+|---|---|---|
+| Visible chat conclusion | Frontend AI panel | Readable, with low-value SQL/appendix/audit noise hidden |
+| HTML report | Browser, export, sharing | Keeps evidence, claim verification, identity resolution, and appendix detail |
+| CLI artifacts | `smp run`, `smp ask`, `smp capture --analyze`, `smp report` | Persists turns, reports, claim verification, and identity files |
+| Analysis-result snapshot | Multi-result comparison and later review | Stores conclusion contract, claim support, verification, and identity metadata |
+
+When fixing conclusion quality, identify the failing layer first: runtime
+output, contract/gate, evidence/verification, report generation, snapshot, or
+frontend projection. Do not make chat cleaner by deleting provenance required by
+reports or snapshots.
 
 ## Comparison Modes
 
@@ -121,3 +145,6 @@ because the active provider changed later.
 | Normal docs | Other files under `docs/` | User and contributor documentation |
 
 Do not hardcode prompt content in TypeScript. TypeScript should load, substitute, and structurally orchestrate prompts and Skills.
+Do not hardcode MCP tool counts, Skill counts, or scene counts in code or
+durable docs; those come from the tool registry, `backend/skills/` tree, and
+strategy frontmatter.

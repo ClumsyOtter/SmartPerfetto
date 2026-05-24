@@ -44,8 +44,10 @@ docs/
 - 发布/npm/portable/Docker 相关工作以 [发布手册](reference/release.md) 和 [发布规则](../.claude/rules/release.md) 为准。
 - 当前后端 API 以 [API 参考](reference/api.md) 为准。
 - agentv3 与分析模式以 [agentv3 运行时](architecture/agent-runtime.md) 为准。
+- MCP 工具面以 [MCP 工具参考](reference/mcp-tools.md) 和 tool registry 为准，不以旧的静态工具数量为准。
 - Skill DSL 与分层结果以 [Skill 系统指南](reference/skill-system.md) 为准。
 - DataEnvelope 与前后端数据 contract 以 [Data Contract](../backend/docs/DATA_CONTRACT_DESIGN.md) 为准。
+- final report、evidence/claim verification、identity resolution、chat-vs-report 边界以 [架构总览](architecture/overview.md) 和 [Agent Runtime](architecture/agent-runtime.md) 为准。
 - 自改进系统以 [Self-Improving 设计](architecture/self-improving-design.md) 为准。
 - `archive/` 下文档只保留历史背景，不代表当前推荐实现。
 

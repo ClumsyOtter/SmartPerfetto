@@ -11,13 +11,20 @@ Location:
 backend/skills/
   atomic/       # single-purpose SQL/evidence steps
   composite/    # multi-step scene analyses
+  comparison/   # comparison-specific Skill contracts
   deep/         # deeper diagnostics
+  modules/      # app/framework/kernel/hardware expert modules
   pipelines/    # rendering-pipeline detection and teaching
   _template/    # skill authoring templates
 ```
 
-The repository currently contains 200+ skill/config YAML files. Avoid hardcoding
-counts in code or docs unless a test enforces them.
+The repository currently contains 200+ Skill YAML files. Avoid hardcoding counts
+in code or docs unless a test enforces them. When a precise inventory is
+needed, compute it from the tree:
+
+```bash
+rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
+```
 
 ## Skill Types and Layers
 
@@ -37,6 +44,17 @@ Layered results:
 - L4 deep: detailed frame/slice/callstack evidence.
 
 Keep DataEnvelope output self-describing so frontend rendering stays generic.
+
+Final conclusions, reports, snapshots, and comparison all depend on Skill
+evidence metadata. When adding or changing a scene-critical Skill, keep these
+fields meaningful enough for claim verification and report provenance:
+
+- `display.layer` and `display.level`
+- table column names and typed column metadata
+- `synthesize` / summary-facing outputs
+- process, thread, timestamp, duration, and source identifiers used by identity
+  resolution
+- `doc_path` references for runtime-read rendering pipeline docs
 
 ## Parameter and Display Contracts
 
@@ -73,6 +91,9 @@ Click actions should be explicit, for example:
   Skill after editing that doc.
 - Vendor or platform-specific behavior should be explicit in Skill inputs,
   conditions, or overrides, not hidden in generic SQL.
+- Do not treat the frontend chat table as the only consumer. The same
+  DataEnvelope output can feed HTML reports, CLI artifacts, evidence contracts,
+  analysis-result snapshots, and comparison.
 
 ## Validation
 

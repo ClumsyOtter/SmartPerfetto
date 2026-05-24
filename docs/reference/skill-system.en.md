@@ -6,14 +6,25 @@ SmartPerfetto Skills are YAML-defined trace analysis pipelines. They package per
 
 ## Skill Inventory
 
-| Type | Count | Location | Description |
-|---|---:|---|---|
-| Atomic | 87 | `backend/skills/atomic/` | Single SQL query or small query group |
-| Composite | 29 | `backend/skills/composite/` | Multi-step orchestration |
-| Deep | 2 | `backend/skills/deep/` | Deep analysis such as CPU profiling |
-| Pipeline | 28 | `backend/skills/pipelines/` | Rendering pipeline detection and teaching content |
-| Module | 18 | `backend/skills/modules/` | Modular app/framework/hardware/kernel analysis |
-| Total | 164 | | |
+The authoritative inventory is the `backend/skills/**/*.skill.yaml` file tree.
+Do not hardcode a total count in code or durable docs. To inspect the current
+inventory, run:
+
+```bash
+rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
+```
+
+Directory roles:
+
+| Type | Location | Description |
+|---|---|---|
+| Atomic | `backend/skills/atomic/` | Single SQL query or small query group |
+| Composite | `backend/skills/composite/` | Multi-step orchestration |
+| Comparison | `backend/skills/comparison/` | Multi-trace or multi-result comparison Skills |
+| Deep | `backend/skills/deep/` | Deep analysis such as CPU profiling |
+| Pipeline | `backend/skills/pipelines/` | Rendering pipeline detection and teaching content |
+| Module | `backend/skills/modules/` | Modular app/framework/hardware/kernel analysis |
+| Template | `backend/skills/_template/` | Authoring templates, not necessarily runtime analysis capability |
 
 ## YAML Structure
 

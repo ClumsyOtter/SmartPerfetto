@@ -46,9 +46,10 @@ docs/
 - Provider and model configuration: [Configuration Guide](getting-started/configuration.en.md).
 - Backend API: [API Reference](reference/api.en.md).
 - CLI usage: [CLI Reference](reference/cli.en.md).
-- MCP tools: [MCP Tools Reference](reference/mcp-tools.en.md).
+- MCP tools: [MCP Tools Reference](reference/mcp-tools.en.md) and the tool registry, not old static tool counts.
 - Skill DSL and layered outputs: [Skill System Guide](reference/skill-system.en.md).
 - DataEnvelope and frontend/backend contracts: [Data Contract](../backend/docs/DATA_CONTRACT_DESIGN.en.md).
+- Final report, evidence/claim verification, identity resolution, and chat-vs-report boundaries: [Architecture Overview](architecture/overview.en.md) and [Agent Runtime](architecture/agent-runtime.en.md).
 - Rendering pipeline summary: [Rendering Pipeline Overview](rendering_pipelines/index.en.md).
 
 ## Runtime-Read Documentation

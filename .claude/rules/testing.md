@@ -17,6 +17,7 @@ and the 6-trace scene regression gate.
 | Change type | Required verification |
 | --- | --- |
 | Docs-only, not runtime-read | `git diff --check` |
+| Docs that define commands, release/package workflow, or runtime-read paths | `git diff --check` plus the smallest command/path smoke that proves the doc did not drift |
 | Build/type fix | `cd backend && npm run typecheck` plus affected tests |
 | Contract/type-only change | `cd backend && npx tsc --noEmit` plus relevant contract tests |
 | CRUD-only service, no agent/runtime path | That service's `__tests__/<name>.test.ts` |
@@ -104,9 +105,17 @@ cd backend
 npx jest src/agentRuntime/__tests__/runtimeSelection.test.ts
 npx jest src/agentOpenAI/__tests__/openAiConfig.test.ts src/agentOpenAI/__tests__/openAiRuntime.test.ts src/agentOpenAI/__tests__/openAiToolAdapter.test.ts
 npx jest src/assistant/application/__tests__/agentAnalyzeSessionService.test.ts
+npx jest src/services/__tests__/agentResultNormalizer.test.ts src/services/__tests__/finalResultQualityGate.test.ts
+npx jest src/services/verifier/__tests__/claimVerificationRunner.test.ts src/services/__tests__/analysisResultSnapshotStore.test.ts
+npx jest src/cli-user/services/__tests__/cliAnalyzeService.runTurn.test.ts src/cli-user/services/__tests__/cliAnalyzeService.test.ts
 npx jest src/services/providerManager/__tests__/providerService.test.ts src/services/providerManager/__tests__/providerRoutes.test.ts
 npx jest src/agentv3/__tests__/queryComplexityClassifier.followup.test.ts
 ```
+
+Use the result-quality suites when changing final report contract enforcement,
+agent result normalization, evidence/claim verification, identity resolution,
+analysis-result snapshots, CLI turn persistence, or visible-vs-report
+projection behavior.
 
 ## Agent SSE E2E
 

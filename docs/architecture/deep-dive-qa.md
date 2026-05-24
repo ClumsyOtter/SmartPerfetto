@@ -4,7 +4,9 @@
 >
 > 当前产品备注：Q&A 里的 Claude Agent SDK 讨论仍适用于默认 runtime，但当前产品已经增加
 > OpenAI Agents SDK、npm CLI、Docker、免安装包和共享对比合约。当前权威边界见
-> [架构总览](overview.md) 和 [Agent Runtime 架构](agent-runtime.md)。
+> [架构总览](overview.md) 和 [Agent Runtime 架构](agent-runtime.md)。文中的固定工具数、
+> Skill 数是历史快照；当前 inventory 以 [MCP 工具参考](../reference/mcp-tools.md) 和
+> [Skill 系统指南](../reference/skill-system.md) 为准。
 
 ---
 
@@ -305,7 +307,7 @@ Agent 的能力边界不取决于模型参数量或 benchmark 分数，而取决
 
 **1. 观测能力——Agent 能"看到"什么数据**
 
-同一个模型，给它 `scrolling_analysis` Skill 的 L2 结构化帧数据 vs 让它自己写 SQL 查原始表，分析质量差距非常显著。Agent 的上限由你给它的数据工具决定。SmartPerfetto 用 164 个 YAML Skill 封装了领域专家的查询逻辑，Agent 通过 `invoke_skill` 拿到的是处理过的、结构化的分析数据，而不是原始的百万行 trace 事件。
+同一个模型，给它 `scrolling_analysis` Skill 的 L2 结构化帧数据 vs 让它自己写 SQL 查原始表，分析质量差距非常显著。Agent 的上限由你给它的数据工具决定。SmartPerfetto 用 200+ YAML Skill 封装领域专家的查询逻辑，Agent 通过 `invoke_skill` 拿到的是处理过的、结构化的分析数据，而不是原始的百万行 trace 事件。
 
 **2. 约束框架——Agent 在什么范围内决策**
 
@@ -440,16 +442,16 @@ graph.add_edge("overview", "check_gc")
 
 **1. 条件化工具加载——减少 Agent 的决策空间**
 
-SmartPerfetto 的 MCP 工具总数最多 20 个（9 个 always-on + 11 个条件注入），但一次分析只注入其中的子集：
+SmartPerfetto 的 MCP 工具面由 registry 驱动，并按 quick/full、artifact store、codebase permission、referenceTraceId 和 comparison context 裁剪；一次分析只注入其中的子集：
 
 ```typescript
 // claudeMcpServer.ts — 按模式切换工具集
 
 if (options.lightweight) {
-  // 事实性查询（如"帧率是多少"）：只给 3 个工具
+  // 事实性查询（如"帧率是多少"）：只给核心证据工具子集
   toolEntries = [executeSql, invokeSkill, lookupSqlSchema];
 } else {
-  // 完整分析：9 个 always-on (含 recall_patterns) + 按上下文条件注入
+  // 完整分析：registry 基础工具 + 按上下文条件注入
   // 比较模式 → 注入 compare_skill, execute_sql_on, get_comparison_context
   // 假设管理 → 注入 submit_hypothesis, resolve_hypothesis, flag_uncertainty
   // 规划工具 → 注入 submit_plan, update_plan_phase, revise_plan
@@ -489,7 +491,7 @@ const ORCHESTRATOR_ONLY_TOOLS = new Set([
 analyze(query)
   ↓
 queryComplexity === 'quick'
-  → analyzeQuick(): 3 个工具，无 Planning Gate，无 Verifier
+  → analyzeQuick(): 核心证据工具子集，无 Planning Gate，无 Verifier
   → 直接回答事实性问题
 
 queryComplexity === 'full'
@@ -1104,18 +1106,24 @@ Phase 13:  → buildSystemPrompt(context) → 最终 prompt
 
 ### 总览
 
-| 分类 | 数量 | 说明 |
-|------|------|------|
-| Atomic | 87 | 单步检测/统计，一条或几条 SQL 完成 |
-| Composite | 29 | 组合多个 atomic skill，支持 iterator/conditional |
-| Deep | 2 | 深度剖析（callstack、CPU profiling） |
-| Pipeline | 28 | 渲染管线检测 + 教学（24+ 种架构） |
-| Module | 18 | 模块化配置：app/framework/hardware/kernel |
-| **合计** | **164** | |
+完整 Skill 清单以 `backend/skills/**/*.skill.yaml` 文件树为准；下面的列表用于理解覆盖范围，不作为当前数量的权威来源。需要当前统计时运行：
+
+```bash
+rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
+```
+
+| 分类 | 说明 |
+|------|------|
+| Atomic | 单步检测/统计，一条或几条 SQL 完成 |
+| Composite | 组合多个 atomic skill，支持 iterator/conditional |
+| Comparison | 多 trace / 多结果对比 |
+| Deep | 深度剖析（callstack、CPU profiling） |
+| Pipeline | 渲染管线检测 + 教学 |
+| Module | 模块化配置：app/framework/hardware/kernel |
 
 ---
 
-### Atomic Skills（87 个）
+### Atomic Skills
 
 单步数据提取和检测，是所有高层 Skill 的构建基础。
 

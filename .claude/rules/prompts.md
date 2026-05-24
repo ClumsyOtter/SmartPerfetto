@@ -19,6 +19,11 @@ Current strategy set is discovered from strategy frontmatter through
 `strategyLoader.ts`; do not duplicate the scene list in TypeScript when the
 frontmatter can be the source of truth.
 
+Strategy frontmatter can also declare final-output requirements such as
+`final_report_contract`. Add or update those fields in the strategy/template
+layer, then update `strategyLoader.ts` and contract tests only when the schema
+itself changes.
+
 ## Runtime Content Paths
 
 SmartPerfetto uses two content tracks:
@@ -39,12 +44,18 @@ YAML Skills
 Strategies shape agent behavior. Skills collect deterministic evidence. Keep
 that boundary intact.
 
+Final-report continuation templates must respect the same strategy contract as
+the main system prompt. Do not fix a missing conclusion by adding a
+scenario-specific TypeScript prompt string; fix the strategy/frontmatter or the
+shared continuation template so both Claude and OpenAI runtimes use the same
+rules.
+
 ## Template Syntax
 
 - Prompt/template variables use `{{variable}}`.
 - Skill YAML parameter substitution uses `${param|default}`.
 - Strategy frontmatter may include `keywords`, `compound_patterns`, `priority`,
-  and `phase_hints`.
+  `phase_hints`, and final-report contract fields.
 
 `strategyLoader.ts` owns loading, frontmatter parsing, template rendering, cache
 behavior, and phase hint access. Update it and its tests when adding template
@@ -77,3 +88,7 @@ npm run test:scene-trace-regression
 If the change affects startup, scrolling, Flutter, comparison, selection,
 system prompt, verifier, or MCP tool behavior, also run the relevant Agent SSE
 e2e command from `.claude/rules/testing.md`.
+
+If the change affects final-answer completeness, evidence summaries, claim
+verification wording, or OpenAI final-report continuation, include the focused
+result-quality tests listed in `.claude/rules/testing.md`.

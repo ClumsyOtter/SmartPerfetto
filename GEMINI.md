@@ -11,6 +11,12 @@ High-priority reminders:
   `./scripts/start-dev.sh`.
 - Do not hardcode prompt content in TypeScript. Use `backend/strategies/` for
   strategy/template text and `backend/skills/` for deterministic Skill logic.
+- Do not hardcode MCP tool lists, Skill counts, scene lists, or AI output
+  sections. Use the registry, strategy frontmatter, and reference docs.
+- Keep final conclusions, evidence/claim verification, identity resolution,
+  reports, snapshots, CLI output, and frontend chat projection as separate
+  surfaces; do not make chat readability fixes by deleting provenance.
+- For non-trivial tasks, follow the independent review gate in `AGENTS.md`.
 - Do not hand-edit generated files.
 - After AI Assistant plugin UI changes, run `./scripts/update-frontend.sh` so
   committed `frontend/` stays usable for Docker and `./start.sh` users.

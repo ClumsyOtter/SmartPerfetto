@@ -61,14 +61,38 @@ Provider mapping:
 ## Tool Layer
 
 SmartPerfetto analysis capability is registered through
-`createClaudeMcpServer()`: SQL execution, Skill invocation, SQL schema lookup,
-planning/hypothesis tools, artifacts, pattern memory, and comparison tools.
+`createClaudeMcpServer()` and described through `McpToolRegistry`: SQL
+execution, Skill invocation, SQL schema lookup, planning/hypothesis tools,
+artifacts, memory, code-aware lookup, baselines, and comparison tools.
 
 Claude runtime exposes these tools as an in-process MCP server. OpenAI runtime
 does not duplicate tool logic; it reads the same `McpToolRegistry` and adapts
 tool descriptors into OpenAI Agents SDK function tools. Both runtimes normalize
 their output into the same SSE events, `AnalysisResult`, and HTML report
 contract, although their SDK resume and streaming mechanics differ.
+
+The tool surface is not a fixed-size list. Quick/full mode, artifact store
+availability, codebase permission, `referenceTraceId`, comparison context, and
+runtime allowlists shape the request-visible set.
+
+## Final Result And Quality Artifacts
+
+Both runtimes normalize their raw output into a shared `AnalysisResult`, then
+run through the same quality and persistence chain:
+
+```text
+runtime result
+  -> agentResultNormalizer
+  -> finalReportContractGate
+  -> evidence contract / claim verification / identity resolutions
+  -> HTML report / CLI turn files / analysis-result snapshot
+  -> frontend visible projection
+```
+
+`final_report_contract` comes from strategy frontmatter. Claim verification and
+identity resolution depend on structured Skill/DataEnvelope evidence. The
+frontend may filter noise from the visible chat conclusion, but it must not
+remove provenance needed by reports, CLI artifacts, or snapshots.
 
 ## Sessions And Resume
 
@@ -79,6 +103,10 @@ Claude runtime persists the Claude SDK session id. OpenAI runtime persists
 OpenAI history, the last response id, and reserved run state. Responses API can
 resume with `previousResponseId`; Chat Completions-compatible providers resume
 from full history.
+
+Snapshots also carry final-result quality fields such as conclusion contracts,
+claim verification results, and identity resolutions so resume, report export,
+and analysis-result comparison can reuse them.
 
 Raw trace comparison sessions must also persist `referenceTraceId`,
 `comparisonSource`, and `comparisonReportSection`. A comparison session cannot

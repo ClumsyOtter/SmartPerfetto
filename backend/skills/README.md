@@ -10,7 +10,7 @@ skills/
 │   ├── vrr_detection.skill.yaml   # VRR/LTPO 检测
 │   ├── game_fps_analysis.skill.yaml # 游戏帧率分析
 │   ├── gpu_metrics.skill.yaml     # GPU 指标分析
-│   └── ...                  # 共 80 个原子技能
+│   └── ...
 ├── composite/               # 组合 Skills (多步骤分析，所有设备通用)
 │   ├── startup_analysis.skill.yaml    # 启动分析
 │   ├── scrolling_analysis.skill.yaml  # 滑动卡顿分析
@@ -21,12 +21,14 @@ skills/
 │   ├── io_pressure.skill.yaml         # IO 压力分析
 │   ├── navigation_analysis.skill.yaml # 界面跳转分析
 │   ├── surfaceflinger_analysis.skill.yaml # SF 合成分析
-│   └── ...                  # 共 28 个组合技能
+│   └── ...
+├── comparison/              # 对比分析 Skills
+│   └── multi_trace_result_comparison.skill.yaml
 ├── pipelines/               # 渲染管线检测 Skills (含教学内容)
 │   ├── android_view_standard_blast.skill.yaml
 │   ├── surfaceview_blast.skill.yaml
 │   ├── flutter_surfaceview_skia.skill.yaml
-│   └── ...                  # 共 30 个管线技能
+│   └── ...
 ├── deep/                    # 深度分析 Skills (调用栈级)
 │   ├── cpu_profiling.skill.yaml
 │   └── callstack_analysis.skill.yaml
@@ -53,6 +55,12 @@ skills/
 │   ├── startup.sop.md
 │   └── scrolling.sop.md
 └── custom/                  # 用户自定义 Skills (可选)
+```
+
+Skill inventory 以 `backend/skills/**/*.skill.yaml` 文件树为准，不要在文档或代码中写死总数。需要当前统计时运行：
+
+```bash
+rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
 ```
 
 ## 可用 Skills 一览
@@ -338,7 +346,7 @@ npm run skill:test startup_analysis -- --trace /path/to/trace.perfetto --vendor 
 
 ```bash
 # 执行指定 Skill
-curl -X POST http://localhost:3001/api/skills/execute/startup_analysis \
+curl -X POST http://localhost:3000/api/skills/execute/startup_analysis \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "xxx",
@@ -346,7 +354,7 @@ curl -X POST http://localhost:3001/api/skills/execute/startup_analysis \
   }'
 
 # 自动分析（根据问题自动选择 Skill）
-curl -X POST http://localhost:3001/api/skills/analyze \
+curl -X POST http://localhost:3000/api/skills/analyze \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "xxx",

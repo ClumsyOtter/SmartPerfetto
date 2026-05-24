@@ -34,7 +34,7 @@ RSS/load 证据，不能把 `User-deferred` 当成真实测量结果。
 | 测试同步 | 每个工程项的 PR 必须**同时**包含代码 + 测试；不允许"代码先合、测试后补" |
 | TODO 单点真相 | 完成一项立刻把 §0 对应行 `[ ]` → `[x]`，并在同一 PR 内提交；不要在别处维护另一份 |
 | 文档登记 | 新增/引用任何文档（ADR / 设计 / runbook / 外部参考 / Codex review）都追加到 §0.9，对应工程项完成后才打勾，**只追加不重排** |
-| 工作流 | 非平凡任务一律 Plan → Codex review (read-only) → Revise → Execute（CLAUDE.md 强约束） |
+| 工作流 | 非平凡任务一律 Plan → independent read-only review → Revise → Execute（见 CLAUDE.md / AGENTS.md；Codex 主导时用只读 reviewer 子 Agent/tool，或 reviewer 不可用时用结构化 self-review + post-diff review） |
 | 提交前 | 跑 `/simplify` 整理改动 |
 | PR 前 | `npm run verify:pr` 通过 |
 | 子模块 | 涉及 `perfetto/` 时先在子模块 commit + 推 `fork`，再回主仓 + `./scripts/update-frontend.sh` + 提交 |
@@ -56,7 +56,7 @@ RSS/load 证据，不能把 `User-deferred` 当成真实测量结果。
 loop {
   1. 读 README §0，找下一个未打勾项（顺序见 §5）
   2. Plan：写出"要改哪些文件、改哪些测试、走什么验证"
-  3. 非平凡？→ 调用 codex 做 read-only review；LGTM 或吸收反馈后才进入 4
+  3. 非平凡？→ 走独立只读审查门禁；LGTM 或吸收反馈后才进入 4
   4. 实施改动（小步、可测）
   5. 写/补对应测试 → 跑通；scene-trace-regression 不退化
   6. /simplify 整理改动

@@ -7,6 +7,7 @@ WORKDIR /app/backend
 COPY backend/package*.json ./
 RUN npm ci
 COPY scripts/trace-processor-pin.env /app/scripts/trace-processor-pin.env
+COPY scripts/perfetto-recording-tools-pin.env /app/scripts/perfetto-recording-tools-pin.env
 COPY backend/ ./
 COPY backend/data/perfettoSqlIndex.light.json backend/data/perfettoSqlIndex.json backend/data/perfettoStdlibSymbols.json ./data/
 RUN npm run build

@@ -32,7 +32,8 @@ POST /api/agent/v1/analyze
   -> createAgentOrchestrator()
   -> ClaudeRuntime or OpenAIRuntime
   -> shared MCP tools / Skill engine / trace_processor_shell
-  -> SSE projection + report generation
+  -> result normalization / quality artifacts
+  -> SSE projection + report generation + analysis-result snapshot
 ```
 
 Key files:
@@ -53,9 +54,58 @@ Key files:
 | `backend/src/agentv3/sceneClassifier.ts` | strategy-frontmatter-driven scene classifier |
 | `backend/src/agentv3/claudeVerifier.ts` | verifier for full Claude analysis |
 | `backend/src/agentv3/sessionStateSnapshot.ts` | persisted runtime state snapshot |
+| `backend/src/services/agentResultNormalizer.ts` | normalizes final result and preserves report/client boundaries |
+| `backend/src/services/finalReportContractGate.ts` | checks strategy `final_report_contract` completeness |
+| `backend/src/services/evidence/evidenceContractBuilder.ts` | builds evidence and claim-support contract from DataEnvelope output |
+| `backend/src/services/verifier/claimVerificationRunner.ts` | deterministic claim verification and identity-resolution collection |
+| `backend/src/services/analysisResultSnapshotPipeline.ts` | persists completed-analysis snapshots for comparison/report reuse |
 | `backend/src/services/providerManager/` | provider profiles, env isolation, runtime switching |
 | `backend/src/services/traceProcessorService.ts` | trace loading and SQL RPC |
 | `backend/src/services/skillEngine/` | YAML Skill loading/execution |
+
+## AI Output Contract
+
+Treat the final answer as a multi-surface contract, not one Markdown string:
+
+```text
+Runtime output
+  -> AnalysisResult / conclusion contract
+  -> evidence contract + claim verification + identity resolutions
+  -> HTML report and CLI turn files
+  -> analysis-result snapshot
+  -> frontend SSE projection and visible chat conclusion
+```
+
+Keep these boundaries intact:
+
+- Strategy frontmatter can declare `final_report_contract`; loaders and gates
+  enforce required sections instead of relying only on prompt wording.
+- Claims in the final result should be backed by Skill/SQL evidence, claim
+  verification, or an explicit uncertainty marker.
+- Chat projection may hide low-signal appendix details, raw SQL, snapshot IDs,
+  or audit metadata, but reports, snapshots, and CLI artifacts must keep the
+  provenance needed for later review and comparison.
+- Do not patch only one surface when changing final-result shape. Check SSE
+  payloads, HTML reports, CLI persistence/export, session snapshots, and
+  generated frontend contracts.
+
+## MCP Tool Registration
+
+`backend/src/agentv3/claudeMcpServer.ts` implements the tools, and
+`backend/src/agentv3/mcpToolRegistry.ts` is the source of truth for registered
+tool descriptors, exposure levels, and runtime allowlists. Do not duplicate a
+fixed tool count in docs or code.
+
+Tool visibility is request-shaped:
+
+- Quick/lightweight analysis registers only core evidence tools and may include
+  `fetch_artifact` when an artifact store exists.
+- Full analysis registers the data, knowledge, memory, planning/hypothesis,
+  artifact, baseline, and optional code-aware tool families.
+- Code-aware tools require codebase permission.
+- Comparison tools are registered only when a `referenceTraceId` exists.
+- External/public contracts should be derived from the registry view, not from
+  an old static tool list.
 
 ## Analysis Options Propagation
 
