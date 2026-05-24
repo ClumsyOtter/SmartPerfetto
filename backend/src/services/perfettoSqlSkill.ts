@@ -149,6 +149,7 @@ const CPU_TOPOLOGY_CTE = `
       cs.cpu_id,
       CASE
         WHEN cs.scale_bucket IS NULL OR cs.scale_bucket <= 0 THEN 'unknown'
+        WHEN sc.cluster_count <= 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN 'little'
         WHEN sc.cluster_count <= 1 THEN 'unknown'
         WHEN sc.cluster_count = 2 AND sc.cluster_rank = sc.cluster_count THEN 'big'
         WHEN sc.cluster_rank = 1 THEN 'little'

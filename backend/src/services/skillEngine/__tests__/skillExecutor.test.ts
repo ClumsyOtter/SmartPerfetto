@@ -1888,6 +1888,154 @@ describe('Skill Reference Step 执行', () => {
     expect(mockTraceProcessor.query).toHaveBeenLastCalledWith('trace-1', "SELECT 'GPU Fence Wait' as op");
   });
 
+  it('应该在 skill 引用展示时跳过子 skill 的 DDL 空结果并展示真实读数', async () => {
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: [],
+        rows: [],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cpu_id', 'core_type'],
+        rows: [
+          [0, 'little'],
+          [1, 'big'],
+        ],
+      })
+      .mockResolvedValueOnce({
+        columns: ['first_type'],
+        rows: [['little']],
+      });
+
+    const childSkill: SkillDefinition = {
+      name: 'child_topology_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Child Topology Skill'),
+      steps: [
+        {
+          id: 'create_topology_view',
+          type: 'atomic',
+          sql: 'CREATE VIEW _cpu_topology AS SELECT 0 as cpu_id',
+          display: { level: 'hidden' },
+        },
+        {
+          id: 'read_topology',
+          type: 'atomic',
+          sql: 'SELECT cpu_id, core_type FROM _cpu_topology',
+          display: { level: 'summary', layer: 'overview', title: 'CPU 拓扑' },
+        },
+      ],
+    };
+
+    const parentSkill: SkillDefinition = {
+      name: 'parent_topology_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Parent Topology Skill'),
+      steps: [
+        {
+          id: 'init_cpu_topology',
+          skill: 'child_topology_skill',
+          save_as: 'cpu_topology',
+          display: { level: 'hidden', layer: 'overview', title: '初始化 CPU 拓扑' },
+        },
+        {
+          id: 'use_topology',
+          type: 'atomic',
+          sql: "SELECT '${cpu_topology.data[0].core_type}' as first_type",
+        },
+      ],
+    };
+
+    executor.registerSkill(childSkill);
+    executor.registerSkill(parentSkill);
+
+    const result = await executor.execute('parent_topology_skill', 'trace-1');
+
+    expect(result.success).toBe(true);
+    const topologyDisplay = result.displayResults.find(dr => dr.stepId === 'init_cpu_topology');
+    expect(topologyDisplay?.data.columns).toEqual(['cpu_id', 'core_type']);
+    expect(topologyDisplay?.data.rows).toEqual([
+      [0, 'little'],
+      [1, 'big'],
+    ]);
+    expect(mockTraceProcessor.query).toHaveBeenLastCalledWith('trace-1', "SELECT 'little' as first_type");
+  });
+
+  it('应该优先使用子 skill 的展示步骤而不是前置可用性检查结果', async () => {
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: ['has_topology'],
+        rows: [[1]],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cpu_id', 'core_type'],
+        rows: [
+          [0, 'little'],
+          [1, 'big'],
+        ],
+      })
+      .mockResolvedValueOnce({
+        columns: ['first_type'],
+        rows: [['little']],
+      });
+
+    const childSkill: SkillDefinition = {
+      name: 'child_topology_with_check',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Child Topology With Check'),
+      steps: [
+        {
+          id: 'availability_check',
+          type: 'atomic',
+          sql: 'SELECT 1 as has_topology',
+          display: false,
+        },
+        {
+          id: 'read_topology',
+          type: 'atomic',
+          sql: 'SELECT cpu_id, core_type FROM _cpu_topology',
+          display: { level: 'summary', layer: 'overview', title: 'CPU 拓扑' },
+        },
+      ],
+    };
+
+    const parentSkill: SkillDefinition = {
+      name: 'parent_topology_with_check',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Parent Topology With Check'),
+      steps: [
+        {
+          id: 'init_cpu_topology',
+          skill: 'child_topology_with_check',
+          save_as: 'cpu_topology',
+          display: { level: 'hidden', layer: 'overview', title: '初始化 CPU 拓扑' },
+        },
+        {
+          id: 'use_topology',
+          type: 'atomic',
+          sql: "SELECT '${cpu_topology.data[0].core_type}' as first_type",
+        },
+      ],
+    };
+
+    executor.registerSkill(childSkill);
+    executor.registerSkill(parentSkill);
+
+    const result = await executor.execute('parent_topology_with_check', 'trace-1');
+
+    expect(result.success).toBe(true);
+    const topologyDisplay = result.displayResults.find(dr => dr.stepId === 'init_cpu_topology');
+    expect(topologyDisplay?.data.columns).toEqual(['cpu_id', 'core_type']);
+    expect(topologyDisplay?.data.rows).toEqual([
+      [0, 'little'],
+      [1, 'big'],
+    ]);
+    expect(mockTraceProcessor.query).toHaveBeenLastCalledWith('trace-1', "SELECT 'little' as first_type");
+  });
+
   it('应该正确合并结果', async () => {
     mockTraceProcessor.query
       .mockResolvedValueOnce({
@@ -2255,6 +2403,50 @@ describe('Display 配置', () => {
     expect(envelopes[0].display.columns?.map(c => c.name)).toEqual(['ts', 'duration_ns']);
     expect(validateDataEnvelope(envelopes[0])).toEqual([]);
   });
+
+  it('应该为空数组结果保留 display.columns，避免前端显示属性/值伪列', async () => {
+    mockTraceProcessor.query.mockResolvedValue({
+      columns: ['server_process', 'aidl_name', 'dur_ms'],
+      rows: [],
+    });
+
+    const skill: SkillDefinition = {
+      name: 'empty_display_columns',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Empty Display Columns'),
+      steps: [
+        {
+          id: 'empty_step',
+          type: 'atomic',
+          sql: 'SELECT server_process, aidl_name, dur_ms FROM binder_calls',
+          display: {
+            title: '主线程 Binder 阻塞分析',
+            layer: 'list',
+            format: 'table',
+            columns: [
+              { name: 'server_process', label: '服务进程' },
+              { name: 'aidl_name', label: 'AIDL 方法' },
+              { name: 'dur_ms', label: '耗时', type: 'duration', unit: 'ms' },
+            ],
+          },
+        },
+      ],
+    };
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('empty_display_columns', 'trace-1');
+    expect(result.success).toBe(true);
+
+    const display = result.displayResults[0];
+    expect((display as any).data.columns).toEqual(['server_process', 'aidl_name', 'dur_ms']);
+    expect((display as any).data.rows).toEqual([]);
+
+    const envelopes = SkillExecutor.toDataEnvelopes(result);
+    expect(envelopes[0].data.columns).toEqual(['server_process', 'aidl_name', 'dur_ms']);
+    expect(envelopes[0].display.columns?.map(c => c.name)).toEqual(['server_process', 'aidl_name', 'dur_ms']);
+    expect(validateDataEnvelope(envelopes[0])).toEqual([]);
+  });
 });
 
 // =============================================================================
@@ -2412,6 +2604,69 @@ describe('executeCompositeSkill', () => {
 
     expect(result.layers.list).toBeDefined();
     expect(result.layers.list?.sessions).toBeDefined();
+  });
+
+  it('应该在 executeCompositeSkill 分层路径中解包 skill 引用结果', async () => {
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: [],
+        rows: [],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cpu_id', 'core_type'],
+        rows: [
+          [0, 'little'],
+          [1, 'big'],
+        ],
+      });
+
+    const childSkill: SkillDefinition = {
+      name: 'layered_child_topology',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Layered Child Topology'),
+      steps: [
+        {
+          id: 'create_topology_view',
+          type: 'atomic',
+          sql: 'CREATE VIEW _cpu_topology AS SELECT 0 as cpu_id',
+          display: { level: 'hidden' },
+        },
+        {
+          id: 'read_topology',
+          type: 'atomic',
+          sql: 'SELECT cpu_id, core_type FROM _cpu_topology',
+          display: { level: 'summary', layer: 'overview', title: 'CPU 拓扑' },
+        },
+      ],
+    };
+
+    const parentSkill: SkillDefinition = {
+      name: 'layered_parent_topology',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Layered Parent Topology'),
+      steps: [
+        {
+          id: 'init_cpu_topology',
+          skill: 'layered_child_topology',
+          display: { level: 'hidden', layer: 'overview', title: '初始化 CPU 拓扑' },
+        },
+      ],
+    };
+
+    executor.registerSkill(childSkill);
+
+    const result = await executor.executeCompositeSkill(parentSkill, {}, { traceId: 'trace-1' });
+
+    expect(result.layers.overview?.init_cpu_topology?.data).toEqual([
+      { cpu_id: 0, core_type: 'little' },
+      { cpu_id: 1, core_type: 'big' },
+    ]);
+    expect(result.stepResults?.[0].data).toEqual([
+      { cpu_id: 0, core_type: 'little' },
+      { cpu_id: 1, core_type: 'big' },
+    ]);
   });
 
   it('应该收集 synthesize 数据', async () => {

@@ -1747,6 +1747,19 @@ export class SkillExecutor {
    * Execute a step-based skill (composite/iterator/diagnostic, and legacy atomic skills without root-level `sql`).
    * Mutates `context.results` / `context.variables` and appends into `displayResults` / `diagnostics` / `synthesizeData`.
    */
+  private hasMeaningfulData(value: any): boolean {
+    if (Array.isArray(value)) return value.length > 0;
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return true;
+    if (typeof value === 'object') {
+      if (Array.isArray((value as any).rows)) return (value as any).rows.length > 0;
+      if (Array.isArray((value as any).diagnostics)) return (value as any).diagnostics.length > 0;
+      return Object.keys(value).length > 0;
+    }
+    return false;
+  }
+
   private extractSaveAsValue(stepResult: StepResult): any {
     // Most steps already store direct row arrays/objects in stepResult.data.
     if (stepResult.stepType !== 'skill') {
@@ -1764,10 +1777,42 @@ export class SkillExecutor {
     }
 
     // SkillExecutionResult currently exposes payloads via rawResults.
+    // Step-based child skills often begin with DDL/setup steps that correctly
+    // return [] (for example DROP/CREATE VIEW). Prefer the first meaningful
+    // payload so a parent `skill:` step exposes the actual read step instead
+    // of a setup step's empty result.
     const rawResults = nested.rawResults;
     if (rawResults && typeof rawResults === 'object') {
       if ((rawResults as any).root?.data !== undefined) {
         return (rawResults as any).root.data;
+      }
+      const dataSteps = Object.values(rawResults as Record<string, any>)
+        .filter((step) => step && typeof step === 'object' && Object.prototype.hasOwnProperty.call(step, 'data'));
+      const displayStepIds = Array.isArray(nested.displayResults)
+        ? nested.displayResults
+          .map((displayResult: any) => displayResult?.stepId)
+          .filter((stepId: any): stepId is string =>
+            typeof stepId === 'string' &&
+            stepId.length > 0 &&
+            stepId !== '__synthesize_summary__')
+        : [];
+      for (const stepId of displayStepIds) {
+        const displayedStep = (rawResults as Record<string, any>)[stepId];
+        if (
+          displayedStep &&
+          typeof displayedStep === 'object' &&
+          Object.prototype.hasOwnProperty.call(displayedStep, 'data') &&
+          this.hasMeaningfulData(displayedStep.data)
+        ) {
+          return displayedStep.data;
+        }
+      }
+      const meaningfulStep = dataSteps.find((step) => this.hasMeaningfulData((step as any).data));
+      if (meaningfulStep) {
+        return (meaningfulStep as any).data;
+      }
+      if (dataSteps.length > 0) {
+        return (dataSteps[dataSteps.length - 1] as any).data;
       }
       for (const step of Object.values(rawResults as Record<string, any>)) {
         if (step && typeof step === 'object' && Object.prototype.hasOwnProperty.call(step, 'data')) {
@@ -2334,6 +2379,9 @@ export class SkillExecutor {
       for (let i = 0; i < skill.steps.length; i++) {
         const step = skill.steps[i];
         const stepResult = await this.executeStep(step, execContext, skill.name);
+        const layerStepResult = stepResult.stepType === 'skill'
+          ? { ...stepResult, data: this.extractSaveAsValue(stepResult) }
+          : stepResult;
 
         // Save result to context
         if (stepResult.success) {
@@ -2349,7 +2397,7 @@ export class SkillExecutor {
         // This is needed for organizeByLayer to correctly place results in layers
         // Process display config with template variable substitution (e.g., ${frame_id})
         if ('display' in step && typeof step.display === 'object') {
-          stepResult.display = processDisplayConfig(step.display, execContext);
+          layerStepResult.display = processDisplayConfig(step.display, execContext);
         }
 
         // 收集标记为 synthesize 的步骤数据
@@ -2379,7 +2427,7 @@ export class SkillExecutor {
           });
         }
 
-        stepResults.push(stepResult);
+        stepResults.push(layerStepResult);
       }
     }
 
@@ -3698,28 +3746,29 @@ export class SkillExecutor {
     if (typeof data === 'object' && data !== null && 'diagnostics' in data && Array.isArray(data.diagnostics)) {
       // Preserve diagnostic structure for later extraction
       displayData = data;
-    } else if (Array.isArray(data) && data.length > 0) {
+    } else if (Array.isArray(data)) {
       // 检查是否是 iterator 结果（包含 itemIndex, item, result）
-      if (this.isIteratorResult(data)) {
+      if (data.length > 0 && this.isIteratorResult(data)) {
         displayData = this.flattenIteratorResults(data, stepResult.stepType === 'iterator', columnDefinitions);
       } else {
-        // 普通数组 - 转换为表格格式
+        const configuredColumns = Array.isArray(columnDefinitions)
+          ? columnDefinitions
+            .map((d: any) => d?.name)
+            .filter((name: any, idx: number, arr: any[]) =>
+              typeof name === 'string' &&
+              name.length > 0 &&
+              arr.indexOf(name) === idx
+            )
+          : [];
         const firstItem = data[0];
         if (typeof firstItem === 'object' && firstItem !== null) {
           // If display.columns is provided, project data to configured columns only.
           // This keeps UI tables concise and avoids leaking internal helper fields.
-          const configuredColumns = Array.isArray(columnDefinitions)
-            ? columnDefinitions
-              .map((d: any) => d?.name)
-              .filter((name: any, idx: number, arr: any[]) =>
-                typeof name === 'string' &&
-                name.length > 0 &&
-                arr.indexOf(name) === idx
-              )
-            : [];
           const columns = configuredColumns.length > 0 ? configuredColumns : Object.keys(firstItem);
           const rows = data.map(row => columns.map(col => this.formatCellValue(row[col])));
           displayData = { columns, rows };
+        } else if (data.length === 0) {
+          displayData = { columns: configuredColumns, rows: [] };
         } else {
           // 简单数组
           displayData = { columns: ['value'], rows: data.map(v => [this.formatCellValue(v)]) };

@@ -194,6 +194,7 @@ steps:
         cs.scale_bucket,
         CASE
           WHEN cs.scale_bucket IS NULL OR cs.scale_bucket <= 0 THEN 'unknown'
+          WHEN sc.cluster_count <= 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN 'little'
           WHEN sc.cluster_count <= 1 THEN 'unknown'
           WHEN sc.cluster_count = 2 AND sc.cluster_rank = sc.cluster_count THEN 'big'
           WHEN sc.cluster_rank = 1 THEN 'little'
@@ -205,6 +206,7 @@ steps:
         END as core_type,
         CASE
           WHEN cs.scale_bucket IS NULL OR cs.scale_bucket <= 0 THEN cs.topology_source
+          WHEN sc.cluster_count <= 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN cs.topology_source || '_uniform_four_little'
           WHEN sc.cluster_count <= 1 THEN cs.topology_source || '_uniform'
           ELSE cs.topology_source
         END as topology_source,

@@ -8,9 +8,13 @@ import {spawnSync} from 'child_process';
 import yaml from 'js-yaml';
 import {describe, expect, it} from '@jest/globals';
 
+const loadSkillYaml = (relativePath: string): any => {
+  const skillPath = path.join(process.cwd(), relativePath);
+  return yaml.load(fs.readFileSync(skillPath, 'utf-8')) as any;
+};
+
 const loadCreateTopologySql = (): string => {
-  const skillPath = path.join(process.cwd(), 'skills/atomic/cpu_topology_view.skill.yaml');
-  const skill = yaml.load(fs.readFileSync(skillPath, 'utf-8')) as any;
+  const skill = loadSkillYaml('skills/atomic/cpu_topology_view.skill.yaml');
   const step = skill.steps?.find((candidate: any) => candidate.id === 'create_topology_view');
   expect(step?.sql).toBeTruthy();
   return step.sql;
@@ -122,10 +126,12 @@ describe('cpu_topology_view SQL', () => {
     expect(sql).toContain("'observed_no_scale'");
   });
 
-  it('keeps uniform-scale CPU sets explicit instead of naming them big or prime clusters', () => {
+  it('classifies uniform four-core Android traces while keeping larger uniform sets explicit', () => {
     const sql = loadCreateTopologySql();
 
+    expect(sql).toContain("WHEN sc.cluster_count <= 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN 'little'");
     expect(sql).toContain("WHEN sc.cluster_count <= 1 THEN 'unknown'");
+    expect(sql).toContain("cs.topology_source || '_uniform_four_little'");
     expect(sql).toContain("cs.topology_source || '_uniform'");
   });
 
@@ -140,11 +146,28 @@ describe('cpu_topology_view SQL', () => {
       expect(source).toContain('AND c.value > 0');
       expect(source).toContain('cpu_table_fallback_no_observed');
       expect(source).toContain('ROUND(rs.scale_value * 20.0');
+      expect(source).toContain("WHEN sc.cluster_count <= 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN 'little'");
       expect(source).toContain("WHEN sc.cluster_count = 2 AND sc.cluster_rank = sc.cluster_count THEN 'big'");
       expect(source).not.toMatch(/cpu\s*>?=\s*4/);
       expect(source).not.toMatch(/cpu\s*<\s*4/);
       expect(source).not.toMatch(/capacity\s*>=\s*(1000|500)/);
     }
+  });
+
+  it('keeps the public cpu_topology_detection skill delegated to the shared topology view', () => {
+    const skill = loadSkillYaml('skills/atomic/cpu_topology_detection.skill.yaml');
+    const initStep = skill.steps?.find((candidate: any) => candidate.id === 'init_cpu_topology');
+    const allSql = skill.steps
+      ?.map((candidate: any) => candidate.sql || '')
+      .join('\n') || '';
+
+    expect(initStep?.skill).toBe('cpu_topology_view');
+    expect(allSql).toContain('FROM _cpu_topology');
+    expect(allSql).toContain("core_type IN ('prime', 'big', 'medium')");
+    expect(allSql).not.toContain('* 0.95');
+    expect(allSql).not.toContain('* 0.75');
+    expect(allSql).not.toContain('* 0.50');
+    expect(allSql).not.toContain("'mid'");
   });
 });
 
@@ -165,8 +188,8 @@ describeWithSqlite('cpu_topology_view fixture behavior', () => {
 
     expect(rows.map(row => row.cpu_id)).toEqual([0, 1, 2, 3]);
     expect(new Set(rows.map(row => row.universe_source))).toEqual(new Set(['sched_observed']));
-    expect(new Set(rows.map(row => row.core_type))).toEqual(new Set(['unknown']));
-    expect(new Set(rows.map(row => row.topology_source))).toEqual(new Set(['capacity_scale_uniform']));
+    expect(new Set(rows.map(row => row.core_type))).toEqual(new Set(['little']));
+    expect(new Set(rows.map(row => row.topology_source))).toEqual(new Set(['capacity_scale_uniform_four_little']));
   });
 
   it('classifies 4+3+1 capacity layouts as little, big, prime', () => {
@@ -208,14 +231,68 @@ describeWithSqlite('cpu_topology_view fixture behavior', () => {
     ]);
   });
 
-  it('keeps uniform four-core devices unknown instead of guessing a cluster name', () => {
+  it('classifies uniform four-core Android layouts as little cores', () => {
     const rows = runTopologyFixture(`
       INSERT INTO cpu(id, capacity) VALUES (0, 100), (1, 100), (2, 100), (3, 100);
       INSERT INTO sched_slice(cpu) VALUES (0), (1), (2), (3);
     `);
 
+    expect(new Set(rows.map(row => row.core_type))).toEqual(new Set(['little']));
+    expect(new Set(rows.map(row => row.topology_source))).toEqual(new Set(['capacity_scale_uniform_four_little']));
+  });
+
+  it('keeps larger uniform CPU sets unknown instead of inventing big/little split', () => {
+    const rows = runTopologyFixture(`
+      INSERT INTO cpu(id, capacity) VALUES
+        (0, 100), (1, 100), (2, 100), (3, 100),
+        (4, 100), (5, 100), (6, 100), (7, 100);
+      INSERT INTO sched_slice(cpu) VALUES (0), (1), (2), (3), (4), (5), (6), (7);
+    `);
+
     expect(new Set(rows.map(row => row.core_type))).toEqual(new Set(['unknown']));
     expect(new Set(rows.map(row => row.topology_source))).toEqual(new Set(['capacity_scale_uniform']));
+  });
+
+  it('classifies 6+2 capacity layouts as little and big', () => {
+    const rows = runTopologyFixture(`
+      INSERT INTO cpu(id, capacity) VALUES
+        (0, 100), (1, 100), (2, 100), (3, 100), (4, 100), (5, 100),
+        (6, 300), (7, 300);
+      INSERT INTO sched_slice(cpu) VALUES (0), (1), (2), (3), (4), (5), (6), (7);
+    `);
+
+    expect(rows.map(row => row.core_type)).toEqual([
+      'little', 'little', 'little', 'little', 'little', 'little', 'big', 'big',
+    ]);
+  });
+
+  it('classifies 4+4 capacity layouts as little and big', () => {
+    const rows = runTopologyFixture(`
+      INSERT INTO cpu(id, capacity) VALUES
+        (0, 100), (1, 100), (2, 100), (3, 100),
+        (4, 300), (5, 300), (6, 300), (7, 300);
+      INSERT INTO sched_slice(cpu) VALUES (0), (1), (2), (3), (4), (5), (6), (7);
+    `);
+
+    expect(rows.map(row => row.core_type)).toEqual([
+      'little', 'little', 'little', 'little', 'big', 'big', 'big', 'big',
+    ]);
+  });
+
+  it('classifies 10-core tri-cluster layouts as little, medium, big', () => {
+    const rows = runTopologyFixture(`
+      INSERT INTO cpu(id, capacity) VALUES
+        (0, 100), (1, 100), (2, 100), (3, 100),
+        (4, 250), (5, 250), (6, 250), (7, 250),
+        (8, 500), (9, 500);
+      INSERT INTO sched_slice(cpu) VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
+    `);
+
+    expect(rows.map(row => row.core_type)).toEqual([
+      'little', 'little', 'little', 'little',
+      'medium', 'medium', 'medium', 'medium',
+      'big', 'big',
+    ]);
   });
 
   it('buckets small per-core scale noise into one cluster', () => {
@@ -224,7 +301,7 @@ describeWithSqlite('cpu_topology_view fixture behavior', () => {
       INSERT INTO sched_slice(cpu) VALUES (0), (1), (2), (3);
     `);
 
-    expect(new Set(rows.map(row => row.core_type))).toEqual(new Set(['unknown']));
+    expect(new Set(rows.map(row => row.core_type))).toEqual(new Set(['little']));
     expect(new Set(rows.map(row => row.cluster_count))).toEqual(new Set([1]));
   });
 
