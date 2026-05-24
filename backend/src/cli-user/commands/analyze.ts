@@ -19,6 +19,7 @@ import { startSession } from '../services/turnRunner';
 import { assertAnalysisRuntimeReady } from '../services/runtimeGuard';
 import { withConsoleLogToStderr } from '../io/stdio';
 import type {CodeAwareMode} from '../../services/codebase/codeAwareFeature';
+import type {CliAnalysisMode} from '../types';
 
 export interface AnalyzeCommandArgs {
   trace: string;
@@ -28,6 +29,7 @@ export interface AnalyzeCommandArgs {
   verbose: boolean;
   noColor: boolean;
   format?: OutputFormat;
+  analysisMode?: CliAnalysisMode;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
 }
@@ -48,6 +50,7 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
       const turn = await startSession({ paths, service, renderer }, {
         tracePath,
         query: args.query,
+        analysisMode: args.analysisMode,
         codeAwareMode: args.codeAwareMode,
         codebaseIds: args.codebaseIds,
       });

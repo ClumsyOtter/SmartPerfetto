@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import * as fs from 'fs';
+import { spawnSync } from 'child_process';
 import {
   resolveAgentRuntimeSelection,
   type BackendAgentRuntimeKind,
@@ -12,6 +13,9 @@ import { getClaudeRuntimeDiagnostics } from '../../agentv3/claudeConfig';
 import { getOpenAIRuntimeDiagnostics, hasOpenAICredentials } from '../../agentOpenAI/openAiConfig';
 import { getTraceProcessorPath } from '../../services/workingTraceProcessor';
 import { getProviderService } from '../../services/providerManager';
+import { parseAdbDevices } from './androidCapture';
+import { resolveAdbTool, resolveTraceboxTool } from './captureTools';
+import type { CaptureToolResolution } from '../types';
 
 export interface RuntimeGuardResult {
   selection: RuntimeSelection;
@@ -88,6 +92,15 @@ export interface DoctorReport {
     exists: boolean;
     executable: boolean;
   };
+  captureTools: {
+    adb: CaptureToolResolution;
+    tracebox: CaptureToolResolution;
+    devices: {
+      count: number;
+      readyCount: number;
+      serials: string[];
+    };
+  };
   providers: {
     count: number;
     active?: {
@@ -108,6 +121,9 @@ export function collectDoctorReport(cliHome: string): DoctorReport {
   const traceProcessorPath = getTraceProcessorPath();
   const traceProcessorExists = fs.existsSync(traceProcessorPath);
   const traceProcessorExecutable = traceProcessorExists && isExecutable(traceProcessorPath);
+  const adb = resolveAdbTool();
+  const tracebox = resolveTraceboxTool();
+  const adbDevices = collectAdbDevices(adb);
   const providerSvc = getProviderService();
   const providers = providerSvc.list();
   const active = providers.find((p) => p.isActive);
@@ -153,6 +169,24 @@ export function collectDoctorReport(cliHome: string): DoctorReport {
         : 'trace_processor_shell is missing; CLI will download the pinned binary on first trace command',
       details: { path: traceProcessorPath },
     },
+    {
+      name: 'adb',
+      ok: adb.exists && adb.executable,
+      status: adb.exists && adb.executable ? 'ok' : 'warn',
+      message: adb.exists && adb.executable
+        ? `adb is available (${adb.source})`
+        : 'adb is not available; Android capture needs ADB_PATH, bundled adb, or adb on PATH',
+      details: { path: adb.path, source: adb.source, devices: adbDevices.readyCount },
+    },
+    {
+      name: 'tracebox',
+      ok: tracebox.exists && tracebox.executable,
+      status: tracebox.exists && tracebox.executable ? 'ok' : 'warn',
+      message: tracebox.exists && tracebox.executable
+        ? `tracebox is available for sideload capture (${tracebox.source})`
+        : 'tracebox is not bundled; sideload capture requires --tracebox or an approved packaged binary',
+      details: { path: tracebox.path, source: tracebox.source },
+    },
   ];
 
   return {
@@ -171,11 +205,36 @@ export function collectDoctorReport(cliHome: string): DoctorReport {
       exists: traceProcessorExists,
       executable: traceProcessorExecutable,
     },
+    captureTools: {
+      adb,
+      tracebox,
+      devices: adbDevices,
+    },
     providers: {
       count: providers.length,
       ...(active ? { active: { id: active.id, name: active.name, type: active.type } } : {}),
     },
     checks,
+  };
+}
+
+function collectAdbDevices(adb: CaptureToolResolution): DoctorReport['captureTools']['devices'] {
+  if (!adb.exists || !adb.executable) {
+    return { count: 0, readyCount: 0, serials: [] };
+  }
+  const result = spawnSync(adb.path, ['devices', '-l'], {
+    encoding: 'utf-8',
+    timeout: 5000,
+  });
+  if (result.error || result.status !== 0) {
+    return { count: 0, readyCount: 0, serials: [] };
+  }
+  const devices = parseAdbDevices(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  const ready = devices.filter((device) => device.state === 'device');
+  return {
+    count: devices.length,
+    readyCount: ready.length,
+    serials: ready.map((device) => device.serial),
   };
 }
 

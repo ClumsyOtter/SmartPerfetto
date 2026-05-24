@@ -1,32 +1,15 @@
 // backend/src/services/providerManager/connectionTester.ts
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type { AgentRuntimeKind, DualSurfaceProviderType, ProviderConfig, ProviderType, TestResult } from './types';
+import type { ProviderConfig, ProviderType, TestResult } from './types';
+import {
+  resolveProviderAgentRuntime,
+  sharedKeyShouldUseClaudeAuthToken,
+} from './runtimeCapabilities';
 
 const TEST_REQUEST_TIMEOUT_MS = 10000;
 const TEST_TOTAL_TIMEOUT_MS = 15000;
 const TEST_RESPONSE_BODY_TIMEOUT_MS = 3000;
-const DUAL_SURFACE_PROVIDER_TYPES: DualSurfaceProviderType[] = [
-  'deepseek',
-  'glm',
-  'qwen',
-  'qwen_coding',
-  'kimi_code',
-  'kimi',
-  'doubao',
-  'minimax',
-  'xiaomi',
-  'tencent_token_plan',
-  'tencent_coding_plan',
-  'hunyuan',
-  'qianfan',
-  'stepfun',
-  'siliconflow',
-  'huawei',
-];
-const CLAUDE_RUNTIME_TYPES: ProviderType[] = ['anthropic', 'bedrock', 'vertex', ...DUAL_SURFACE_PROVIDER_TYPES, 'custom'];
-const OPENAI_RUNTIME_TYPES: ProviderType[] = ['openai', 'ollama', ...DUAL_SURFACE_PROVIDER_TYPES, 'custom'];
-
 interface RequestInit {
   method: string;
   headers: Record<string, string>;
@@ -58,65 +41,10 @@ async function runTest(provider: ProviderConfig): Promise<Omit<TestResult, 'late
   if (provider.type === 'vertex') return testVertex(provider);
   if (provider.type === 'ollama') return testOllama(provider);
 
-  if (resolveAgentRuntime(provider) === 'openai-agents-sdk') {
+  if (resolveProviderAgentRuntime(provider) === 'openai-agents-sdk') {
     return testOpenAICompatible(provider);
   }
   return testAnthropic(provider);
-}
-
-function resolveAgentRuntime(provider: ProviderConfig): AgentRuntimeKind {
-  if (
-    provider.connection.agentRuntime &&
-    provider.connection.agentRuntime !== 'claude-agent-sdk' &&
-    provider.connection.agentRuntime !== 'openai-agents-sdk'
-  ) {
-    throw new Error(`Invalid agent runtime: ${provider.connection.agentRuntime}`);
-  }
-  if (
-    provider.connection.agentRuntime === 'claude-agent-sdk' ||
-    provider.connection.agentRuntime === 'openai-agents-sdk'
-  ) {
-    if (!supportsRuntime(provider.type, provider.connection.agentRuntime)) {
-      throw new Error(`Provider type "${provider.type}" does not support ${provider.connection.agentRuntime}`);
-    }
-    return provider.connection.agentRuntime;
-  }
-  if (provider.type === 'openai' || provider.type === 'ollama') return 'openai-agents-sdk';
-  if (
-    provider.type === 'custom' &&
-    (provider.connection.openaiProtocol || provider.connection.openaiBaseUrl || provider.connection.openaiApiKey)
-  ) {
-    const hasClaudeSurface = Boolean(
-      provider.connection.claudeBaseUrl ||
-      provider.connection.claudeApiKey ||
-      provider.connection.claudeAuthToken,
-    );
-    return hasClaudeSurface ? 'claude-agent-sdk' : 'openai-agents-sdk';
-  }
-  return 'claude-agent-sdk';
-}
-
-function supportsRuntime(type: ProviderType, runtime: AgentRuntimeKind): boolean {
-  return runtime === 'openai-agents-sdk'
-    ? OPENAI_RUNTIME_TYPES.includes(type)
-    : CLAUDE_RUNTIME_TYPES.includes(type);
-}
-
-function sharedKeyShouldUseClaudeAuthToken(type: ProviderType): boolean {
-  return [
-    'deepseek',
-    'qwen',
-    'qwen_coding',
-    'kimi',
-    'doubao',
-    'minimax',
-    'tencent_token_plan',
-    'tencent_coding_plan',
-    'hunyuan',
-    'qianfan',
-    'stepfun',
-    'huawei',
-  ].includes(type);
 }
 
 function getClaudeBaseUrl(provider: ProviderConfig, defaultBaseUrl: string): string {

@@ -202,12 +202,60 @@ CLI files are stored under:
 
 ## Android Capture
 
-The first version supports only a locally connected adb device:
+`smp capture` records Android system traces from a connected device. It follows
+Perfetto's Android/Linux system-tracing model: use the device `perfetto` binary
+on Android Q/API 29 and newer, and use a packaged or explicitly supplied
+`tracebox` only for older devices or `--sideload`.
 
 ```bash
-smp capture android --app com.example.app --duration 10 --out launch.perfetto-trace
-smp capture android --app com.example.app --duration 10 --serial <adbSerial> --out launch.perfetto-trace
+smp capture presets
+smp capture config --preset startup --app com.example.app --duration 10 --out startup.pbtxt
+smp capture config --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.pbtxt
+
+smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
+smp capture android --preset scrolling --app com.example.app --duration 15 --serial <adbSerial> --out scroll.perfetto-trace
+smp capture android --config startup.pbtxt --out launch.perfetto-trace
+smp capture android --config template.pbtxt --duration 10 --categories my_custom_tag --out custom.perfetto-trace
+smp capture android --preset overview --app com.example.app --duration 10 --kill-stale --out retry.perfetto-trace
+smp capture android --preset game --app com.example.game --duration 20 --out game.perfetto-trace --analyze --query "Find launch and frame pacing issues" --mode fast
 ```
+
+Available presets: `startup`, `scrolling`, `anr`, `game`, `memory`, `cpu`,
+`overview`, and `full`. Use `--app '*'` when you intentionally want system-wide
+atrace categories instead of app-scoped atrace tags. `--categories` injects
+additional atrace tags into generated configs or an existing `ftrace_config`.
+Generated configs scale the primary buffer with duration, roughly 8 MB/s clamped
+between 64 MB and 512 MB. `--config <pbtxt>` keeps the old
+`record_android_trace -c ... -o ...` workflow shape; plain configs pass through,
+and templates may contain `{duration_ms}` and `{buffer_size_kb}` placeholders
+that are rendered when `--duration` is provided.
+
+Capture preflight checks warn when stale `perfetto` / `simpleperf` / `traced`
+processes or SELinux `Enforcing` are detected. `--kill-stale` applies the stale
+process cleanup before capture; it is opt-in because it kills tracing services
+on the device.
+
+Source checkout example:
+
+```bash
+npm --prefix backend run cli:dev -- capture android \
+  --config ~/tools/perfetto_shell/perfetto.config \
+  --out ~/tools/perfetto_shell/trace/dut-game-launch.ptrace
+```
+
+`--analyze` records the trace and immediately starts the normal CLI analysis
+session. The captured trace path, target, serial, preset/config, tools, and
+`--mode fast|full|auto` metadata are persisted in the session config so the
+result can be resumed and audited.
+
+Tool resolution is intentionally offline during capture. `adb` is resolved from
+`ADB_PATH`, then an approved bundled slot
+`prebuilts/android-platform-tools/<host>/adb`, then `PATH`. Android SDK
+Platform-Tools binaries are not blindly redistributed. Sideload capture resolves
+device-ABI `tracebox` from `prebuilts/perfetto-recording-tools/android-*/` or
+`--tracebox`; missing tools produce explicit override guidance. macOS, Windows,
+and Linux hosts can capture Android devices. Linux host system tracing is
+reserved for a future `smp capture linux` target.
 
 Pass `--serial` when multiple devices are connected.
 

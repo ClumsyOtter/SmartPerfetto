@@ -193,12 +193,55 @@ CLI 文件存储在：
 
 ## Android 采集
 
-第一版只支持本地 adb connected device：
+`smp capture` 用于从已连接 Android 设备录制系统 trace。实现方式遵循
+Perfetto 的 Android/Linux system tracing 路线：Android Q/API 29 及以上优先使用
+设备内置 `perfetto`，更老设备或显式 `--sideload` 才使用已打包或手动指定的
+`tracebox`。
 
 ```bash
-smp capture android --app com.example.app --duration 10 --out launch.perfetto-trace
-smp capture android --app com.example.app --duration 10 --serial <adbSerial> --out launch.perfetto-trace
+smp capture presets
+smp capture config --preset startup --app com.example.app --duration 10 --out startup.pbtxt
+smp capture config --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.pbtxt
+
+smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
+smp capture android --preset scrolling --app com.example.app --duration 15 --serial <adbSerial> --out scroll.perfetto-trace
+smp capture android --config startup.pbtxt --out launch.perfetto-trace
+smp capture android --config template.pbtxt --duration 10 --categories my_custom_tag --out custom.perfetto-trace
+smp capture android --preset overview --app com.example.app --duration 10 --kill-stale --out retry.perfetto-trace
+smp capture android --preset game --app com.example.game --duration 20 --out game.perfetto-trace --analyze --query "分析启动和帧节奏问题" --mode fast
 ```
+
+内置预设包括：`startup`、`scrolling`、`anr`、`game`、`memory`、`cpu`、
+`overview`、`full`。需要系统级 atrace category 而不是 app-scoped atrace tag
+时，可以显式传 `--app '*'`。`--categories` 可以把额外 atrace tag 注入到生成
+配置或已有 `ftrace_config` 中。生成配置会按 duration 自动放大主 buffer，规则约为
+8 MB/s，并限制在 64 MB 到 512 MB 之间。`--config <pbtxt>` 保留旧
+`record_android_trace -c ... -o ...` 的使用形态；普通配置原样传入，模板配置支持
+`{duration_ms}` 和 `{buffer_size_kb}` 占位符，传 `--duration` 后会渲染。
+
+抓取前会检查 stale `perfetto` / `simpleperf` / `traced` 进程和 SELinux
+`Enforcing` 状态并给出提示。`--kill-stale` 会在抓取前清理残留 tracing 进程；它会杀
+设备上的 tracing 服务，所以保持显式 opt-in。
+
+源码 checkout 示例：
+
+```bash
+npm --prefix backend run cli:dev -- capture android \
+  --config ~/tools/perfetto_shell/perfetto.config \
+  --out ~/tools/perfetto_shell/trace/dut-game-launch.ptrace
+```
+
+传 `--analyze` 后会先录制 trace，再立即进入普通 CLI 分析 session。捕获到的
+trace 路径、target、serial、preset/config、工具来源和 `--mode fast|full|auto`
+会写入 session config，便于后续 resume 和审计。
+
+抓取阶段不会现场下载工具。`adb` 按 `ADB_PATH`、已批准的包内 slot
+`prebuilts/android-platform-tools/<host>/adb`、`PATH` 的顺序解析；Android SDK
+Platform-Tools binary 不会被直接盲目再分发。需要 sideload 时，CLI 会按设备 ABI
+查找 `prebuilts/perfetto-recording-tools/android-*/tracebox`，也可以通过
+`--tracebox` 显式指定；缺失时会给出明确 override 提示。macOS、Windows、Linux
+宿主机都可以抓 Android 设备；Linux 宿主机 system tracing 预留给后续
+`smp capture linux` target。
 
 当连接多个设备时必须传 `--serial`。
 

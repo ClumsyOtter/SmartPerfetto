@@ -12,6 +12,73 @@
 import type { BackendAgentRuntimeKind } from '../agentRuntime/runtimeSelection';
 import type { CodeAwareMode } from '../services/codebase/codeAwareFeature';
 
+export type CapturePresetId =
+  | 'startup'
+  | 'scrolling'
+  | 'anr'
+  | 'game'
+  | 'memory'
+  | 'cpu'
+  | 'overview'
+  | 'full';
+
+export type CaptureTarget = 'android' | 'linux';
+
+export type CliAnalysisMode = 'fast' | 'full' | 'auto';
+
+export interface CaptureConfigRenderOptions {
+  target: CaptureTarget;
+  preset: CapturePresetId;
+  app?: string;
+  durationSeconds: number;
+  bufferSizeKb?: number;
+  extraAtraceCategories?: string[];
+  cuj?: string;
+}
+
+export interface CaptureToolResolution {
+  name: 'adb' | 'tracebox';
+  source: 'env' | 'bundled' | 'path' | 'override' | 'missing';
+  path: string;
+  exists: boolean;
+  executable: boolean;
+  platformKey?: string;
+  hint?: string;
+}
+
+export interface TraceCaptureResult {
+  target: 'android';
+  serial: string;
+  app?: string;
+  preset?: CapturePresetId;
+  configPath?: string;
+  durationSeconds: number;
+  out: string;
+  remotePath: string;
+  usedSideload: boolean;
+  tools: {
+    adb: CaptureToolResolution;
+    tracebox?: CaptureToolResolution;
+  };
+  device?: {
+    apiLevel?: number;
+    abi?: string;
+    perfettoCommand?: string;
+  };
+  preflight?: {
+    warnings: string[];
+    selinux?: string;
+    staleProcessesDetected?: boolean;
+    killedStaleProcesses?: boolean;
+  };
+  analysis?: {
+    sessionId: string;
+    sessionDir: string;
+    turn: number;
+    success: boolean;
+  };
+}
+
 /** Written to `<sessionDir>/config.json`. Source of truth for resume. */
 export interface CliSessionConfig {
   /** CLI-local session id (same as backend session id — no separate namespace). */
@@ -40,6 +107,10 @@ export interface CliSessionConfig {
   codeAwareMode?: CodeAwareMode;
   /** Registered codebase ids exposed to this analysis turn. */
   codebaseIds?: string[];
+  /** Analysis mode selected for the latest turn. */
+  analysisMode?: CliAnalysisMode;
+  /** Capture metadata when the session was created by `smp capture ... --analyze`. */
+  capture?: TraceCaptureResult;
   /** Unix ms when session was created. */
   createdAt: number;
   /** Unix ms of most recent turn completion. */

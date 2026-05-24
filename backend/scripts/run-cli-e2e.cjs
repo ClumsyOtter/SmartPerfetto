@@ -42,6 +42,7 @@ async function main() {
   const outputDir = path.join(workRoot, 'output');
   const envFile = path.join(workRoot, 'cli-e2e.env');
   fs.mkdirSync(outputDir, { recursive: true });
+  const fakeAdbPath = createFakeAdbScript(workRoot);
 
   const baseEnv = {
     ...process.env,
@@ -74,7 +75,7 @@ async function main() {
     const fullArgs = options.noSessionDir ? args : ['--env-file', envFile, '--session-dir', sessionHome, ...args];
     const result = runProcess(name, cli.command, [...cli.prefixArgs, ...fullArgs], {
       cwd: repoRoot,
-      env: baseEnv,
+      env: { ...baseEnv, ...(options.env || {}) },
       timeoutMs: options.timeoutMs ?? 120000,
       expectExit: options.expectExit ?? 0,
     });
@@ -112,9 +113,96 @@ async function main() {
   assert.equal(providerTest.ok, true);
   assert.equal(providerTest.runtime.kind, 'openai-agents-sdk');
 
+  const capturePresets = parseJson(runCli('capture presets json', ['capture', 'presets', '--format', 'json']).stdout);
+  assert.equal(capturePresets.ok, true);
+  assert(capturePresets.presets.some((preset) => preset.id === 'startup'));
+
+  const captureConfigPath = path.join(outputDir, 'startup.pbtxt');
+  const captureConfig = parseJson(runCli('capture config json', [
+    'capture',
+    'config',
+    '--preset',
+    'startup',
+    '--app',
+    'com.example.app',
+    '--duration',
+    '3',
+    '--categories',
+    'dalvikviktime',
+    'my_custom_tag',
+    '--out',
+    captureConfigPath,
+    '--format',
+    'json',
+  ]).stdout);
+  assert.equal(captureConfig.ok, true);
+  assert.equal(captureConfig.out, captureConfigPath);
+  assertFileContains(captureConfigPath, 'duration_ms: 3000', 'capture preset config');
+  assertFileContains(captureConfigPath, 'atrace_categories: "dalvikviktime"', 'capture preset config custom category');
+  assertFileContains(captureConfigPath, 'atrace_categories: "my_custom_tag"', 'capture preset config custom category');
+
+  const capturedTracePath = path.join(outputDir, 'fake-capture.perfetto-trace');
+  const captureOnly = parseJson(runCli('capture android fake json', [
+    'capture',
+    'android',
+    '--format',
+    'json',
+    '--preset',
+    'startup',
+    '--app',
+    'com.example.app',
+    '--duration',
+    '3',
+    '--out',
+    capturedTracePath,
+  ], {
+    env: {
+      ADB_PATH: fakeAdbPath,
+      SMARTPERFETTO_CLI_E2E_FAKE_CAPTURE_SOURCE: tracePath,
+    },
+    timeoutMs: 240000,
+  }).stdout);
+  assert.equal(captureOnly.ok, true);
+  assert.equal(captureOnly.capture.target, 'android');
+  assert.equal(captureOnly.capture.preset, 'startup');
+  assert.equal(captureOnly.capture.usedSideload, false);
+  assertFile(capturedTracePath, 'fake captured Android trace');
+
+  const captureAnalyzeTracePath = path.join(outputDir, 'fake-capture-analyze.perfetto-trace');
+  const captureAnalyze = parseJson(runCli('capture android fake analyze json', [
+    'capture',
+    'android',
+    '--format',
+    'json',
+    '--config',
+    captureConfigPath,
+    '--out',
+    captureAnalyzeTracePath,
+    '--analyze',
+    '--query',
+    'Analyze captured startup trace',
+    '--mode',
+    'fast',
+  ], {
+    env: {
+      ADB_PATH: fakeAdbPath,
+      SMARTPERFETTO_CLI_E2E_FAKE_CAPTURE_SOURCE: tracePath,
+    },
+    timeoutMs: 240000,
+  }).stdout);
+  assert.equal(captureAnalyze.ok, true);
+  assert.match(captureAnalyze.sessionId, /^agent-/);
+  assert.match(captureAnalyze.conclusion, /CLI E2E fake conclusion/);
+  const captureAnalyzeConfig = parseJson(fs.readFileSync(path.join(captureAnalyze.sessionDir, 'config.json'), 'utf-8'));
+  assert.equal(captureAnalyzeConfig.analysisMode, 'fast');
+  assert.equal(captureAnalyzeConfig.capture.target, 'android');
+  assert.equal(captureAnalyzeConfig.capture.configPath, captureConfigPath);
+  assert.equal(captureAnalyzeConfig.capture.out, captureAnalyzeTracePath);
+  assertFile(captureAnalyzeTracePath, 'fake captured Android trace for analysis');
+
   const emptyList = parseJson(runCli('list empty', ['list', '--json']).stdout);
   assert(Array.isArray(emptyList));
-  assert.equal(emptyList.length, 0);
+  assert.equal(emptyList.length, 1);
 
   const query = parseJson(runCli(
     'query json',
@@ -262,6 +350,7 @@ async function main() {
   const listAfterRm = parseJson(runCli('list after rm', ['list', '--json']).stdout);
   assert(!listAfterRm.some((entry) => entry.sessionId === sessionId));
   runCli('rm analyze compatibility session', ['rm', analyze.sessionId, '--yes']);
+  runCli('rm capture analyze session', ['rm', captureAnalyze.sessionId, '--yes']);
   assertNoNewBackendTraceUploads(backendTraceUploadsBefore);
 
   if (mode === 'live') {
@@ -342,6 +431,72 @@ function buildPackedCli() {
     : path.join(installDir, 'node_modules/.bin/smp');
   assertFile(bin, 'installed smp binary');
   return { command: bin, prefixArgs: [] };
+}
+
+function createFakeAdbScript(rootDir) {
+  const scriptPath = path.join(rootDir, process.platform === 'win32' ? 'fake-adb.cmd' : 'fake-adb');
+  if (process.platform === 'win32') {
+    fs.writeFileSync(scriptPath, `@echo off\r\nnode "%~dp0\\fake-adb.cjs" %*\r\n`, 'utf-8');
+    fs.writeFileSync(path.join(rootDir, 'fake-adb.cjs'), fakeAdbSource(), 'utf-8');
+    return scriptPath;
+  }
+  fs.writeFileSync(scriptPath, fakeAdbSource(), 'utf-8');
+  fs.chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function fakeAdbSource() {
+  return `#!/usr/bin/env node
+const fs = require('fs');
+
+let args = process.argv.slice(2);
+if (args[0] === '-s') args = args.slice(2);
+
+if (args[0] === 'version') {
+  console.log('Android Debug Bridge version 1.0.41');
+  process.exit(0);
+}
+
+if (args[0] === 'devices') {
+  console.log('List of devices attached');
+  console.log('fake-device-1 device product:fake model:FakePhone transport_id:1');
+  process.exit(0);
+}
+
+if (args[0] === 'push') process.exit(0);
+
+if (args[0] === 'pull') {
+  const source = process.env.SMARTPERFETTO_CLI_E2E_FAKE_CAPTURE_SOURCE;
+  const out = args[2];
+  if (!source || !out) {
+    console.error('missing fake capture source or pull destination');
+    process.exit(1);
+  }
+  fs.copyFileSync(source, out);
+  process.exit(0);
+}
+
+if (args[0] === 'shell') {
+  const command = args.slice(1).join(' ');
+  if (command.includes('getprop ro.build.version.sdk')) {
+    console.log('33');
+    console.log('arm64-v8a');
+    console.log('shell');
+    process.exit(0);
+  }
+  if (command.includes('test -d /proc/4242')) {
+    console.log('TERM');
+    process.exit(0);
+  }
+  if (args.includes('--background') || command.includes('--background')) {
+    console.log('4242');
+    process.exit(0);
+  }
+  process.exit(0);
+}
+
+process.exit(0);
+`;
 }
 
 function runLiveOptionalCases(runCli, outputDir) {

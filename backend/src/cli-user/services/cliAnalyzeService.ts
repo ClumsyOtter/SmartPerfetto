@@ -51,6 +51,7 @@ import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
 import type { QueryResult } from '../../services/traceProcessorService';
 import type { CodeAwareMode } from '../../services/codebase/codeAwareFeature';
 import { validateDataEnvelope, type DataEnvelope } from '../../types/dataContract';
+import type { CliAnalysisMode } from '../types';
 
 export interface RunTurnInput {
   tracePath?: string;
@@ -58,6 +59,7 @@ export interface RunTurnInput {
   referenceTraceId?: string;
   query: string;
   sessionId?: string;
+  analysisMode?: CliAnalysisMode;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
   /** Receives every StreamingUpdate from the orchestrator in real time. */
@@ -212,6 +214,7 @@ export class CliAnalyzeService {
       result = await orchestrator.analyze(input.query, sessionId, traceId, {
         providerId: session.providerId,
         referenceTraceId: effectiveReferenceTraceId,
+        analysisMode: input.analysisMode,
         codeAwareMode: input.codeAwareMode,
         codebaseIds: input.codebaseIds,
       });

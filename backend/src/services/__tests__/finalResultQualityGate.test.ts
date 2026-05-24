@@ -193,6 +193,42 @@ describe('final result quality gate', () => {
     })).toBeUndefined();
   });
 
+  it('accepts startup reports that express phase timing as a root-cause tree and use spaced audience labels', () => {
+    const report = [
+      '## 综合结论',
+      '',
+      '启动类型为冷启动，dur=1338ms，TTID=1912ms，TTFD 不可用。',
+      '',
+      '### 根因分析树',
+      '',
+      '启动 1338ms (TTID=1912ms)',
+      '├── [Phase 1] bindApplication = 576ms wall (self_ms=1.5ms)',
+      '│   └── LoadSimulator_AppInit = 478ms wall (self_ms=207ms) ← A11',
+      '├── [Phase 2] activityStart = 832ms wall (self_ms=5ms)',
+      '│   └── SimulateInflation = 179ms (self_ms=175ms) ← A4',
+      '└── [首帧后] MQ_Chain 阻塞器 = 573ms ← A17',
+      '',
+      '### 关键证据链',
+      '',
+      '- 根因编号 A11/A16/A4/A17 均有 data:skill:startup_detail:hot_slice_states 佐证。',
+      '',
+      '### 优化建议',
+      '',
+      '**[App 层]**',
+      '',
+      '- 延后 LoadSimulator 初始化。',
+      '',
+      '**[系统/平台层]**',
+      '',
+      '- 当前无系统侧阻塞证据。',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({ conclusion: report }),
+      query: '分析启动性能',
+    })).toBeUndefined();
+  });
+
   it('marks empty successful results as partial instead of normal completion', () => {
     const target = result({
       conclusion: '   ',

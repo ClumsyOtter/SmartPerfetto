@@ -8,6 +8,7 @@ import path from 'path';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
+import { getProviderService, resetProviderService } from '../../services/providerManager';
 import { saveClaudeSessionMapToRuntimeSnapshots } from '../../services/runtimeSnapshotStore';
 import { ClaudeRuntime, __testing } from '../claudeRuntime';
 
@@ -20,6 +21,7 @@ const claudeSdkMock = require('@anthropic-ai/claude-agent-sdk') as {
 const originalEnv = {
   enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
   enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
+  providerDataDirOverride: process.env.PROVIDER_DATA_DIR_OVERRIDE,
 };
 
 let tmpDir: string | undefined;
@@ -50,14 +52,19 @@ beforeEach(async () => {
   dbPath = path.join(tmpDir, 'enterprise.sqlite');
   process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
   process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+  process.env.PROVIDER_DATA_DIR_OVERRIDE = tmpDir;
+  resetProviderService();
 });
 
 afterEach(async () => {
   claudeSdkMock.__resetQueryMock();
   sessionContextManager.remove('session-a');
   sessionContextManager.remove('session-quick');
+  sessionContextManager.remove('session-provider');
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
+  restoreEnvValue('PROVIDER_DATA_DIR_OVERRIDE', originalEnv.providerDataDirOverride);
+  resetProviderService();
   if (tmpDir) {
     await fs.rm(tmpDir, { recursive: true, force: true });
     tmpDir = undefined;
@@ -65,6 +72,90 @@ afterEach(async () => {
 });
 
 describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
+  it('does not mark a correction timeout partial when the existing conclusion is deliverable', () => {
+    const conclusion =
+      '我来分析这个 WebView 应用的启动性能。首先提交分析计划并获取启动概览数据。计划已提交。开始 Phase 1：获取启动概览数据。\n\n' +
+      '# 启动性能分析报告\n\n' +
+      '## 综合结论\n\n' +
+      '冷启动 TTID=1912ms，主因是主线程 ChaosTask 模拟负载，证据来自 art-1 与 art-2。\n\n' +
+      '## 关键证据链\n\n' +
+      '- art-1: startup_analysis 显示冷启动。\n' +
+      '- art-2: main thread running=63%。\n\n' +
+      '## 优化建议\n\n' +
+      '- App 侧：削减 ChaosTask 初始化负载。\n' +
+      '- 系统侧：当前无明确系统瓶颈。';
+
+    expect(__testing.sanitizeClaudeConclusionText(conclusion).startsWith('# 启动性能分析报告')).toBe(true);
+    expect(__testing.shouldMarkCorrectionTimeoutPartial({
+      correctedResult: '',
+      existingConclusion: conclusion,
+    })).toBe(false);
+  });
+
+  it('marks a correction timeout partial when neither correction nor existing conclusion is deliverable', () => {
+    expect(__testing.shouldMarkCorrectionTimeoutPartial({
+      correctedResult: '',
+      existingConclusion: '我需要继续调用工具补齐 Phase 2，并稍后输出报告。',
+    })).toBe(true);
+  });
+
+  it('prefers a streamed deliverable report over a terse terminal summary before verification', () => {
+    const chosen = __testing.chooseClaudeConclusionText({
+      finalResult: '**总结**：冷启动 TTID 1912ms，主因是 ChaosTask。',
+      accumulatedAnswer:
+        '我来分析这个 WebView 应用的启动性能。开始 Phase 1：获取启动概览数据。\n\n' +
+        '# 启动性能分析报告\n\n' +
+        '## 综合结论\n\n' +
+        '冷启动 TTID=1912ms，主因是主线程 ChaosTask 模拟负载，证据来自 art-1 与 art-2。\n\n' +
+        '## 关键证据链\n\n' +
+        '- art-1: startup_analysis 显示冷启动。\n' +
+        '- art-2: main thread running=63%。\n\n' +
+        '## 优化建议\n\n' +
+        '- App 侧：削减 ChaosTask 初始化负载。',
+    });
+
+    expect(chosen.startsWith('# 启动性能分析报告')).toBe(true);
+    expect(chosen).not.toContain('我来分析这个 WebView 应用');
+  });
+
+  it('adds a scene report heading for structured reports that start with a domain annotation', () => {
+    const normalized = __testing.ensureClaudeFinalReportHeading(
+      '所有深钻数据已收集完毕。现在输出综合结论。\n\n' +
+      '## ⚠️ 测试/基准应用标注\n\n' +
+      'CustomScroll_longFrameLoad 是测试负载。\n\n' +
+      '## 1. 概览\n\n' +
+      '总帧数 347，真实掉帧 7 帧，最长帧 62.73ms，掉帧率 2.02%。' +
+      '证据来自 evidence_ref_id=data:art-4 与 source_ref=滑动性能概览。' +
+      '根因集中在 animation 回调内的 CustomScroll_longFrameLoad，同步占用主线程 59.31ms。' +
+      'RenderThread 仅 1.88ms，说明瓶颈不在渲染线程。' +
+      '优化建议是拆分长负载并移出 Choreographer animation 回调。',
+      'scrolling',
+      'zh-CN',
+    );
+
+    expect(normalized.startsWith('# 滑动性能分析报告')).toBe(true);
+    expect(normalized).not.toContain('所有深钻数据已收集完毕');
+  });
+
+  it('strips process narration that appears after an inserted scene report heading', () => {
+    const normalized = __testing.ensureClaudeFinalReportHeading(
+      '我来分析这个 trace 的滑动性能。首先提交分析计划并获取 trace 时间范围。计划缺少架构特定分析阶段，需要补充。重新提交完整计划。计划已提交。\n\n' +
+      '## ⚠️ 测试/基准应用标注\n\n' +
+      'CustomScroll_longFrameLoad 是测试负载。\n\n' +
+      '## 1. 概览\n\n' +
+      '总帧数 347，真实掉帧 7 帧，最长帧 62.73ms。证据来自 evidence_ref_id=data:art-4 与 source_ref=滑动性能概览。\n\n' +
+      '## 优化建议\n\n' +
+      '- App 侧：拆分 CustomScroll_longFrameLoad。',
+      'scrolling',
+      'zh-CN',
+    );
+
+    expect(normalized.startsWith('# 滑动性能分析报告')).toBe(true);
+    expect(normalized).not.toContain('我来分析这个 trace');
+    expect(normalized).not.toContain('计划缺少架构特定分析阶段');
+    expect(normalized).toContain('## ⚠️ 测试/基准应用标注');
+  });
+
   it('recognizes missing SDK conversations from object-shaped result errors', () => {
     const message = __testing.getSdkResultErrorMessage({
       type: 'result',
@@ -502,5 +593,76 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
       sdkSessionId: 'full-sdk-session',
       mode: 'full',
     }));
+  });
+
+  it('uses scoped Claude provider tuning when preparing full SDK options', async () => {
+    const svc = getProviderService();
+    const provider = svc.create({
+      name: 'Scoped Claude Provider',
+      category: 'official',
+      type: 'anthropic',
+      models: {
+        primary: 'provider-claude-main',
+        light: 'provider-claude-light',
+        subAgent: 'provider-claude-subagent',
+      },
+      connection: {
+        agentRuntime: 'claude-agent-sdk',
+        claudeApiKey: 'sk-provider-claude',
+      },
+      tuning: {
+        maxTurns: 4,
+        fullPerTurnMs: 10000,
+        effort: 'max',
+        enableSubAgents: true,
+        enableVerification: false,
+      },
+    });
+    svc.activate(provider.id);
+
+    const runtime = new ClaudeRuntime({
+      query: async () => ({ columns: [], rows: [] }),
+      getTrace: () => ({ traceOs: 'android', traceFormat: 'perfetto' }),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+      model: 'base-claude-main',
+      maxTurns: 60,
+      effort: 'low',
+    });
+    (runtime as any).architectureCache.set('trace-provider', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sdk-provider-session',
+        num_turns: 1,
+        result: [
+          '## 综合结论',
+          'Scoped provider tuning was applied to the Claude full analysis path.',
+          '',
+          '## 证据',
+          '- Provider-specific model, effort, maxTurns, and sub-agent config were used.',
+        ].join('\n'),
+      };
+    });
+
+    const result = await runtime.analyze('分析 UI 卡顿', 'session-provider', 'trace-provider', {
+      analysisMode: 'full',
+      packageName: 'com.example.app',
+    });
+
+    expect(result.success).toBe(true);
+    const [call] = claudeSdkMock.__getQueryCalls();
+    expect(call.options.model).toBe('provider-claude-main');
+    expect(call.options.maxTurns).toBe(4);
+    expect(call.options.effort).toBe('max');
+    expect(call.options.env.ANTHROPIC_API_KEY).toBe('sk-provider-claude');
+    expect(call.options.agents).toBeDefined();
+    expect(JSON.stringify(call.options.agents)).toContain('provider-claude-subagent');
   });
 });

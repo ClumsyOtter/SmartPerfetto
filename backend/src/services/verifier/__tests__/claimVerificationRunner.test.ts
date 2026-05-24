@@ -405,7 +405,7 @@ describe('runClaimVerification', () => {
       kind: 'categorical',
       text: '启动类型为冷启动',
       references: [{
-        evidenceRefId: 'art-2',
+        evidenceRefId: 'data:art-2',
         sourceRef: '检测到的启动事件',
         rowIndex: 0,
         column: 'type_display',
@@ -420,6 +420,44 @@ describe('runClaimVerification', () => {
 
     expect(result.claimSupport[0].anchors[0].evidenceRefId).toBe('data:skill:startup_events_in_range');
     expect(result.claimSupport[0].anchors[0].context.artifactId).toBe('art-2');
+    expect(result.claimVerificationResult.status).toBe('passed');
+  });
+
+  it('treats ev_art ids as artifact aliases from narrative claim refs', () => {
+    const envelope = createDataEnvelope({
+      columns: ['jank_type', 'count'],
+      rows: [['App Deadline Missed', 6]],
+    }, {
+      type: 'skill_result',
+      source: 'jank_type_stats',
+      title: '掉帧类型分布',
+      layer: 'overview',
+      format: 'table',
+      evidenceRefId: 'data:skill:scrolling_analysis:jank_type_stats',
+      artifactId: 'art-6',
+      traceId: 'trace-a',
+      traceSide: 'current',
+    });
+    const c = contract(120);
+    c.claims![0] = {
+      id: 'claim-jank-type',
+      kind: 'numeric',
+      text: 'App Deadline Missed 有 6 帧',
+      references: [{
+        evidenceRefId: 'ev_art-6',
+        sourceRef: '掉帧类型分布',
+        rowIndex: 0,
+        column: 'count',
+        value: 6,
+      }],
+    };
+
+    const result = runClaimVerification({
+      conclusionContract: c,
+      dataEnvelopes: [envelope],
+    });
+
+    expect(result.claimSupport[0].anchors[0].context.artifactId).toBe('art-6');
     expect(result.claimVerificationResult.status).toBe('passed');
   });
 

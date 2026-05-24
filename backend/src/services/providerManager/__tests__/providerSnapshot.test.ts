@@ -78,4 +78,28 @@ describe('provider runtime snapshot hash', () => {
     expect(JSON.stringify(after.snapshot)).not.toContain('sk-openai-secret-value-v2');
     expect(after.snapshot.environment.OPENAI_API_KEY).toBeUndefined();
   });
+
+  it('ignores OpenAI snapshot fields that the OpenAI runtime does not consume', () => {
+    const provider = svc.create(openAIProvider);
+    const before = resolveProviderRuntimeSnapshot(svc, provider.id);
+
+    svc.update(provider.id, {
+      models: { subAgent: 'ignored-openai-subagent-model' },
+      tuning: {
+        ...openAIProvider.tuning,
+        maxBudgetUsd: 25,
+        effort: 'max',
+        verifierTimeoutMs: 70000,
+        enableSubAgents: true,
+        enableVerification: false,
+      },
+    });
+
+    const after = resolveProviderRuntimeSnapshot(svc, provider.id);
+    expect(after.snapshotHash).toBe(before.snapshotHash);
+    expect(after.snapshot.resolvedModels.subAgent).toBeUndefined();
+    expect(after.snapshot.resolvedTimeouts.verifierTimeoutMs).toBeUndefined();
+    expect(after.snapshot.environment.OPENAI_SUB_AGENT_MODEL).toBeUndefined();
+    expect(after.snapshot.environment.OPENAI_ENABLE_VERIFICATION).toBeUndefined();
+  });
 });

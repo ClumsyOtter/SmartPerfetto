@@ -62,12 +62,7 @@ import {
   buildPatternContextSection,
   buildNegativePatternSection,
 } from '../agentv3/analysisPatternMemory';
-import { SkillNotesBudget } from '../agentv3/selfImprove/skillNotesInjector';
 import { probeTraceCompleteness } from '../agentv3/traceCompletenessProber';
-import {
-  captureEntitiesFromResponses,
-  applyCapturedEntities,
-} from '../agent/core/entityCapture';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../agentv3/outputLanguage';
 import {sanitizeCodeAwareText} from '../services/security/codeAwareOutputRegistry';
 import { formatToolCallNarration } from '../agentv3/toolNarration';
@@ -83,8 +78,22 @@ import {
   looksLikePhaseSummaryFallback,
 } from '../services/finalResultQualityGate';
 import { assessFinalReportContractCompleteness } from '../services/finalReportContractGate';
-import type { ProviderScope } from '../services/providerManager';
-import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
+import {
+  SDK_SESSION_FRESHNESS_MS,
+  buildEntityContext,
+  buildQuickConversationContext,
+  buildRuntimeSessionMapKey,
+  captureSkillDisplayEntities,
+  collectRecentFindings,
+  createRuntimeSkillNotesBudget,
+  formatTraceContext,
+  getLruCacheEntry,
+  isFreshRuntimeEntry,
+  knowledgeScopeFromAnalysisOptions,
+  providerScopeFromAnalysisOptions,
+  setLruCacheEntry,
+  toProtocolHypothesis as toRuntimeProtocolHypothesis,
+} from '../agentRuntime/runtimeCommon';
 
 interface OpenAISessionEntry {
   history?: AgentInputItem[];
@@ -93,9 +102,9 @@ interface OpenAISessionEntry {
   updatedAt: number;
 }
 
-const OPENAI_SESSION_FRESHNESS_MS = 4 * 60 * 60 * 1000;
+const OPENAI_SESSION_FRESHNESS_MS = SDK_SESSION_FRESHNESS_MS;
 const OPENAI_MAX_PLAN_CONTINUATIONS = 3;
-const OPENAI_MAX_FINAL_REPORT_CONTINUATIONS = 2;
+const OPENAI_MAX_FINAL_REPORT_CONTINUATIONS = 4;
 const OPENAI_PLAN_COMPLETE_IDLE_ABORT_MS = 8_000;
 
 interface PlanCompletionStatus {
@@ -109,29 +118,6 @@ function hasAdequateClosedPhaseSummary(phase: PlanPhase): boolean {
   return typeof phase.summary === 'string' && phase.summary.trim().length >= MIN_PHASE_SUMMARY_CHARS;
 }
 
-function formatTraceContext(
-  datasets: import('../agent/core/orchestratorTypes').TraceDataset[] | undefined,
-  outputLanguage: OutputLanguage,
-): string {
-  if (!datasets || datasets.length === 0) return '';
-  const parts = datasets.map((d) => {
-    const header = `| ${d.columns.join(' | ')} |`;
-    const sep = `| ${d.columns.map(() => '---').join(' | ')} |`;
-    const rows = (d.rows as unknown[][]).slice(0, 100).map(
-      (r) => `| ${r.map((v) => String(v ?? '-')).join(' | ')} |`,
-    );
-    const truncNote = d.rows.length > 100
-      ? localize(outputLanguage, `\n*(前 100 行，共 ${d.rows.length} 行)*`, `\n*(first 100 rows out of ${d.rows.length})*`)
-      : '';
-    return `### ${d.label}\n${header}\n${sep}\n${rows.join('\n')}${truncNote}`;
-  });
-  return localize(
-    outputLanguage,
-    `## 前端预查询 Trace 数据\n\n以下数据已由前端查询完毕，直接使用，无需重复 SQL 查询：\n\n${parts.join('\n\n')}`,
-    `## Frontend Pre-queried Trace Data\n\nThe frontend has already queried the following data. Use it directly; do not repeat the same SQL query.\n\n${parts.join('\n\n')}`,
-  );
-}
-
 function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'string') return undefined;
   try {
@@ -140,25 +126,6 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
-}
-
-function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | undefined {
-  if (!options.tenantId || !options.workspaceId) return undefined;
-  return {
-    tenantId: options.tenantId,
-    workspaceId: options.workspaceId,
-    userId: options.userId,
-  };
-}
-
-function knowledgeScopeFromOptions(options: AnalysisOptions): KnowledgeScope | undefined {
-  if (!options.tenantId || !options.workspaceId) return undefined;
-  return {
-    tenantId: options.tenantId,
-    workspaceId: options.workspaceId,
-    userId: options.userId,
-    sourceRunId: options.runId,
-  };
 }
 
 function summarizeToolOutput(value: unknown): string {
@@ -411,12 +378,79 @@ function chooseOpenAiConclusionText(input: {
   return selected;
 }
 
+interface OpenAIRunInputResolution {
+  input: string | AgentInputItem[];
+  effectivePrompt: string;
+  previousResponseId?: string;
+  shouldPersistRemoteSession: boolean;
+}
+
+function resolveOpenAIRunInput(params: {
+  quickMode: boolean;
+  config: OpenAIAgentConfig;
+  sessionEntry?: OpenAISessionEntry;
+  effectivePrompt: string;
+  previousTurns: any[];
+  now?: number;
+}): OpenAIRunInputResolution {
+  let effectivePrompt = params.effectivePrompt;
+  if (params.quickMode) {
+    const quickConversationContext = buildQuickConversationContext(
+      params.previousTurns,
+      params.config.outputLanguage,
+    );
+    if (quickConversationContext) {
+      effectivePrompt = `${quickConversationContext}\n\n${effectivePrompt}`;
+    }
+    return {
+      input: effectivePrompt,
+      effectivePrompt,
+      shouldPersistRemoteSession: false,
+    };
+  }
+
+  const hasFreshSessionEntry = isFreshRuntimeEntry(
+    params.sessionEntry,
+    OPENAI_SESSION_FRESHNESS_MS,
+    params.now ?? Date.now(),
+  );
+  const freshSessionEntry = hasFreshSessionEntry ? params.sessionEntry : undefined;
+  const usePreviousResponse = params.config.protocol === 'responses'
+    && !!freshSessionEntry?.lastResponseId;
+  if (usePreviousResponse) {
+    return {
+      input: effectivePrompt,
+      effectivePrompt,
+      previousResponseId: freshSessionEntry.lastResponseId,
+      shouldPersistRemoteSession: true,
+    };
+  }
+
+  if (freshSessionEntry?.history) {
+    return {
+      input: [
+        ...freshSessionEntry.history,
+        { role: 'user', content: effectivePrompt } as AgentInputItem,
+      ],
+      effectivePrompt,
+      shouldPersistRemoteSession: true,
+    };
+  }
+
+  return {
+    input: effectivePrompt,
+    effectivePrompt,
+    shouldPersistRemoteSession: true,
+  };
+}
+
 export const __testing = {
   isMissingOpenAIPreviousResponseError,
   readCompletedStreamFinalOutput,
   sanitizeOpenAiConclusionText,
   chooseOpenAiConclusionText,
   selectOpenAiRecoveryAnswer,
+  resolveOpenAIRunInput,
   isRecoverableOpenAIStreamTermination,
   compactProviderErrorMessage,
 };
@@ -441,12 +475,12 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   }
 
   private buildSessionMapKey(sessionId: string, referenceTraceId?: string): string {
-    return referenceTraceId ? `${sessionId}:ref:${referenceTraceId}` : sessionId;
+    return buildRuntimeSessionMapKey(sessionId, referenceTraceId);
   }
 
   getSdkSessionId(sessionId: string, referenceTraceId?: string): string | undefined {
     const entry = this.sessionMap.get(this.buildSessionMapKey(sessionId, referenceTraceId));
-    return entry && Date.now() - (entry.updatedAt || 0) < OPENAI_SESSION_FRESHNESS_MS
+    return isFreshRuntimeEntry(entry, OPENAI_SESSION_FRESHNESS_MS)
       ? entry.lastResponseId
       : undefined;
   }
@@ -461,7 +495,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   }
 
   restoreArchitectureCache(traceId: string, architecture: ArchitectureInfo): void {
-    this.architectureCache.set(traceId, architecture);
+    setLruCacheEntry(this.architectureCache, traceId, architecture);
   }
 
   private forgetOpenAILastResponseId(sessionMapKey: string, reason: string): void {
@@ -538,7 +572,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const startTime = Date.now();
     let accumulatedAnswer = '';
     let rounds = 0;
-    const config = loadOpenAIConfig(options.providerId, providerScopeFromOptions(options));
+    const config = loadOpenAIConfig(options.providerId, providerScopeFromAnalysisOptions(options));
     const sceneType = classifyScene(query);
     const quickMode = await this.classifyModeForRequest(query, sessionId, traceId, options, sceneType, config);
 
@@ -552,19 +586,14 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       const promptPrefix = formatTraceContext(options.traceContext, config.outputLanguage);
       const effectivePrompt = promptPrefix ? `${promptPrefix}\n\n${query}` : query;
       const sessionEntry = this.sessionMap.get(context.sessionMapKey);
-      const hasFreshHistory = !!sessionEntry?.history
-        && Date.now() - sessionEntry.updatedAt < OPENAI_SESSION_FRESHNESS_MS;
-      const usePreviousResponse = config.protocol === 'responses'
-        && !!sessionEntry?.lastResponseId
-        && Date.now() - sessionEntry.updatedAt < OPENAI_SESSION_FRESHNESS_MS;
-      const input: string | AgentInputItem[] = usePreviousResponse
-        ? effectivePrompt
-        : hasFreshHistory
-        ? [
-            ...(sessionEntry.history as AgentInputItem[]),
-            { role: 'user', content: effectivePrompt } as AgentInputItem,
-          ]
-        : effectivePrompt;
+      const runInput = resolveOpenAIRunInput({
+        quickMode,
+        config,
+        sessionEntry,
+        effectivePrompt,
+        previousTurns: context.previousTurns,
+      });
+      const input = runInput.input;
 
       setTracingDisabled(true);
       const provider = shouldUseMimoReasoningContentCompat(config)
@@ -616,8 +645,8 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           phase: 'answering',
           message: localize(
             config.outputLanguage,
-            `OpenAI Agents SDK 分析中 (${agent.model})...`,
-            `Analyzing with OpenAI Agents SDK (${agent.model})...`,
+            `AI 分析引擎分析中 (${agent.model})...`,
+            `AI analysis engine is running (${agent.model})...`,
           ),
           runtime: 'openai-agents-sdk',
           model: agent.model,
@@ -625,7 +654,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         timestamp: Date.now(),
       });
 
-      let currentPreviousResponseId = usePreviousResponse ? sessionEntry.lastResponseId : undefined;
+      let currentPreviousResponseId = runInput.previousResponseId;
       try {
         let currentInput: string | AgentInputItem[] = input;
         let conclusion = '';
@@ -683,18 +712,18 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             }
             planCompleteIdleTimer = setTimeout(() => {
               completedByPlanIdle = true;
-              this.emitUpdate({
-                type: 'progress',
-                content: {
-                  phase: 'concluding',
-                  message: localize(
-                    config.outputLanguage,
-                    'OpenAI plan 已完成，provider 未主动结束 stream，按已完成计划收尾。',
-                    'The OpenAI plan is complete; the provider did not close the stream, so finalizing from the completed plan.',
-                  ),
-                },
-                timestamp: Date.now(),
-              });
+                this.emitUpdate({
+                  type: 'progress',
+                  content: {
+                    phase: 'concluding',
+                    message: localize(
+                      config.outputLanguage,
+                      '分析阶段已完成，正在整理最终报告。',
+                      'Analysis phases are complete; preparing the final report.',
+                    ),
+                  },
+                  timestamp: Date.now(),
+                });
               controller.abort();
             }, OPENAI_PLAN_COMPLETE_IDLE_ABORT_MS);
           };
@@ -854,11 +883,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           !partial
         ) {
           partial = true;
-          terminationMessage = localize(
-            config.outputLanguage,
-            'OpenAI plan 已完成，但 provider 没有输出独立最终报告；已退回到阶段摘要，结果信息密度可能不足。',
-            'The OpenAI plan completed, but the provider did not produce an independent final report; falling back to phase summaries, which may be less informative.',
-          );
+            terminationMessage = localize(
+              config.outputLanguage,
+              '分析阶段已完成，但模型没有输出独立最终报告；已使用阶段摘要兜底，结果信息密度可能不足。',
+              'Analysis phases completed, but the model did not produce an independent final report; falling back to phase summaries, which may be less informative.',
+            );
           this.emitUpdate({
             type: 'degraded',
             content: {
@@ -901,12 +930,14 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           });
         }
 
-        this.sessionMap.set(context.sessionMapKey, {
-          history: finalHistory,
-          lastResponseId: finalLastResponseId,
-          runState: finalRunState,
-          updatedAt: Date.now(),
-        });
+        if (runInput.shouldPersistRemoteSession) {
+          this.sessionMap.set(context.sessionMapKey, {
+            history: finalHistory,
+            lastResponseId: finalLastResponseId,
+            runState: finalRunState,
+            updatedAt: Date.now(),
+          });
+        }
 
         this.recordTurn({
           query,
@@ -945,41 +976,18 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             outputLanguage: config.outputLanguage,
           });
         } else if (error instanceof MaxTurnsExceededError) {
-          const partialConclusion = accumulatedAnswer || localize(
-            config.outputLanguage,
-            '分析达到 OpenAI Agents SDK 轮次上限，尚未形成完整结论。',
-            'The OpenAI Agents SDK run reached the turn limit before a complete conclusion was produced.',
-          );
-          const findings = extractFindingsFromText(partialConclusion);
-          const confidence = Math.min(0.55, this.estimateConfidence(findings, partialConclusion));
-          this.emitUpdate({
-            type: 'degraded',
-            content: {
-              module: 'openAiRuntime',
-              fallback: 'partial_result_after_max_turns',
-              partial: true,
-              terminationReason: 'max_turns',
-              message: localize(
-                config.outputLanguage,
-                'OpenAI 分析达到轮次上限，结果可能不完整',
-                'OpenAI analysis reached the turn limit; result may be incomplete',
-              ),
-            },
-            timestamp: Date.now(),
-          });
-          return {
+          return this.recordMaxTurnsPartialResult({
+            error,
+            query,
             sessionId,
-            success: true,
-            findings,
-            hypotheses: context.hypotheses.map(h => this.toProtocolHypothesis(h)),
-            conclusion: partialConclusion,
-            confidence,
+            outputLanguage: config.outputLanguage,
+            accumulatedAnswer,
+            context,
+            startTime,
             rounds,
-            totalDurationMs: Date.now() - startTime,
-            partial: true,
-            terminationReason: 'max_turns',
-            terminationMessage: error.message,
-          };
+            quickMode,
+            codeAwareMode: options.codeAwareMode,
+          });
         }
         const recoverablePartial = this.recoverPartialResultAfterStreamTermination({
           error,
@@ -991,6 +999,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           query,
           startTime,
           rounds,
+          codeAwareMode: options.codeAwareMode,
         });
         if (recoverablePartial) {
           return recoverablePartial;
@@ -1001,7 +1010,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       const message = compactProviderErrorMessage(error);
       this.emitUpdate({
         type: 'error',
-        content: { message: `OpenAI Agents SDK analysis failed: ${message}` },
+        content: { message: `AI analysis failed: ${message}` },
         timestamp: Date.now(),
       });
       return {
@@ -1011,8 +1020,8 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         hypotheses: [],
         conclusion: localize(
           config.outputLanguage,
-          `OpenAI Agents SDK 分析失败：${message}`,
-          `OpenAI Agents SDK analysis failed: ${message}`,
+          `AI 分析失败：${message}`,
+          `AI analysis failed: ${message}`,
         ),
         confidence: 0,
         rounds,
@@ -1063,7 +1072,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const sessionEntry = this.sessionMap.get(
       this.buildSessionMapKey(sessionId, sessionFields.referenceTraceId),
     );
-    const freshSessionEntry = sessionEntry && Date.now() - (sessionEntry.updatedAt || 0) < OPENAI_SESSION_FRESHNESS_MS
+    const freshSessionEntry = isFreshRuntimeEntry(sessionEntry, OPENAI_SESSION_FRESHNESS_MS)
       ? sessionEntry
       : undefined;
     return {
@@ -1208,13 +1217,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
 
     let sqlErrors = this.sessionSqlErrors.get(sessionId);
     if (!sqlErrors) {
-      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScopeFromOptions(options));
+      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScopeFromAnalysisOptions(options));
       this.sessionSqlErrors.set(sessionId, sqlErrors);
     }
 
-    const skillNotesBudget = !lightweight && process.env.SELF_IMPROVE_NOTES_INJECT_ENABLED === '1'
-      ? new SkillNotesBudget({ mode: 'full' })
-      : undefined;
+    const skillNotesBudget = createRuntimeSkillNotesBudget(lightweight);
     const { allowedTools, toolDefinitions } = createClaudeMcpServer({
       sessionId,
       traceId,
@@ -1242,7 +1249,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       lightweight,
       skillNotesBudget,
       outputLanguage: config.outputLanguage,
-      knowledgeScope: knowledgeScopeFromOptions(options),
+      knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
       codeAwareMode: options.codeAwareMode,
       codebaseIds: options.codebaseIds,
     });
@@ -1266,6 +1273,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       .filter((e: any) => e.fixedSql)
       .slice(-3)
       .map((e: any) => ({ errorSql: e.errorSql, errorMessage: e.errorMessage, fixedSql: e.fixedSql }));
+    const traceInfo = this.traceProcessorService.getTrace(traceId);
 
     const systemPrompt = lightweight
       ? buildQuickSystemPrompt({
@@ -1297,6 +1305,8 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           selectionContext: options.selectionContext,
           comparison: comparisonContext,
           traceCompleteness,
+          traceOs: traceInfo?.traceOs,
+          traceFormat: traceInfo?.traceFormat,
           outputLanguage: config.outputLanguage,
           codeAwareMode: options.codeAwareMode,
           codebaseIds: options.codebaseIds,
@@ -1320,7 +1330,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     traceId: string,
     packageName?: string,
   ): Promise<ArchitectureInfo | undefined> {
-    const cached = this.architectureCache.get(traceId);
+    const cached = getLruCacheEntry(this.architectureCache, traceId);
     if (cached) return cached;
     try {
       const detector = createArchitectureDetector();
@@ -1330,7 +1340,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         packageName,
       });
       if (architecture) {
-        this.architectureCache.set(traceId, architecture);
+        setLruCacheEntry(this.architectureCache, traceId, architecture);
         this.emitUpdate({ type: 'architecture_detected', content: { architecture }, timestamp: Date.now() });
       }
       return architecture;
@@ -1400,13 +1410,15 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   }
 
   private async detectVendor(traceId: string): Promise<string | null> {
-    const cached = this.vendorCache.get(traceId);
+    const cached = getLruCacheEntry(this.vendorCache, traceId);
     if (cached) return cached;
     try {
       const adapter = getSkillAnalysisAdapter(this.traceProcessorService);
       await adapter.ensureInitialized();
       const result = await adapter.detectVendor(traceId);
-      if (result.vendor && result.vendor !== 'aosp') this.vendorCache.set(traceId, result.vendor);
+      if (result.vendor && result.vendor !== 'aosp') {
+        setLruCacheEntry(this.vendorCache, traceId, result.vendor);
+      }
       return result.vendor;
     } catch (error) {
       console.warn('[OpenAIRuntime] Vendor detection failed:', (error as Error).message);
@@ -1418,7 +1430,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     traceId: string,
     architecture?: ArchitectureInfo,
   ): Promise<TraceCompleteness | undefined> {
-    const cached = this.completenessCache.get(traceId);
+    const cached = getLruCacheEntry(this.completenessCache, traceId);
     if (cached) return cached;
     try {
       const completeness = await probeTraceCompleteness(
@@ -1426,7 +1438,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         traceId,
         architecture?.type,
       );
-      this.completenessCache.set(traceId, completeness);
+      setLruCacheEntry(this.completenessCache, traceId, completeness);
       return completeness;
     } catch (error) {
       console.warn('[OpenAIRuntime] Trace completeness probe failed:', (error as Error).message);
@@ -1562,8 +1574,8 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   private formatPlanCompleteReportContinuationMessage(outputLanguage: OutputLanguage): string {
     return localize(
       outputLanguage,
-      'OpenAI plan 已完成，但最终正文仍是阶段摘要，继续请求完整最终报告。',
-      'The OpenAI plan is complete, but the final body is still a phase summary; requesting the complete final report.',
+      '最终报告仍需补齐，继续整理完整结论。',
+      'The final report still needs completion; continuing to assemble the full conclusion.',
     );
   }
 
@@ -1691,6 +1703,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     query: string;
     startTime: number;
     rounds: number;
+    codeAwareMode?: AnalysisOptions['codeAwareMode'];
   }): AnalysisResult | undefined {
     if (!isRecoverableOpenAIStreamTermination(params.error)) {
       return undefined;
@@ -1717,7 +1730,9 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     let conclusion = planStatus.complete
       ? conclusionBase
       : this.withIncompletePlanWarning(conclusionBase, planStatus, params.outputLanguage);
-    conclusion = sanitizeCodeAwareText(params.sessionId, conclusion);
+    if (params.codeAwareMode && params.codeAwareMode !== 'off') {
+      conclusion = sanitizeCodeAwareText(params.sessionId, conclusion);
+    }
     const findings = extractFindingsFromText(conclusion);
     const confidence = Math.min(0.55, this.estimateConfidence(findings, conclusion));
     const terminationReason: AnalysisTerminationReason = planStatus.complete ? 'timeout' : 'plan_incomplete';
@@ -1786,6 +1801,82 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     };
   }
 
+  private recordMaxTurnsPartialResult(params: {
+    error: { message?: string };
+    query: string;
+    sessionId: string;
+    outputLanguage: OutputLanguage;
+    accumulatedAnswer: string;
+    context: Pick<
+      Awaited<ReturnType<OpenAIRuntime['prepareAnalysisContext']>>,
+      'hypotheses' | 'sessionContext' | 'previousTurns'
+    >;
+    startTime: number;
+    rounds: number;
+    quickMode: boolean;
+    codeAwareMode?: AnalysisOptions['codeAwareMode'];
+  }): AnalysisResult {
+    let partialConclusion = params.accumulatedAnswer || localize(
+      params.outputLanguage,
+      '分析达到轮次上限，尚未形成完整结论。',
+      'The analysis reached the turn limit before a complete conclusion was produced.',
+    );
+    if (params.codeAwareMode && params.codeAwareMode !== 'off') {
+      partialConclusion = sanitizeCodeAwareText(params.sessionId, partialConclusion);
+    }
+    const findings = extractFindingsFromText(partialConclusion);
+    const confidence = Math.min(0.55, this.estimateConfidence(findings, partialConclusion));
+    const result: AnalysisResult = {
+      sessionId: params.sessionId,
+      success: true,
+      findings,
+      hypotheses: params.context.hypotheses.map(h => this.toProtocolHypothesis(h)),
+      conclusion: partialConclusion,
+      confidence,
+      rounds: params.rounds,
+      totalDurationMs: Date.now() - params.startTime,
+      partial: true,
+      terminationReason: 'max_turns',
+      terminationMessage: params.error.message,
+    };
+
+    this.emitUpdate({
+      type: 'degraded',
+      content: {
+        module: 'openAiRuntime',
+        fallback: 'partial_result_after_max_turns',
+        partial: true,
+        terminationReason: 'max_turns',
+        message: localize(
+          params.outputLanguage,
+          'OpenAI 分析达到轮次上限，结果可能不完整',
+          'OpenAI analysis reached the turn limit; result may be incomplete',
+        ),
+      },
+      timestamp: Date.now(),
+    });
+    this.recordTurn({
+      query: params.query,
+      sessionId: params.sessionId,
+      result,
+      sessionContext: params.context.sessionContext,
+      previousTurnCount: params.context.previousTurns.length,
+      quickMode: params.quickMode,
+    });
+    this.emitUpdate({
+      type: 'conclusion',
+      content: { conclusion: result.conclusion, durationMs: Date.now() - params.startTime, turns: params.rounds },
+      timestamp: Date.now(),
+    });
+    this.emitUpdate({
+      type: 'answer_token',
+      content: { done: true, totalChars: result.conclusion.length },
+      timestamp: Date.now(),
+    });
+
+    return result;
+  }
+
   private formatPlanContinuationMessage(
     status: PlanCompletionStatus,
     outputLanguage: OutputLanguage,
@@ -1793,15 +1884,15 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     if (!status.hasPlan) {
       return localize(
         outputLanguage,
-        'OpenAI 模型提前结束但尚未提交分析计划，继续执行...',
-        'The OpenAI model stopped before submitting an analysis plan; continuing...',
+        '继续建立分析计划并补齐必要证据...',
+        'Continuing by creating the analysis plan and collecting required evidence...',
       );
     }
     const phaseNames = status.pendingPhases.map(p => p.name || p.id).slice(0, 3).join('、');
     return localize(
       outputLanguage,
-      `OpenAI 模型提前结束但 plan 未完成，继续执行剩余阶段：${phaseNames}`,
-      `The OpenAI model stopped before the plan completed; continuing remaining phases: ${phaseNames}`,
+      `继续补齐剩余分析阶段：${phaseNames}`,
+      `Continuing the remaining analysis phases: ${phaseNames}`,
     );
   }
 
@@ -1974,86 +2065,19 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     displayResults: Array<{ stepId?: string; data?: any }>,
     entityStore: any,
   ): void {
-    try {
-      const data: Record<string, any> = {};
-      for (const dr of displayResults) {
-        if (dr.stepId && dr.data) data[dr.stepId] = dr.data;
-      }
-      const captured = captureEntitiesFromResponses([{
-        agentId: 'openai-agent',
-        success: true,
-        toolResults: [{ toolName: 'invoke_skill', data }],
-      } as any]);
-      applyCapturedEntities(entityStore, captured);
-    } catch (error) {
-      console.warn('[OpenAIRuntime] Entity capture failed:', (error as Error).message);
-    }
+    captureSkillDisplayEntities(displayResults, entityStore, 'openai-agent');
   }
 
   private collectPreviousFindings(sessionContext: any, maxTurns = 3): Finding[] {
-    try {
-      const turns = sessionContext.getAllTurns?.() || [];
-      return turns.slice(-maxTurns).flatMap((turn: any) => turn.findings || []).slice(0, 5);
-    } catch {
-      return [];
-    }
+    return collectRecentFindings(sessionContext, { maxTurns, maxFindings: 5 });
   }
 
   private buildEntityContext(entityStore: any): string | undefined {
-    try {
-      const lines: string[] = [];
-      const frames = entityStore.getAllFrames?.() || [];
-      if (frames.length > 0) {
-        lines.push(`**帧 (${frames.length})**:`);
-        for (const f of frames.slice(0, 15)) {
-          const parts = [`frame_id=${f.frame_id}`];
-          if (f.start_ts) parts.push(`ts=${f.start_ts}`);
-          if (f.jank_type) parts.push(`jank=${f.jank_type}`);
-          if (f.dur_ms) parts.push(`dur=${f.dur_ms}ms`);
-          if (f.process_name) parts.push(`proc=${f.process_name}`);
-          lines.push(`- ${parts.join(', ')}`);
-        }
-      }
-      const sessions = entityStore.getAllSessions?.() || [];
-      if (sessions.length > 0) {
-        lines.push(`**滑动会话 (${sessions.length})**:`);
-        for (const s of sessions.slice(0, 8)) {
-          const parts = [`session_id=${s.session_id}`];
-          if (s.start_ts) parts.push(`ts=${s.start_ts}`);
-          if (s.jank_count) parts.push(`janks=${s.jank_count}`);
-          if (s.process_name) parts.push(`proc=${s.process_name}`);
-          lines.push(`- ${parts.join(', ')}`);
-        }
-      }
-      return lines.length > 0 ? lines.join('\n') : undefined;
-    } catch {
-      return undefined;
-    }
+    return buildEntityContext(entityStore);
   }
 
   private toProtocolHypothesis(h: Hypothesis): ProtocolHypothesis {
-    const statusMap: Record<string, ProtocolHypothesis['status']> = {
-      formed: 'proposed',
-      confirmed: 'confirmed',
-      rejected: 'rejected',
-    };
-    const confidenceMap: Record<string, number> = { formed: 0.5, confirmed: 0.85, rejected: 0.1 };
-    return {
-      id: h.id,
-      description: h.statement,
-      status: statusMap[h.status] || 'proposed',
-      confidence: confidenceMap[h.status] ?? 0.5,
-      supportingEvidence: h.evidence && h.status === 'confirmed'
-        ? [{ id: `${h.id}-ev`, type: 'observation' as const, description: h.evidence, source: 'openai', strength: 0.8 }]
-        : [],
-      contradictingEvidence: h.evidence && h.status === 'rejected'
-        ? [{ id: `${h.id}-ev`, type: 'observation' as const, description: h.evidence, source: 'openai', strength: 0.8 }]
-        : [],
-      proposedBy: 'openai',
-      relevantAgents: ['openai'],
-      createdAt: h.formedAt,
-      updatedAt: h.resolvedAt || h.formedAt,
-    };
+    return toRuntimeProtocolHypothesis(h, 'openai');
   }
 
   private emitUpdate(update: StreamingUpdate): void {

@@ -57,55 +57,96 @@ const DEFAULT_MAX_TURNS = 60;
 const DEFAULT_QUICK_MAX_TURNS = 10;
 const DEFAULT_EFFORT: EffortLevel = 'high';
 
-function parsePositiveIntEnv(name: string, fallback: number): number {
-  const value = process.env[name];
+function parsePositiveIntEnvFrom(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+): number {
+  const value = env[name];
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function loadClaudeConfig(overrides?: Partial<ClaudeAgentConfig>): ClaudeAgentConfig {
+function loadClaudeConfigFromEnv(
+  env: Record<string, string | undefined>,
+  overrides?: Partial<ClaudeAgentConfig>,
+): ClaudeAgentConfig {
   return {
-    model: overrides?.model ?? process.env.CLAUDE_MODEL ?? DEFAULT_MODEL,
-    lightModel: process.env.CLAUDE_LIGHT_MODEL ?? DEFAULT_LIGHT_MODEL,
+    model: overrides?.model ?? env.CLAUDE_MODEL ?? DEFAULT_MODEL,
+    lightModel: env.CLAUDE_LIGHT_MODEL ?? DEFAULT_LIGHT_MODEL,
     maxTurns: overrides?.maxTurns
-      ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : DEFAULT_MAX_TURNS),
+      ?? (env.CLAUDE_MAX_TURNS ? parseInt(env.CLAUDE_MAX_TURNS, 10) : DEFAULT_MAX_TURNS),
     maxBudgetUsd: overrides?.maxBudgetUsd
-      ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
-    cwd: overrides?.cwd ?? process.env.CLAUDE_CWD ?? process.cwd(),
-    effort: (overrides?.effort ?? process.env.CLAUDE_EFFORT ?? DEFAULT_EFFORT) as EffortLevel,
-    enableSubAgents: overrides?.enableSubAgents ?? process.env.CLAUDE_ENABLE_SUB_AGENTS === 'true',
-    enableVerification: overrides?.enableVerification ?? (process.env.CLAUDE_ENABLE_VERIFICATION !== 'false'),
+      ?? (env.CLAUDE_MAX_BUDGET_USD ? parseFloat(env.CLAUDE_MAX_BUDGET_USD) : undefined),
+    cwd: overrides?.cwd ?? env.CLAUDE_CWD ?? process.cwd(),
+    effort: (overrides?.effort ?? env.CLAUDE_EFFORT ?? DEFAULT_EFFORT) as EffortLevel,
+    enableSubAgents: overrides?.enableSubAgents ?? env.CLAUDE_ENABLE_SUB_AGENTS === 'true',
+    enableVerification: overrides?.enableVerification ?? (env.CLAUDE_ENABLE_VERIFICATION !== 'false'),
     subAgentTimeoutMs: overrides?.subAgentTimeoutMs
-      ?? (process.env.CLAUDE_SUB_AGENT_TIMEOUT_MS ? parseInt(process.env.CLAUDE_SUB_AGENT_TIMEOUT_MS, 10) : 120_000),
-    subAgentModel: (process.env.CLAUDE_SUB_AGENT_MODEL as ClaudeAgentConfig['subAgentModel']) || undefined,
+      ?? (env.CLAUDE_SUB_AGENT_TIMEOUT_MS ? parseInt(env.CLAUDE_SUB_AGENT_TIMEOUT_MS, 10) : 120_000),
+    subAgentModel: (env.CLAUDE_SUB_AGENT_MODEL as ClaudeAgentConfig['subAgentModel']) || undefined,
     fullPathPerTurnMs: overrides?.fullPathPerTurnMs
-      ?? (process.env.CLAUDE_FULL_PER_TURN_MS ? parseInt(process.env.CLAUDE_FULL_PER_TURN_MS, 10) : 60_000),
+      ?? (env.CLAUDE_FULL_PER_TURN_MS ? parseInt(env.CLAUDE_FULL_PER_TURN_MS, 10) : 60_000),
     quickPathPerTurnMs: overrides?.quickPathPerTurnMs
-      ?? (process.env.CLAUDE_QUICK_PER_TURN_MS ? parseInt(process.env.CLAUDE_QUICK_PER_TURN_MS, 10) : 40_000),
+      ?? (env.CLAUDE_QUICK_PER_TURN_MS ? parseInt(env.CLAUDE_QUICK_PER_TURN_MS, 10) : 40_000),
     verifierTimeoutMs: overrides?.verifierTimeoutMs
-      ?? (process.env.CLAUDE_VERIFIER_TIMEOUT_MS ? parseInt(process.env.CLAUDE_VERIFIER_TIMEOUT_MS, 10) : 60_000),
+      ?? (env.CLAUDE_VERIFIER_TIMEOUT_MS ? parseInt(env.CLAUDE_VERIFIER_TIMEOUT_MS, 10) : 60_000),
     classifierTimeoutMs: overrides?.classifierTimeoutMs
-      ?? (process.env.CLAUDE_CLASSIFIER_TIMEOUT_MS ? parseInt(process.env.CLAUDE_CLASSIFIER_TIMEOUT_MS, 10) : 30_000),
+      ?? (env.CLAUDE_CLASSIFIER_TIMEOUT_MS ? parseInt(env.CLAUDE_CLASSIFIER_TIMEOUT_MS, 10) : 30_000),
     outputLanguage: overrides?.outputLanguage
-      ?? parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE),
+      ?? parseOutputLanguage(env.SMARTPERFETTO_OUTPUT_LANGUAGE),
   };
+}
+
+export function loadClaudeConfig(overrides?: Partial<ClaudeAgentConfig>): ClaudeAgentConfig {
+  return loadClaudeConfigFromEnv(process.env, overrides);
 }
 
 /**
  * Resolve effort level by scene type.
+ * Explicit operator/provider effort overrides can opt out of scene defaults.
  * Deterministic pipelines (scrolling/startup/anr) use 'medium' since the workflow is prescriptive.
  * Open-ended queries ('general') use the configured default (typically 'high').
  */
-export function resolveEffort(config: ClaudeAgentConfig, sceneType?: SceneType): EffortLevel {
-  // Env override always wins (read directly, not via config which may have overrides)
-  if (process.env.CLAUDE_EFFORT) return process.env.CLAUDE_EFFORT as EffortLevel;
+export function resolveEffort(
+  config: ClaudeAgentConfig,
+  sceneType?: SceneType,
+  options: { configuredEffortOverridesScene?: boolean } = {},
+): EffortLevel {
+  if (options.configuredEffortOverridesScene) return config.effort;
   if (!sceneType) return config.effort;
 
   const scenes = getRegisteredScenes();
   const scene = scenes.find(s => s.scene === sceneType);
   if (scene?.effort) return scene.effort as EffortLevel;
   return config.effort;
+}
+
+export function hasConfiguredClaudeEffortOverride(
+  providerId?: string | null,
+  providerScope?: ProviderScope,
+): boolean {
+  // Lazy import to avoid circular dependency
+  const { getProviderService } = require('../services/providerManager');
+  const svc = getProviderService();
+
+  const provider = typeof providerId === 'string'
+    ? svc.getRawProvider(providerId, providerScope)
+    : providerId === null
+      ? undefined
+      : svc.getRawEffectiveProvider(providerScope);
+
+  if (typeof providerId === 'string' && !provider) {
+    throw new Error(`Provider not found: ${providerId}`);
+  }
+
+  const providerRuntime = provider ? svc.resolveAgentRuntime(provider) : undefined;
+  if (providerRuntime === 'claude-agent-sdk') {
+    return provider?.tuning?.effort !== undefined;
+  }
+  if (providerRuntime) return false;
+  return !!process.env.CLAUDE_EFFORT;
 }
 
 export interface BedrockStatus {
@@ -413,10 +454,13 @@ export function isClaudeCodeEnabled(): boolean {
  * Reduces maxTurns, effort, and disables verification/sub-agents
  * to optimize for fast response on simple questions.
  */
-export function createQuickConfig(baseConfig: ClaudeAgentConfig): ClaudeAgentConfig {
+export function createQuickConfig(
+  baseConfig: ClaudeAgentConfig,
+  env: Record<string, string | undefined> = process.env,
+): ClaudeAgentConfig {
   return {
     ...baseConfig,
-    maxTurns: parsePositiveIntEnv('CLAUDE_QUICK_MAX_TURNS', DEFAULT_QUICK_MAX_TURNS),
+    maxTurns: parsePositiveIntEnvFrom(env, 'CLAUDE_QUICK_MAX_TURNS', DEFAULT_QUICK_MAX_TURNS),
     effort: 'low',
     enableVerification: false,
     enableSubAgents: false,
@@ -627,28 +671,6 @@ export function resolveRuntimeConfig(
 
   if (!providerEnv) return baseConfig;
 
-  return {
-    ...baseConfig,
-    model: providerEnv.CLAUDE_MODEL || baseConfig.model,
-    lightModel: providerEnv.CLAUDE_LIGHT_MODEL || baseConfig.lightModel,
-    maxTurns: providerEnv.CLAUDE_MAX_TURNS
-      ? parseInt(providerEnv.CLAUDE_MAX_TURNS, 10) : baseConfig.maxTurns,
-    maxBudgetUsd: providerEnv.CLAUDE_MAX_BUDGET_USD
-      ? parseFloat(providerEnv.CLAUDE_MAX_BUDGET_USD) : baseConfig.maxBudgetUsd,
-    effort: (providerEnv.CLAUDE_EFFORT || baseConfig.effort) as EffortLevel,
-    enableSubAgents: providerEnv.CLAUDE_ENABLE_SUB_AGENTS
-      ? providerEnv.CLAUDE_ENABLE_SUB_AGENTS === 'true' : baseConfig.enableSubAgents,
-    enableVerification: providerEnv.CLAUDE_ENABLE_VERIFICATION !== undefined
-      ? providerEnv.CLAUDE_ENABLE_VERIFICATION !== 'false' : baseConfig.enableVerification,
-    fullPathPerTurnMs: providerEnv.CLAUDE_FULL_PER_TURN_MS
-      ? parseInt(providerEnv.CLAUDE_FULL_PER_TURN_MS, 10) : baseConfig.fullPathPerTurnMs,
-    quickPathPerTurnMs: providerEnv.CLAUDE_QUICK_PER_TURN_MS
-      ? parseInt(providerEnv.CLAUDE_QUICK_PER_TURN_MS, 10) : baseConfig.quickPathPerTurnMs,
-    verifierTimeoutMs: providerEnv.CLAUDE_VERIFIER_TIMEOUT_MS
-      ? parseInt(providerEnv.CLAUDE_VERIFIER_TIMEOUT_MS, 10) : baseConfig.verifierTimeoutMs,
-    classifierTimeoutMs: providerEnv.CLAUDE_CLASSIFIER_TIMEOUT_MS
-      ? parseInt(providerEnv.CLAUDE_CLASSIFIER_TIMEOUT_MS, 10) : baseConfig.classifierTimeoutMs,
-    subAgentModel: (providerEnv.CLAUDE_SUB_AGENT_MODEL as ClaudeAgentConfig['subAgentModel'])
-      || baseConfig.subAgentModel,
-  };
+  const isolatedEnv = mergeIsolatedProviderEnv(process.env, providerEnv);
+  return loadClaudeConfigFromEnv(isolatedEnv);
 }

@@ -22,3 +22,8 @@ copyFileRequired(
   path.join(repoRoot, 'scripts', 'trace-processor-pin.env'),
   path.join(distRoot, 'trace-processor-pin.env'),
 );
+
+copyFileRequired(
+  path.join(repoRoot, 'scripts', 'perfetto-recording-tools-pin.env'),
+  path.join(distRoot, 'perfetto-recording-tools-pin.env'),
+);

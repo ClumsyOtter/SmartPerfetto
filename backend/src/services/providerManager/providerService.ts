@@ -5,7 +5,6 @@ import { uuidv4 } from '../../utils/uuid';
 import { ProviderStore } from './providerStore';
 import type {
   AgentRuntimeKind,
-  DualSurfaceProviderType,
   OpenAIProtocol,
   ProviderConfig,
   ProviderCreateInput,
@@ -13,6 +12,14 @@ import type {
   ProviderUpdateInput,
   ProviderType,
 } from './types';
+import {
+  assertAgentRuntimeSupported,
+  DUAL_SURFACE_PROVIDER_TYPES,
+  isDualSurfaceProviderType,
+  resolveProviderAgentRuntime,
+  sharedKeyShouldUseClaudeAuthToken,
+  supportsAgentRuntimeType,
+} from './runtimeCapabilities';
 
 const SENSITIVE_FIELDS: (keyof ProviderConfig['connection'])[] = [
   'apiKey',
@@ -24,27 +31,6 @@ const SENSITIVE_FIELDS: (keyof ProviderConfig['connection'])[] = [
   'awsSecretAccessKey',
   'awsSessionToken',
 ];
-
-const DUAL_SURFACE_PROVIDER_TYPES: DualSurfaceProviderType[] = [
-  'deepseek',
-  'glm',
-  'qwen',
-  'qwen_coding',
-  'kimi_code',
-  'kimi',
-  'doubao',
-  'minimax',
-  'xiaomi',
-  'tencent_token_plan',
-  'tencent_coding_plan',
-  'hunyuan',
-  'qianfan',
-  'stepfun',
-  'siliconflow',
-  'huawei',
-];
-const CLAUDE_RUNTIME_TYPES: ProviderType[] = ['anthropic', 'bedrock', 'vertex', ...DUAL_SURFACE_PROVIDER_TYPES, 'custom'];
-const OPENAI_RUNTIME_TYPES: ProviderType[] = ['openai', 'ollama', ...DUAL_SURFACE_PROVIDER_TYPES, 'custom'];
 
 function maskValue(value: string): string {
   if (value.length <= 8) return '****';
@@ -89,33 +75,6 @@ function maskProvider(p: ProviderConfig): ProviderConfig {
     connection: maskConnection(p.connection),
     custom: maskCustom(p.custom),
   };
-}
-
-function isSupportedRuntimeForProvider(type: ProviderType, runtime: AgentRuntimeKind): boolean {
-  return runtime === 'openai-agents-sdk'
-    ? OPENAI_RUNTIME_TYPES.includes(type)
-    : CLAUDE_RUNTIME_TYPES.includes(type);
-}
-
-function isDualSurfaceProviderType(type: ProviderType): type is DualSurfaceProviderType {
-  return DUAL_SURFACE_PROVIDER_TYPES.includes(type as DualSurfaceProviderType);
-}
-
-function sharedKeyShouldUseClaudeAuthToken(type: ProviderType): boolean {
-  return [
-    'deepseek',
-    'qwen',
-    'qwen_coding',
-    'kimi',
-    'doubao',
-    'minimax',
-    'tencent_token_plan',
-    'tencent_coding_plan',
-    'hunyuan',
-    'qianfan',
-    'stepfun',
-    'huawei',
-  ].includes(type);
 }
 
 export class ProviderService {
@@ -273,55 +232,15 @@ export class ProviderService {
   }
 
   resolveAgentRuntime(provider?: ProviderConfig | null): AgentRuntimeKind {
-    if (provider?.connection.agentRuntime) {
-      if (
-        provider.connection.agentRuntime !== 'claude-agent-sdk' &&
-        provider.connection.agentRuntime !== 'openai-agents-sdk'
-      ) {
-        throw new Error(`Invalid agent runtime: ${provider.connection.agentRuntime}`);
-      }
-    }
-    if (
-      provider?.connection.agentRuntime === 'claude-agent-sdk' ||
-      provider?.connection.agentRuntime === 'openai-agents-sdk'
-    ) {
-      this.assertRuntimeSupported(provider.type, provider.connection.agentRuntime);
-      return provider.connection.agentRuntime;
-    }
-    switch (provider?.type as ProviderType | undefined) {
-      case 'openai':
-      case 'ollama':
-        return 'openai-agents-sdk';
-      case 'custom':
-        if (provider?.connection.openaiProtocol || provider?.connection.openaiBaseUrl || provider?.connection.openaiApiKey) {
-          const hasClaudeSurface = Boolean(
-            provider.connection.claudeBaseUrl ||
-            provider.connection.claudeApiKey ||
-            provider.connection.claudeAuthToken,
-          );
-          return hasClaudeSurface ? 'claude-agent-sdk' : 'openai-agents-sdk';
-        }
-        return 'claude-agent-sdk';
-      case 'anthropic':
-      case 'bedrock':
-      case 'vertex':
-      default:
-        return 'claude-agent-sdk';
-    }
+    return resolveProviderAgentRuntime(provider);
   }
 
   supportsAgentRuntime(provider: Pick<ProviderConfig, 'type'>, runtime: AgentRuntimeKind): boolean {
-    return isSupportedRuntimeForProvider(provider.type, runtime);
+    return supportsAgentRuntimeType(provider.type, runtime);
   }
 
   private assertRuntimeSupported(type: ProviderType, runtime?: unknown): void {
-    if (runtime === undefined || runtime === null) return;
-    if (runtime !== 'claude-agent-sdk' && runtime !== 'openai-agents-sdk') {
-      throw new Error(`Invalid agent runtime: ${String(runtime)}`);
-    }
-    if (!isSupportedRuntimeForProvider(type, runtime)) {
-      throw new Error(`Provider type "${type}" does not support ${runtime}`);
-    }
+    assertAgentRuntimeSupported(type, runtime);
   }
 
   resolveOpenAIProtocol(provider?: ProviderConfig | null): OpenAIProtocol {
@@ -456,23 +375,28 @@ export class ProviderService {
     if (runtime === 'openai-agents-sdk') {
       env.OPENAI_MODEL = provider.models.primary;
       env.OPENAI_LIGHT_MODEL = provider.models.light;
-      if (provider.models.subAgent) env.OPENAI_SUB_AGENT_MODEL = provider.models.subAgent;
     } else {
       env.CLAUDE_MODEL = provider.models.primary;
       env.CLAUDE_LIGHT_MODEL = provider.models.light;
       if (provider.models.subAgent) env.CLAUDE_SUB_AGENT_MODEL = provider.models.subAgent;
     }
 
-    const tuningPrefix = runtime === 'openai-agents-sdk' ? 'OPENAI' : 'CLAUDE';
-    if (provider.tuning?.maxTurns) env[`${tuningPrefix}_MAX_TURNS`] = String(provider.tuning.maxTurns);
-    if (provider.tuning?.effort) env[`${tuningPrefix}_EFFORT`] = provider.tuning.effort;
-    if (provider.tuning?.maxBudgetUsd) env[`${tuningPrefix}_MAX_BUDGET_USD`] = String(provider.tuning.maxBudgetUsd);
-    if (provider.tuning?.fullPerTurnMs) env[`${tuningPrefix}_FULL_PER_TURN_MS`] = String(provider.tuning.fullPerTurnMs);
-    if (provider.tuning?.quickPerTurnMs) env[`${tuningPrefix}_QUICK_PER_TURN_MS`] = String(provider.tuning.quickPerTurnMs);
-    if (provider.tuning?.verifierTimeoutMs) env[`${tuningPrefix}_VERIFIER_TIMEOUT_MS`] = String(provider.tuning.verifierTimeoutMs);
-    if (provider.tuning?.classifierTimeoutMs) env[`${tuningPrefix}_CLASSIFIER_TIMEOUT_MS`] = String(provider.tuning.classifierTimeoutMs);
-    if (provider.tuning?.enableSubAgents !== undefined) env[`${tuningPrefix}_ENABLE_SUB_AGENTS`] = String(provider.tuning.enableSubAgents);
-    if (provider.tuning?.enableVerification !== undefined) env[`${tuningPrefix}_ENABLE_VERIFICATION`] = String(provider.tuning.enableVerification);
+    if (runtime === 'openai-agents-sdk') {
+      if (provider.tuning?.maxTurns) env.OPENAI_MAX_TURNS = String(provider.tuning.maxTurns);
+      if (provider.tuning?.fullPerTurnMs) env.OPENAI_FULL_PER_TURN_MS = String(provider.tuning.fullPerTurnMs);
+      if (provider.tuning?.quickPerTurnMs) env.OPENAI_QUICK_PER_TURN_MS = String(provider.tuning.quickPerTurnMs);
+      if (provider.tuning?.classifierTimeoutMs) env.OPENAI_CLASSIFIER_TIMEOUT_MS = String(provider.tuning.classifierTimeoutMs);
+    } else {
+      if (provider.tuning?.maxTurns) env.CLAUDE_MAX_TURNS = String(provider.tuning.maxTurns);
+      if (provider.tuning?.effort) env.CLAUDE_EFFORT = provider.tuning.effort;
+      if (provider.tuning?.maxBudgetUsd) env.CLAUDE_MAX_BUDGET_USD = String(provider.tuning.maxBudgetUsd);
+      if (provider.tuning?.fullPerTurnMs) env.CLAUDE_FULL_PER_TURN_MS = String(provider.tuning.fullPerTurnMs);
+      if (provider.tuning?.quickPerTurnMs) env.CLAUDE_QUICK_PER_TURN_MS = String(provider.tuning.quickPerTurnMs);
+      if (provider.tuning?.verifierTimeoutMs) env.CLAUDE_VERIFIER_TIMEOUT_MS = String(provider.tuning.verifierTimeoutMs);
+      if (provider.tuning?.classifierTimeoutMs) env.CLAUDE_CLASSIFIER_TIMEOUT_MS = String(provider.tuning.classifierTimeoutMs);
+      if (provider.tuning?.enableSubAgents !== undefined) env.CLAUDE_ENABLE_SUB_AGENTS = String(provider.tuning.enableSubAgents);
+      if (provider.tuning?.enableVerification !== undefined) env.CLAUDE_ENABLE_VERIFICATION = String(provider.tuning.enableVerification);
+    }
 
     return env;
   }

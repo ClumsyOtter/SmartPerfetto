@@ -424,6 +424,16 @@ describe('OpenAIRuntime plan completion guard', () => {
       completedByPlanIdle: false,
       timedOut: false,
       finalReportContinuations: 2,
+    })).toBe(true);
+
+    expect(runtime.shouldRequestFinalReportAfterPlanComplete({
+      quickMode: false,
+      planStatus,
+      conclusion: fallback,
+      fallbackConclusion: fallback,
+      completedByPlanIdle: false,
+      timedOut: false,
+      finalReportContinuations: 4,
     })).toBe(false);
 
     expect(runtime.shouldRequestFinalReportAfterPlanComplete({
@@ -473,15 +483,41 @@ describe('OpenAIRuntime plan completion guard', () => {
     expect(zhPrompt).toContain('继续遵守本轮场景策略');
     expect(zhPrompt).toContain('Final Report Contract');
     expect(zhPrompt).toContain('场景契约要求的结构');
-    expect(zhPrompt).toContain('约 2500-3500');
+    expect(zhPrompt).toContain('完整性优先');
+    expect(zhPrompt).toContain('先输出 Final Report Contract 要求的必需结构');
+    expect(zhPrompt).not.toContain('2500-3500');
     expect(zhPrompt).not.toContain('最多 1200');
 
     const enPrompt = runtime.buildFinalReportAfterPlanCompletePrompt('en');
     expect(enPrompt).toContain('scene strategy');
     expect(enPrompt).toContain('Final Report Contract');
     expect(enPrompt).toContain('structures required by the scene contract');
-    expect(enPrompt).toContain('1,200-1,800');
+    expect(enPrompt).toContain('Prioritize completeness');
+    expect(enPrompt).toContain('before long trees');
+    expect(enPrompt).not.toContain('1,200-1,800');
     expect(enPrompt).not.toContain('at most 700');
+  });
+
+  it('uses user-facing continuation progress text instead of provider internals', () => {
+    const runtime = new OpenAIRuntime({} as any) as any;
+    const message = runtime.formatPlanContinuationMessage({
+      hasPlan: true,
+      complete: false,
+      pendingPhases: [
+        { id: 'p3', name: '综合结论' },
+      ] as any,
+    }, 'zh-CN');
+
+    expect(message).toBe('继续补齐剩余分析阶段：综合结论');
+    expect(message).not.toContain('OpenAI');
+    expect(message).not.toContain('plan');
+    expect(message).not.toContain('提前结束');
+
+    const reportMessage = runtime.formatPlanCompleteReportContinuationMessage('zh-CN');
+    expect(reportMessage).toBe('最终报告仍需补齐，继续整理完整结论。');
+    expect(reportMessage).not.toContain('OpenAI');
+    expect(reportMessage).not.toContain('plan');
+    expect(reportMessage).not.toContain('provider');
   });
 
   it('builds a user-facing structured fallback when a completed plan has no final answer text', () => {
@@ -530,9 +566,108 @@ describe('OpenAIRuntime plan completion guard', () => {
     expect(fallback).toContain('p2 Phase p2');
     expect(fallback).toContain('未完成阶段：p3:Phase p3');
   });
+
+  it('records max-turns partial results into session context', () => {
+    const runtime = new OpenAIRuntime({} as any) as any;
+    const addTurn = jest.fn();
+    const updateWorkingMemoryFromConclusion = jest.fn();
+    const updates: any[] = [];
+    runtime.on('update', (update: any) => updates.push(update));
+
+    const result = runtime.recordMaxTurnsPartialResult({
+      error: new Error('Max turns exceeded'),
+      query: '分析卡顿',
+      sessionId: 's-max',
+      outputLanguage: 'zh-CN',
+      accumulatedAnswer: '## 综合结论\n\nOpenAI 已收集到部分证据，但达到轮次上限。',
+      context: {
+        hypotheses: [],
+        previousTurns: [{ id: 'prev' }],
+        sessionContext: {
+          addTurn,
+          updateWorkingMemoryFromConclusion,
+        },
+      },
+      startTime: Date.now() - 1000,
+      rounds: 5,
+      quickMode: false,
+    });
+
+    expect(result.partial).toBe(true);
+    expect(result.terminationReason).toBe('max_turns');
+    expect(addTurn).toHaveBeenCalledWith(
+      '分析卡顿',
+      expect.objectContaining({ complexity: 'complex', followUpType: 'extend' }),
+      expect.objectContaining({
+        agentId: 'openai-agent',
+        partial: true,
+        terminationReason: 'max_turns',
+      }),
+      result.findings,
+    );
+    expect(updateWorkingMemoryFromConclusion).not.toHaveBeenCalled();
+    expect(updates.some(update => update.type === 'conclusion')).toBe(true);
+    expect(updates.some(update => update.type === 'answer_token' && update.content?.done === true)).toBe(true);
+  });
 });
 
 describe('OpenAIRuntime previous response recovery', () => {
+  it('keeps quick mode off the remote OpenAI response chain', () => {
+    const resolved = __testing.resolveOpenAIRunInput({
+      quickMode: true,
+      config: {
+        protocol: 'responses',
+        outputLanguage: 'en',
+      } as any,
+      sessionEntry: {
+        history: [{ role: 'user', content: 'full-mode history' }],
+        lastResponseId: 'resp_full',
+        updatedAt: Date.now(),
+      },
+      effectivePrompt: 'what is the package name?',
+      previousTurns: [{
+        id: 'turn-1',
+        timestamp: Date.now(),
+        query: 'analyze startup',
+        intent: {} as any,
+        result: { message: 'Startup report with TTID=1912ms' },
+        findings: [{ title: 'TTID high', severity: 'medium' }],
+        turnIndex: 0,
+        completed: true,
+      }],
+    });
+
+    expect(resolved.previousResponseId).toBeUndefined();
+    expect(resolved.shouldPersistRemoteSession).toBe(false);
+    expect(resolved.input).toEqual(expect.stringContaining('## Recent Conversation Context'));
+    expect(resolved.input).toEqual(expect.stringContaining('what is the package name?'));
+    expect(resolved.input).not.toEqual(expect.stringContaining('full-mode history'));
+  });
+
+  it('uses fresh previous response ids only for full-mode OpenAI runs', () => {
+    const now = 1_700_000_000_000;
+
+    const resolved = __testing.resolveOpenAIRunInput({
+      quickMode: false,
+      config: {
+        protocol: 'responses',
+        outputLanguage: 'en',
+      } as any,
+      sessionEntry: {
+        history: [{ role: 'user', content: 'previous question' }],
+        lastResponseId: 'resp_fresh',
+        updatedAt: now - 1_000,
+      },
+      effectivePrompt: 'continue',
+      previousTurns: [],
+      now,
+    });
+
+    expect(resolved.input).toBe('continue');
+    expect(resolved.previousResponseId).toBe('resp_fresh');
+    expect(resolved.shouldPersistRemoteSession).toBe(true);
+  });
+
   it('recognizes stale previous response errors from OpenAI Responses', () => {
     expect(__testing.isMissingOpenAIPreviousResponseError(
       new Error('No response found with id resp_old_123'),

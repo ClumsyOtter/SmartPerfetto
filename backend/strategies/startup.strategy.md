@@ -50,7 +50,7 @@ final_report_contract:
       label: 阶段耗时分解
       description: '包含 startup_detail / phase breakdown 口径，并优先使用 self_ms 解释阶段贡献。'
       pattern_groups:
-        - ['阶段耗时', '阶段分解', 'phase\s+breakdown', 'startup_detail']
+        - ['阶段耗时', '阶段分解', 'phase\s+breakdown', 'startup_detail', '根因分析树', 'Phase\s*\d+']
         - ['self_ms', 'dur_ms', '耗时', '\d+(?:\.\d+)?\s*ms']
     - id: root_cause_references
       label: 根因编号引用
@@ -61,8 +61,8 @@ final_report_contract:
       label: App/系统分层建议
       description: '优化建议必须区分 App 层和系统/平台/ROM 层。'
       pattern_groups:
-        - ['App层', '应用层', 'App\s+layer']
-        - ['系统/平台层', '系统层', '平台层', 'ROM层', 'System/Platform', 'platform\s+layer']
+        - ['App\s*层', '应用\s*层', 'App\s+layer']
+        - ['系统\s*/\s*平台\s*层', '系统\s*层', '平台\s*层', 'ROM\s*层', 'System/Platform', 'platform\s+layer']
 
 phase_hints:
   - id: detail_breakdown
@@ -644,7 +644,7 @@ TTID 和 TTFD 是两个不同的指标，必须区分：
    - **数据不足时**：标注"数据不足，无法归类"而非强行贴标签
    - **纯排除项**：编号可选（如"Binder 阻塞(B6) < 10ms ✓"）
 
-3. **根因分析树**：层级式展示启动耗时分解，**必须体现嵌套关系、使用 self_ms、标注根因编号**
+3. **根因分析树**：层级式展示启动耗时分解，**必须体现嵌套关系、使用 self_ms、标注根因编号**。树可以保持紧凑；不要让长树状图挤掉后面的 App/系统分层建议。
    ```
    启动总耗时 XXms
    ├── [Phase 1] bindApplication = XXms wall

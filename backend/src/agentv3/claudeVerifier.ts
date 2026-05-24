@@ -999,7 +999,7 @@ ${issueList ? `待解决问题：\n${issueList}\n` : ''}${warningList}
 2. **然后直接输出完整的结构化分析报告**，必须满足当前场景的 Final Report Contract：
 ${finalReportContractGuidance}
 3. **使用已收集的数据**，不需要重新调用 invoke_skill 获取概览数据
-4. 报告必须完整但压缩，目标不超过约 6000 中文字符；不要逐行复制已展示的大表，只引用关键行和 evidence/source
+4. 报告必须完整但克制；不要逐行复制已展示的大表，只引用关键行和 evidence/source。不要为了压缩长度裁剪关键结论或证据。
 
 ### 已有推理上下文
 ${originalConclusion.substring(0, 2000)}
@@ -1045,7 +1045,7 @@ ${issueList}${warningList}
    - **unresolved_hypothesis**: 调用 resolve_hypothesis 将所有未解决假设标记为 confirmed 或 rejected
 3. 输出修正后的完整结论，并满足当前场景的 Final Report Contract：
 ${finalReportContractGuidance}
-4. 结论必须完整但压缩，目标不超过约 6000 中文字符；不要逐行复制已展示的大表，只引用关键行和 evidence/source
+4. 结论必须完整但克制；不要逐行复制已展示的大表，只引用关键行和 evidence/source。不要为了压缩长度裁剪关键结论或证据。
 
 ### 原始结论（需修正）
 ${originalConclusion.substring(0, 2000)}
@@ -1134,17 +1134,14 @@ export async function verifyConclusion(
 
   // Emit SSE warnings for issues
   if (emitUpdate && allIssues.length > 0) {
-    const issueMessages = allIssues
-      .map(i => `[${i.severity.toUpperCase()}] ${i.message}`)
-      .join('\n');
     emitUpdate({
       type: 'progress',
       content: {
         phase: 'concluding',
         message: localize(
           outputLanguage,
-          `验证发现 ${allIssues.length} 个问题:\n${issueMessages}`,
-          `Verification found ${allIssues.length} issue(s):\n${issueMessages}`,
+          '质量校验发现报告仍需补齐，系统已记录详细诊断并将尝试自动修正。',
+          'Quality verification found report gaps; detailed diagnostics were recorded and the system will try to correct them automatically.',
         ),
       },
       timestamp: Date.now(),

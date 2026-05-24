@@ -64,7 +64,6 @@ const PROVIDER_RUNTIME_ENV_KEYS = [
   'CLAUDE_SUB_AGENT_MODEL',
   'OPENAI_MODEL',
   'OPENAI_LIGHT_MODEL',
-  'OPENAI_SUB_AGENT_MODEL',
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_BEDROCK_BASE_URL',
   'OPENAI_BASE_URL',
@@ -85,14 +84,9 @@ const PROVIDER_RUNTIME_ENV_KEYS = [
   'CLAUDE_ENABLE_SUB_AGENTS',
   'CLAUDE_ENABLE_VERIFICATION',
   'OPENAI_MAX_TURNS',
-  'OPENAI_EFFORT',
-  'OPENAI_MAX_BUDGET_USD',
   'OPENAI_FULL_PER_TURN_MS',
   'OPENAI_QUICK_PER_TURN_MS',
-  'OPENAI_VERIFIER_TIMEOUT_MS',
   'OPENAI_CLASSIFIER_TIMEOUT_MS',
-  'OPENAI_ENABLE_SUB_AGENTS',
-  'OPENAI_ENABLE_VERIFICATION',
 ];
 
 type ResolvedTimeoutKey = keyof ProviderRuntimeSnapshot['resolvedTimeouts'];
@@ -159,9 +153,15 @@ function parseRuntimeEnv(value: string | undefined): AgentRuntimeKind | undefine
   }
 }
 
-function pickResolvedTimeouts(tuning?: ProviderTuning): ProviderRuntimeSnapshot['resolvedTimeouts'] {
+function pickResolvedTimeouts(
+  tuning: ProviderTuning | undefined,
+  runtimeKind: AgentRuntimeKind,
+): ProviderRuntimeSnapshot['resolvedTimeouts'] {
   const resolved: ProviderRuntimeSnapshot['resolvedTimeouts'] = {};
-  for (const key of TIMEOUT_KEYS) {
+  const keys = runtimeKind === 'openai-agents-sdk'
+    ? TIMEOUT_KEYS.filter((key) => key !== 'verifierTimeoutMs')
+    : TIMEOUT_KEYS;
+  for (const key of keys) {
     const value = tuning?.[key];
     if (typeof value === 'number') resolved[key] = value;
   }
@@ -185,9 +185,11 @@ function envRuntimeSnapshot(runtimeOverride?: AgentRuntimeKind): ProviderRuntime
   const timeoutMap: Array<[keyof ProviderRuntimeSnapshot['resolvedTimeouts'], string]> = [
     ['fullPerTurnMs', `${timeoutPrefix}_FULL_PER_TURN_MS`],
     ['quickPerTurnMs', `${timeoutPrefix}_QUICK_PER_TURN_MS`],
-    ['verifierTimeoutMs', `${timeoutPrefix}_VERIFIER_TIMEOUT_MS`],
     ['classifierTimeoutMs', `${timeoutPrefix}_CLASSIFIER_TIMEOUT_MS`],
   ];
+  if (runtimeKind === 'claude-agent-sdk') {
+    timeoutMap.push(['verifierTimeoutMs', 'CLAUDE_VERIFIER_TIMEOUT_MS']);
+  }
   for (const [key, envKey] of timeoutMap) {
     const value = env[envKey];
     const parsed = value ? Number.parseInt(value, 10) : NaN;
@@ -204,7 +206,9 @@ function envRuntimeSnapshot(runtimeOverride?: AgentRuntimeKind): ProviderRuntime
     resolvedModels: {
       primary: env[`${modelPrefix}_MODEL`],
       light: env[`${modelPrefix}_LIGHT_MODEL`],
-      subAgent: env[`${modelPrefix}_SUB_AGENT_MODEL`],
+      subAgent: runtimeKind === 'claude-agent-sdk'
+        ? env.CLAUDE_SUB_AGENT_MODEL
+        : undefined,
     },
     resolvedTimeouts,
     baseUrl: inferBaseUrl(runtimeKind, nonSecretEnv),
@@ -236,9 +240,9 @@ function providerRuntimeSnapshot(
     resolvedModels: {
       primary: provider.models.primary,
       light: provider.models.light,
-      subAgent: provider.models.subAgent,
+      subAgent: runtimeKind === 'claude-agent-sdk' ? provider.models.subAgent : undefined,
     },
-    resolvedTimeouts: pickResolvedTimeouts(provider.tuning),
+    resolvedTimeouts: pickResolvedTimeouts(provider.tuning, runtimeKind),
     baseUrl: inferBaseUrl(runtimeKind, nonSecretEnv),
     openaiProtocol: runtimeKind === 'openai-agents-sdk'
       ? providerService.resolveOpenAIProtocol(provider)

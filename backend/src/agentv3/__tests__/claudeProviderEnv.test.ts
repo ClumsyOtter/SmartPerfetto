@@ -16,6 +16,9 @@ const ORIGINAL_ENV = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   CLAUDE_BINARY_PATH: process.env.CLAUDE_BINARY_PATH,
   CLAUDE_MODEL: process.env.CLAUDE_MODEL,
+  CLAUDE_MAX_TURNS: process.env.CLAUDE_MAX_TURNS,
+  CLAUDE_EFFORT: process.env.CLAUDE_EFFORT,
+  CLAUDE_ENABLE_SUB_AGENTS: process.env.CLAUDE_ENABLE_SUB_AGENTS,
 };
 
 function restoreEnv(): void {
@@ -62,6 +65,9 @@ describe('createSdkEnv provider isolation', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://global-anthropic.example';
     process.env.OPENAI_API_KEY = 'sk-global-openai';
     process.env.CLAUDE_MODEL = 'global-claude-model';
+    process.env.CLAUDE_MAX_TURNS = '99';
+    process.env.CLAUDE_EFFORT = 'max';
+    process.env.CLAUDE_ENABLE_SUB_AGENTS = 'true';
 
     const svc = getProviderService();
     const p = svc.create({
@@ -82,6 +88,50 @@ describe('createSdkEnv provider isolation', () => {
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.CLAUDE_MODEL).toBe('deepseek-v4-pro');
+
+    const config = resolveRuntimeConfig(baseConfig);
+    expect(config.model).toBe('deepseek-v4-pro');
+    expect(config.lightModel).toBe('deepseek-v4-flash');
+    expect(config.maxTurns).toBe(60);
+    expect(config.effort).toBe('high');
+    expect(config.enableSubAgents).toBe(false);
+  });
+
+  it('applies Claude provider tuning without inheriting global Claude env', () => {
+    process.env.CLAUDE_MAX_TURNS = '99';
+    process.env.CLAUDE_EFFORT = 'max';
+    process.env.CLAUDE_ENABLE_SUB_AGENTS = 'true';
+
+    const svc = getProviderService();
+    const p = svc.create({
+      name: 'Tuned Claude Provider',
+      category: 'official',
+      type: 'anthropic',
+      models: { primary: 'provider-main', light: 'provider-light', subAgent: 'sonnet' },
+      connection: {
+        agentRuntime: 'claude-agent-sdk',
+        claudeApiKey: 'sk-provider-anthropic',
+      },
+      tuning: {
+        maxTurns: 7,
+        effort: 'low',
+        enableSubAgents: false,
+        enableVerification: false,
+        verifierTimeoutMs: 7000,
+      },
+    });
+    svc.activate(p.id);
+
+    const config = resolveRuntimeConfig(baseConfig);
+
+    expect(config.model).toBe('provider-main');
+    expect(config.lightModel).toBe('provider-light');
+    expect(config.subAgentModel).toBe('sonnet');
+    expect(config.maxTurns).toBe(7);
+    expect(config.effort).toBe('low');
+    expect(config.enableSubAgents).toBe(false);
+    expect(config.enableVerification).toBe(false);
+    expect(config.verifierTimeoutMs).toBe(7000);
   });
 
   it('ignores an active OpenAI provider when resolving Claude env without an explicit providerId', () => {

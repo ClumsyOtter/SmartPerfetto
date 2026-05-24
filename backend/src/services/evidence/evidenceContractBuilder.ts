@@ -176,14 +176,26 @@ function sourceRefAliases(envelope: DataEnvelope, ordinal: number): Array<string
   ];
 }
 
+function evidenceRefIdAliases(value: string | undefined): string[] {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  const aliases = new Set<string>([raw]);
+  const artifactMatch = raw.match(/^data:(art-\d+)$/i);
+  if (artifactMatch) aliases.add(artifactMatch[1]);
+  const evidenceArtifactMatch = raw.match(/^ev_(art-\d+)$/i);
+  if (evidenceArtifactMatch) aliases.add(evidenceArtifactMatch[1]);
+  return Array.from(aliases);
+}
+
 function refEvidenceIdMatchesEnvelope(env: DataEnvelope, ref: ConclusionContractClaimReference): boolean {
   if (!ref.evidenceRefId) return false;
   const meta = env.meta || {};
   const metaArtifactId = (meta as any).artifactId;
   const metaSourceArtifactId = (meta as any).sourceArtifactId;
-  return meta.evidenceRefId === ref.evidenceRefId
-    || metaArtifactId === ref.evidenceRefId
-    || metaSourceArtifactId === ref.evidenceRefId;
+  const aliases = evidenceRefIdAliases(ref.evidenceRefId);
+  return aliases.includes(String(meta.evidenceRefId || ''))
+    || aliases.includes(String(metaArtifactId || ''))
+    || aliases.includes(String(metaSourceArtifactId || ''));
 }
 
 function refMatchesSourceRef(env: DataEnvelope, ref: ConclusionContractClaimReference, ordinal: number): boolean {

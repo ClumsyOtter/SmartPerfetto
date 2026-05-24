@@ -9,6 +9,7 @@ import { createRenderer, type OutputFormat } from '../repl/renderer';
 import { startSession } from '../services/turnRunner';
 import { assertAnalysisRuntimeReady } from '../services/runtimeGuard';
 import { withConsoleLogToStderr } from '../io/stdio';
+import type {CliAnalysisMode} from '../types';
 
 export interface CompareCommandArgs {
   currentTrace: string;
@@ -19,6 +20,7 @@ export interface CompareCommandArgs {
   verbose: boolean;
   noColor: boolean;
   format?: OutputFormat;
+  analysisMode?: CliAnalysisMode;
 }
 
 export async function runCompareCommand(args: CompareCommandArgs): Promise<number> {
@@ -36,6 +38,7 @@ export async function runCompareCommand(args: CompareCommandArgs): Promise<numbe
         tracePath: currentTracePath,
         referenceTracePath,
         query: args.query.trim(),
+        analysisMode: args.analysisMode,
       });
       exitCode = turn.success ? 0 : 1;
     });

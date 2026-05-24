@@ -42,4 +42,8 @@ function printTextReport(report: DoctorReport): void {
     console.log(`${mark.padEnd(5)} ${check.name}: ${check.message}`);
     if (check.details?.path) console.log(`      path: ${check.details.path}`);
   }
+  console.log('');
+  console.log(`capture   adb=${report.captureTools.adb.source}:${report.captureTools.adb.path}`);
+  console.log(`          devices=${report.captureTools.devices.readyCount}/${report.captureTools.devices.count}`);
+  console.log(`          tracebox=${report.captureTools.tracebox.source}:${report.captureTools.tracebox.path}`);
 }

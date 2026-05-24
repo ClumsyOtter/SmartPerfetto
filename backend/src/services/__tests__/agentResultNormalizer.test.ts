@@ -189,6 +189,169 @@ describe('deriveEvidenceBackedConclusionContractForNarrative', () => {
       claim.references.some(ref => ref.column === 'small_count' && ref.value === 3),
     )).not.toBe(true);
   });
+
+  test('replaces provider claims when every structured reference is unresolvable but narrative evidence matches data', () => {
+    const envelopes: DataEnvelope[] = [{
+      meta: {
+        type: 'skill_result',
+        version: '2.0.0',
+        source: 'scrolling_analysis:jank_type_stats',
+        skillId: 'scrolling_analysis',
+        stepId: 'jank_type_stats',
+        evidenceRefId: 'data:skill:scrolling_analysis:jank_type_stats:current:abc',
+        artifactId: 'art-6',
+        traceId: 'trace-1',
+        traceSide: 'current',
+        timestamp: 1,
+      },
+      display: {
+        layer: 'list',
+        format: 'table',
+        title: '掉帧类型分布',
+      },
+      data: {
+        columns: ['jank_type', 'count', 'real_jank_count', 'false_positive'],
+        rows: [['App Deadline Missed', 6, 6, 0]],
+      },
+    }];
+    const parsed = {
+      schemaVersion: 'conclusion_contract_v1',
+      mode: 'initial_report',
+      conclusions: [],
+      clusters: [],
+      evidenceChain: [],
+      claims: [{
+        id: 'Q1',
+        text: 'App Deadline Missed 有 6 帧',
+        kind: 'numeric',
+        references: [{
+          evidenceRefId: 'missing-artifact',
+          sourceRef: 'jank_type_stats',
+          rowIndex: 0,
+          column: 'count',
+          value: 6,
+        }],
+      }],
+      uncertainties: [],
+      nextSteps: [],
+    } as any;
+
+    const contract = deriveEvidenceBackedConclusionContractForNarrative(
+      '# 滑动性能分析报告\n\n## 概览\n\nApp Deadline Missed 有 6 帧，real_jank_count=6，false_positive=0。',
+      envelopes,
+      { existingContract: parsed },
+    );
+
+    expect((contract?.metadata as any)?.replacedUnresolvableProviderClaims).toBe(true);
+    const verification = runClaimVerification({
+      conclusionContract: contract,
+      dataEnvelopes: envelopes,
+      policy: 'record_only',
+    }).claimVerificationResult;
+    expect(verification.status).toBe('passed');
+  });
+
+  test('replaces partially resolvable provider claims when artifact ids conflict with source labels', () => {
+    const envelopes: DataEnvelope[] = [
+      {
+        meta: {
+          type: 'skill_result',
+          version: '2.0.0',
+          source: 'scrolling_analysis:performance_summary',
+          skillId: 'scrolling_analysis',
+          stepId: 'performance_summary',
+          evidenceRefId: 'data:skill:scrolling_analysis:performance_summary:current:abc',
+          artifactId: 'art-4',
+          traceId: 'trace-1',
+          traceSide: 'current',
+          timestamp: 1,
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '滑动性能概览',
+        },
+        data: {
+          columns: ['total_frames', 'perceived_jank_frames', 'jank_rate'],
+          rows: [[347, 7, 2.02]],
+        },
+      },
+      {
+        meta: {
+          type: 'skill_result',
+          version: '2.0.0',
+          source: 'scrolling_analysis:batch_frame_root_cause',
+          skillId: 'scrolling_analysis',
+          stepId: 'batch_frame_root_cause',
+          evidenceRefId: 'data:skill:scrolling_analysis:batch_frame_root_cause:current:def',
+          artifactId: 'art-9',
+          traceId: 'trace-1',
+          traceSide: 'current',
+          timestamp: 2,
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '掉帧列表',
+        },
+        data: {
+          columns: ['dur_ms', 'vsync_missed'],
+          rows: [[18.66, 2], [62.73, 7]],
+        },
+      },
+    ];
+    const parsed = {
+      schemaVersion: 'conclusion_contract_v1',
+      mode: 'initial_report',
+      conclusions: [],
+      clusters: [],
+      evidenceChain: [],
+      claims: [
+        {
+          id: 'Q1',
+          text: '总帧数 347，真实掉帧 7 帧，掉帧率 2.02%',
+          kind: 'numeric',
+          references: [
+            { evidenceRefId: 'data:art-4', sourceRef: '滑动性能概览', rowIndex: 0, column: 'total_frames', value: 347 },
+          ],
+        },
+        {
+          id: 'Q2',
+          text: '最长帧 62.73ms，最长连续丢帧 7 VSync',
+          kind: 'numeric',
+          references: [
+            { evidenceRefId: 'data:art-14', sourceRef: '掉帧列表', rowIndex: 1, column: 'dur_ms', value: 62.73 },
+          ],
+        },
+      ],
+      uncertainties: [],
+      nextSteps: [],
+    } as any;
+
+    const contract = deriveEvidenceBackedConclusionContractForNarrative(
+      [
+        '# 滑动性能分析报告',
+        '',
+        '## 概览',
+        '',
+        '总帧数 347，真实掉帧 7 帧，掉帧率 2.02%。最长帧 62.73ms，最长连续丢帧 7 VSync。',
+      ].join('\n'),
+      envelopes,
+      { existingContract: parsed },
+    );
+
+    expect((contract?.metadata as any)?.replacedUnresolvableProviderClaims).toBe(true);
+    expect(contract?.claims?.some(claim =>
+      claim.references.some(ref => ref.evidenceRefId === 'data:art-14'),
+    )).not.toBe(true);
+
+    const verification = runClaimVerification({
+      conclusionContract: contract,
+      dataEnvelopes: envelopes,
+      policy: 'record_only',
+    }).claimVerificationResult;
+    expect(verification.status).toBe('passed');
+  });
 });
 
 describe('normalizeResultForReport', () => {

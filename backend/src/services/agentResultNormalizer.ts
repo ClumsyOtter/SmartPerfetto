@@ -26,6 +26,7 @@ import {
   normalizeConclusionOutput,
   shouldNormalizeConclusionOutput,
 } from '../agent/core/conclusionGenerator';
+import { buildEvidenceContract } from './evidence/evidenceContractBuilder';
 import { sanitizeNarrativeForClient } from '../routes/narrativeSanitizer';
 import type { AnalysisResult } from '../agent/core/orchestratorTypes';
 import type {
@@ -118,7 +119,9 @@ export function deriveConclusionContractForNarrative(
   );
 }
 
-function hasStructuredClaims(contract: ConclusionContract | null | undefined): boolean {
+function hasStructuredClaims(
+  contract: ConclusionContract | null | undefined,
+): contract is ConclusionContract & { claims: ConclusionContractClaimItem[] } {
   return Array.isArray(contract?.claims) && contract.claims.length > 0;
 }
 
@@ -420,6 +423,25 @@ function buildEvidenceBackedFallbackContract(
   };
 }
 
+function hasFullyEvidenceResolvableStructuredClaims(
+  contract: ConclusionContract | undefined,
+  dataEnvelopes: DataEnvelope[] | undefined,
+): boolean {
+  if (!hasStructuredClaims(contract)) return false;
+  if (!Array.isArray(dataEnvelopes) || dataEnvelopes.length === 0) return true;
+  const evidenceContract = buildEvidenceContract({
+    conclusionContract: contract,
+    dataEnvelopes,
+  });
+  const support = evidenceContract.claimSupport || [];
+  if (support.length === 0) return false;
+  return support.length >= contract.claims.length &&
+    support.every(claim =>
+      claim.supportLevel !== 'unsupported' &&
+      claim.anchors.every(anchor => !anchor.missing),
+    );
+}
+
 /**
  * Derive a conclusion contract and guarantee row-level claim refs when the
  * provider returned a rich human report instead of the requested JSON contract.
@@ -431,14 +453,27 @@ export function deriveEvidenceBackedConclusionContractForNarrative(
   dataEnvelopes: DataEnvelope[] | undefined,
   options: EvidenceBackedConclusionContractDeriveOptions = {},
 ): ConclusionContract | undefined {
-  if (hasStructuredClaims(options.existingContract)) return options.existingContract || undefined;
-
   const parsed =
     options.existingContract ||
     deriveConclusionContractForNarrative(narrative, options);
-  if (hasStructuredClaims(parsed)) return parsed;
 
   const fallback = buildEvidenceBackedFallbackContract(narrative, dataEnvelopes, options);
+  if (hasStructuredClaims(parsed)) {
+    if (!fallback || hasFullyEvidenceResolvableStructuredClaims(parsed, dataEnvelopes)) {
+      return parsed;
+    }
+    return {
+      ...parsed,
+      claims: fallback.claims,
+      evidenceChain: fallback.evidenceChain,
+      metadata: {
+        ...(parsed.metadata || {}),
+        ...(fallback.metadata || {}),
+        replacedUnresolvableProviderClaims: true,
+      },
+    };
+  }
+
   if (!fallback) return parsed || undefined;
   if (!parsed) return fallback;
 

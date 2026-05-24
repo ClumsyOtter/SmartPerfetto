@@ -287,11 +287,17 @@ smp ask <sessionId> "Why is RenderThread slow?"
 smp list
 smp report <sessionId> --open
 
+# Record an Android trace from a connected device, then analyze it.
+smp capture presets
+smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
+smp capture android --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.perfetto-trace
+smp capture android --config ~/tools/perfetto_shell/perfetto.config --out ~/tools/perfetto_shell/trace/dut-game-launch.ptrace --analyze --query "Analyze app launch"
+
 # Or run the interactive SmartPerfetto REPL.
 smp repl
 ```
 
-The npm CLI package is the supported standalone terminal product. It does not start or bundle the Web UI launcher; use Docker or a GitHub portable package when you need the browser experience. The first analysis uses the bundled pinned `trace_processor_shell` binary when available, and can download the pinned binary automatically on unsupported targets. If your network cannot reach Google's artifact bucket, set `TRACE_PROCESSOR_PATH=/path/to/trace_processor_shell` to use a local binary, or set `TRACE_PROCESSOR_DOWNLOAD_BASE` / `TRACE_PROCESSOR_DOWNLOAD_URL` to a trusted mirror; downloaded binaries are still checked against the pinned SHA256. `smartperfetto` remains available as the long command name; source checkout scripts are only for maintainers debugging the CLI. See [CLI Reference](docs/reference/cli.en.md) for all commands, REPL slash commands, storage layout, and resume behavior.
+The npm CLI package is the supported standalone terminal product. It does not start or bundle the Web UI launcher; use Docker or a GitHub portable package when you need the browser experience. The first analysis uses the bundled pinned `trace_processor_shell` binary when available, and can download the pinned binary automatically on unsupported targets. Android capture itself never downloads tools at runtime: `adb` is resolved from `ADB_PATH`, an approved bundled slot, then `PATH`; pre-Android Q or `--sideload` tracebox capture requires an approved bundled `tracebox` or `--tracebox /path/to/tracebox`. If your network cannot reach Google's artifact bucket, set `TRACE_PROCESSOR_PATH=/path/to/trace_processor_shell` to use a local binary, or set `TRACE_PROCESSOR_DOWNLOAD_BASE` / `TRACE_PROCESSOR_DOWNLOAD_URL` to a trusted mirror; downloaded binaries are still checked against the pinned SHA256. `smartperfetto` remains available as the long command name; source checkout scripts are only for maintainers debugging the CLI. See [CLI Reference](docs/reference/cli.en.md) for all commands, capture presets, REPL slash commands, storage layout, and resume behavior.
 
 ## API Integration
 

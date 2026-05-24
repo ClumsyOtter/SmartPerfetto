@@ -34,6 +34,7 @@ import {
   buildComparisonAppendix,
 } from '../../services/comparisonAppendixService';
 import type {CodeAwareMode} from '../../services/codebase/codeAwareFeature';
+import type {CliAnalysisMode, TraceCaptureResult} from '../types';
 
 const RESUME_CONTEXT_MAX_CHARS = 4000;
 const RESUME_TURN_MAX_CHARS = 1200;
@@ -66,8 +67,10 @@ export async function startSession(
     tracePath: string;
     query: string;
     referenceTracePath?: string;
+    analysisMode?: CliAnalysisMode;
     codeAwareMode?: CodeAwareMode;
     codebaseIds?: string[];
+    capture?: TraceCaptureResult;
   },
 ): Promise<TurnResult> {
   const tracePath = path.resolve(input.tracePath);
@@ -111,6 +114,7 @@ export async function startSession(
     traceId,
     referenceTraceId,
     query: input.query,
+    analysisMode: input.analysisMode,
     codeAwareMode: input.codeAwareMode,
     codebaseIds: input.codebaseIds,
     onSessionReady: (sid) => {
@@ -146,8 +150,10 @@ export async function startSession(
     providerSnapshotHash: result.providerSnapshotHash,
     sdkSessionId: result.sdkSessionId,
     model: result.model,
+    analysisMode: input.analysisMode,
     codeAwareMode: input.codeAwareMode,
     codebaseIds: input.codebaseIds,
+    capture: input.capture,
     createdAt: startedAt,
     lastTurnAt: now,
     turnCount: 1,
@@ -261,6 +267,7 @@ export async function continueSession(
     sessionId: requestedSessionId,
     codeAwareMode: existingConfig.codeAwareMode,
     codebaseIds: existingConfig.codebaseIds,
+    analysisMode: existingConfig.analysisMode,
     onSessionReady: () => {
       ensureSessionLayout(sp);
     },

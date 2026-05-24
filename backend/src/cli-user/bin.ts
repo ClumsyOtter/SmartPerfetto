@@ -30,7 +30,12 @@ import { runProviderListCommand, runProviderTestCommand } from './commands/provi
 import { runQueryCommand } from './commands/query';
 import { runSkillCommand } from './commands/skill';
 import { runCompareCommand } from './commands/compare';
-import { runCaptureAndroidCommand } from './commands/capture';
+import {
+  runCaptureAndroidCommand,
+  runCaptureConfigCommand,
+  runCapturePresetsCommand,
+} from './commands/capture';
+import { isCapturePresetId } from './services/captureConfig';
 import {
   runCodebaseListCommand,
   runCodebasePreviewCommand,
@@ -40,6 +45,7 @@ import {
 } from './commands/codebase';
 import { DEFAULT_ANALYSIS_QUERY } from './constants';
 import type {CodeAwareMode} from '../services/codebase/codeAwareFeature';
+import type {CapturePresetId, CliAnalysisMode} from './types';
 
 interface GlobalOpts {
   file?: string;
@@ -124,9 +130,10 @@ function main(): void {
     .command('run <trace> [question...]')
     .description('run one-shot analysis against a trace file')
     .option('--format <format>', 'output format: text, json, ndjson')
+    .option('--mode <mode>', 'analysis mode: fast, full, auto')
     .option('--code-aware <mode>', 'code-aware mode: off, metadata_only, provider_send')
     .option('--codebase-id <id>', 'registered codebase id to expose to the analysis session', collectCodebaseId, [])
-    .action(async (trace: string, question: string[] | undefined, opts: { format?: string; codeAware?: string; codebaseId?: string[] }) => {
+    .action(async (trace: string, question: string[] | undefined, opts: { format?: string; mode?: string; codeAware?: string; codebaseId?: string[] }) => {
       const g = globals();
       await runAndExit(() => runAnalyzeCommand({
         trace,
@@ -136,6 +143,7 @@ function main(): void {
         verbose: Boolean(g.verbose),
         noColor: g.color === false,
         format: format(opts.format),
+        analysisMode: parseAnalysisMode(opts.mode),
         codeAwareMode: codeAwareMode(opts.codeAware),
         codebaseIds: opts.codebaseId,
       }));
@@ -146,9 +154,10 @@ function main(): void {
     .description('run one-shot analysis against a trace file')
     .option('-q, --query <question>', 'analysis question', DEFAULT_ANALYSIS_QUERY)
     .option('--format <format>', 'output format: text, json, ndjson')
+    .option('--mode <mode>', 'analysis mode: fast, full, auto')
     .option('--code-aware <mode>', 'code-aware mode: off, metadata_only, provider_send')
     .option('--codebase-id <id>', 'registered codebase id to expose to the analysis session', collectCodebaseId, [])
-    .action(async (trace: string, opts: { query?: string; format?: string; codeAware?: string; codebaseId?: string[] }) => {
+    .action(async (trace: string, opts: { query?: string; format?: string; mode?: string; codeAware?: string; codebaseId?: string[] }) => {
       const g = globals();
       const query = g.prompt ?? g.query ?? opts.query ?? DEFAULT_ANALYSIS_QUERY;
       await runAndExit(() => runAnalyzeCommand({
@@ -159,6 +168,7 @@ function main(): void {
         verbose: Boolean(g.verbose),
         noColor: g.color === false,
         format: format(opts.format),
+        analysisMode: parseAnalysisMode(opts.mode),
         codeAwareMode: codeAwareMode(opts.codeAware),
         codebaseIds: opts.codebaseId,
       }));
@@ -478,7 +488,8 @@ function main(): void {
     .description('compare two traces with AI-assisted analysis')
     .option('-q, --query <question>', 'comparison question')
     .option('--format <format>', 'output format: text, json, ndjson')
-    .action(async (currentTrace: string, referenceTrace: string, opts: { query?: string; format?: string }) => {
+    .option('--mode <mode>', 'analysis mode: fast, full, auto')
+    .action(async (currentTrace: string, referenceTrace: string, opts: { query?: string; format?: string; mode?: string }) => {
       const g = globals();
       const query = opts.query ?? g.query;
       if (!query?.trim()) {
@@ -494,27 +505,108 @@ function main(): void {
         verbose: Boolean(g.verbose),
         noColor: g.color === false,
         format: format(opts.format),
+        analysisMode: parseAnalysisMode(opts.mode),
       }));
     });
 
   const captureCmd = program.command('capture').description('capture traces from local devices');
   captureCmd
-    .command('android')
-    .description('capture an Android Perfetto trace from a connected adb device')
-    .requiredOption('--app <package>', 'target Android package name')
-    .requiredOption('--out <file>', 'output trace file path')
-    .option('--duration <seconds>', 'capture duration in seconds', (v) => Number.parseFloat(v), 10)
-    .option('--serial <serial>', 'adb device serial when multiple devices are connected')
-    .option('--format <format>', 'output format: text, json, ndjson')
-    .action(async (opts: { app: string; out: string; duration: number; serial?: string; format?: string }) => {
+    .command('presets')
+    .description('list built-in trace capture presets')
+    .option('--format <format>', 'output format: text, json')
+    .action(async (opts: { format?: string }) => {
       const g = globals();
-      await runAndExit(() => runCaptureAndroidCommand({
+      await runAndExit(() => runCapturePresetsCommand({
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        format: textJsonFormat(opts.format),
+      }));
+    });
+  captureCmd
+    .command('config')
+    .description('render a built-in Android Perfetto trace config')
+    .requiredOption('--preset <preset>', 'capture preset', parseCapturePreset)
+    .option('--app <package>', 'target Android package name or *', '*')
+    .option('--duration <seconds>', 'capture duration in seconds', (v) => Number.parseFloat(v))
+    .option('--out <file>', 'write config to a file instead of stdout')
+    .option('--categories <category...>', 'additional atrace categories to inject')
+    .option('--cuj <name>', 'optional CUJ name to annotate generated config metadata')
+    .option('--format <format>', 'output format: text, json')
+    .action(async (opts: { preset: CapturePresetId; app?: string; duration?: number; out?: string; categories?: string[]; cuj?: string; format?: string }) => {
+      const g = globals();
+      await runAndExit(() => runCaptureConfigCommand({
+        preset: opts.preset,
         app: opts.app,
         durationSeconds: opts.duration,
         out: opts.out,
-        serial: opts.serial,
+        categories: opts.categories,
+        cuj: opts.cuj,
         envFile: g.envFile,
         sessionDir: g.sessionDir,
+        format: textJsonFormat(opts.format),
+      }));
+    });
+  captureCmd
+    .command('android')
+    .description('capture an Android Perfetto trace from a connected adb device')
+    .option('--preset <preset>', 'capture preset: startup, scrolling, anr, game, memory, cpu, overview, full', parseCapturePreset)
+    .option('--config <pbtxt>', 'existing Perfetto textproto config file')
+    .option('--app <package>', 'target Android package name or *')
+    .requiredOption('--out <file>', 'output trace file path')
+    .option('--duration <seconds>', 'capture duration in seconds', (v) => Number.parseFloat(v))
+    .option('--serial <serial>', 'adb device serial when multiple devices are connected')
+    .option('--sideload', 'force sideloading tracebox instead of using device perfetto', false)
+    .option('--tracebox <path>', 'tracebox binary to sideload when needed')
+    .option('--adb <path>', 'adb binary path for this command (overrides ADB_PATH)')
+    .option('--no-guardrails', 'pass --no-guardrails to perfetto')
+    .option('--kill-stale', 'kill stale perfetto/simpleperf/traced processes before capture', false)
+    .option('--analyze', 'run SmartPerfetto AI analysis after capture', false)
+    .option('-q, --query <question>', 'analysis question when --analyze is set')
+    .option('--mode <mode>', 'analysis mode for --analyze: fast, full, auto')
+    .option('--categories <category...>', 'additional atrace categories to inject into generated or textproto config')
+    .option('--cuj <name>', 'optional CUJ name to annotate generated config metadata')
+    .option('--format <format>', 'output format: text, json, ndjson')
+    .action(async (opts: {
+      preset?: CapturePresetId;
+      config?: string;
+      app?: string;
+      out: string;
+      duration?: number;
+      serial?: string;
+      sideload?: boolean;
+      tracebox?: string;
+      adb?: string;
+      guardrails?: boolean;
+      killStale?: boolean;
+      analyze?: boolean;
+      query?: string;
+      mode?: string;
+      categories?: string[];
+      cuj?: string;
+      format?: string;
+    }) => {
+      const g = globals();
+      await runAndExit(() => runCaptureAndroidCommand({
+        app: opts.app,
+        preset: opts.preset,
+        config: opts.config,
+        durationSeconds: opts.duration,
+        out: opts.out,
+        serial: opts.serial,
+        sideload: opts.sideload,
+        tracebox: opts.tracebox,
+        adb: opts.adb,
+        noGuardrails: opts.guardrails === false,
+        killStale: opts.killStale,
+        analyze: opts.analyze,
+        query: opts.query ?? g.query ?? g.prompt,
+        analysisMode: parseAnalysisMode(opts.mode),
+        categories: opts.categories,
+        cuj: opts.cuj,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        verbose: Boolean(g.verbose),
+        noColor: g.color === false,
         format: format(opts.format),
       }));
     });
@@ -608,6 +700,17 @@ function parsePositiveInteger(value: string): number {
 function parseReportExportFormat(format: string): 'html' | 'md' | 'json' {
   if (format === 'html' || format === 'md' || format === 'json') return format;
   throw new Error(`Invalid report export format: ${format}. Expected html, md, or json.`);
+}
+
+function parseAnalysisMode(mode: string | undefined): CliAnalysisMode | undefined {
+  if (!mode) return undefined;
+  if (mode === 'fast' || mode === 'full' || mode === 'auto') return mode;
+  throw new Error(`Invalid analysis mode: ${mode}. Expected fast, full, or auto.`);
+}
+
+function parseCapturePreset(preset: string): CapturePresetId {
+  if (isCapturePresetId(preset)) return preset;
+  throw new Error(`Invalid capture preset: ${preset}. Expected startup, scrolling, anr, game, memory, cpu, overview, or full.`);
 }
 
 function parseCodebaseKind(kind: string | undefined): 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk' {

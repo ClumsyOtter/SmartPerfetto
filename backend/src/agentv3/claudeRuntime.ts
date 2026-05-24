@@ -12,7 +12,7 @@ import { ensureSkillRegistryInitialized, skillRegistry } from '../services/skill
 import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { sessionContextManager } from '../agent/context/enhancedSessionContext';
-import type { StreamingUpdate, Finding, ConversationTurn } from '../agent/types';
+import type { StreamingUpdate, Finding } from '../agent/types';
 import type { Hypothesis as ProtocolHypothesis } from '../agent/types/agentProtocol';
 import type { AnalysisResult, AnalysisOptions, IOrchestrator } from '../agent/core/orchestratorTypes';
 import type { ArchitectureInfo } from '../agent/detectors/types';
@@ -40,6 +40,7 @@ import {
   explainClaudeRuntimeError,
   getCredentialSourceHint,
   getSdkBinaryOption,
+  hasConfiguredClaudeEffortOverride,
   isClaudeQuotaError,
   loadClaudeConfig,
   resolveEffort,
@@ -70,21 +71,15 @@ import {
   buildNegativePatternSection,
 } from './analysisPatternMemory';
 import {sanitizeCodeAwareText} from '../services/security/codeAwareOutputRegistry';
-import { SkillNotesBudget } from './selfImprove/skillNotesInjector';
 import { runSnapshots } from './selfImprove/strategyFingerprint';
 import { verifyConclusion, generateCorrectionPrompt, isConclusionIncomplete } from './claudeVerifier';
 import { backendLogPath } from '../runtimePaths';
 import {
   applyFinalResultQualityGate,
+  hasDeliverableFinalReportHeading,
+  looksLikeProcessNarrationConclusion,
   looksLikePhaseSummaryFallback,
 } from '../services/finalResultQualityGate';
-
-function parseQuickBudgetEnv(): number | undefined {
-  const v = process.env.SELF_IMPROVE_QUICK_NOTES_BUDGET;
-  if (!v) return undefined;
-  const n = Number.parseInt(v, 10);
-  return Number.isFinite(n) && n >= 0 ? n : undefined;
-}
 
 function parseLeadingJsonObject(text: string): Record<string, unknown> | null {
   let depth = 0;
@@ -147,7 +142,7 @@ function extractPlanPhaseIdFromToolResult(resultStr: string): string | undefined
 }
 
 function looksLikeProcessNarration(text: string): boolean {
-  return /(?:我需要|我将|接下来|先重新|重新读取|继续调用|工具|tool|let me|i need to|i will|next i)/i
+  return /(?:我来|我需要|我将|接下来|先重新|重新读取|继续调用|首先.*提交|计划已提交|工具|tool|let me|i need to|i will|next i)/i
     .test(text.slice(0, 500));
 }
 
@@ -160,12 +155,135 @@ function correctionResultLooksUsable(text: string): boolean {
   if (looksLikeProcessNarration(trimmed) && !hasFinalReportMarker) return false;
   return hasFinalReportMarker || !isConclusionIncomplete(trimmed);
 }
+
+function findDeliverableReportHeadingIndex(text: string): number {
+  const match = text.match(
+    /(?:^|\n)\s{0,3}(?:#{1,3}\s*)?(?:(?:[^\n#]{0,40})?分析报告|综合结论|关键结论|最终结论|最终报告|根因分析|Final Conclusion|Final Report|Analysis Report|Root Cause)(?=\s|[：:。.!！?\n]|$)/i,
+  );
+  return match?.index ?? -1;
+}
+
+function stripLeadingProcessNarrationBeforeSection(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+
+  const reportHeadingMatch = trimmed.match(
+    /^\s{0,3}#{1,3}\s*[^\n]*(?:分析报告|最终报告|Final Report|Analysis Report)[^\n]*\n+/i,
+  );
+  const heading = reportHeadingMatch ? reportHeadingMatch[0].trimEnd() : '';
+  const body = reportHeadingMatch
+    ? trimmed.slice(reportHeadingMatch[0].length).trimStart()
+    : trimmed;
+  const sectionMatch = /(?:^|\n)\s{0,3}#{1,4}\s+\S/.exec(body);
+  if (!sectionMatch || sectionMatch.index === undefined || sectionMatch.index <= 0) {
+    return trimmed;
+  }
+
+  const prefix = body.slice(0, sectionMatch.index).trim();
+  const prefixIsProcessNarration =
+    looksLikeProcessNarration(prefix) ||
+    looksLikeProcessNarrationConclusion(prefix) ||
+    /(?:我来分析|计划已提交|开始\s*Phase|进入\s*Phase|Phase\s*\d+|所有假设已解决|完整结构化报告|修正重试|验证发现|update_plan_phase|resolve_hypothesis)/i.test(prefix);
+  if (!prefixIsProcessNarration) return trimmed;
+
+  const reportBody = body.slice(sectionMatch.index).trimStart();
+  return heading ? `${heading}\n\n${reportBody}` : reportBody;
+}
+
+function sanitizeClaudeConclusionText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+
+  const singleLineCleaned = trimmed
+    .replace(/^(?:完成综合结论输出|完整结构化报告已(?:输出|生成))[。:：\s]*/i, '')
+    .replace(/^所有假设已解决[。；;,\s]*(?:现在)?输出完整结构化报告[。:：\s-]*/i, '')
+    .replace(/^所有(?:深钻)?数据已收集完毕[。；;,\s]*(?:现在)?输出(?:综合结论|最终报告|完整结构化报告)[。:：\s-]*/i, '')
+    .trim();
+  const processIntroCleaned = stripLeadingProcessNarrationBeforeSection(singleLineCleaned);
+  if (processIntroCleaned !== trimmed) return processIntroCleaned;
+
+  const headingIndex = findDeliverableReportHeadingIndex(trimmed);
+  if (headingIndex <= 0 || !hasDeliverableFinalReportHeading(trimmed.slice(headingIndex))) {
+    return trimmed;
+  }
+
+  const prefix = trimmed.slice(0, headingIndex).trim();
+  const prefixIsProcessNarration =
+    looksLikeProcessNarration(prefix) ||
+    looksLikeProcessNarrationConclusion(prefix) ||
+    /(?:我来分析|计划已提交|开始\s*Phase|进入\s*Phase|Phase\s*\d+|所有假设已解决|完整结构化报告|修正重试|验证发现|update_plan_phase|resolve_hypothesis)/i.test(prefix);
+  if (!prefixIsProcessNarration) return trimmed;
+
+  return trimmed.slice(headingIndex).trim();
+}
+
+function reportHeadingForScene(sceneType: SceneType | undefined, outputLanguage: string): string {
+  const zh = outputLanguage !== 'en';
+  switch (sceneType) {
+    case 'startup':
+      return zh ? '# 启动性能分析报告' : '# Startup Performance Analysis Report';
+    case 'scrolling':
+      return zh ? '# 滑动性能分析报告' : '# Scrolling Performance Analysis Report';
+    case 'anr':
+      return zh ? '# ANR 分析报告' : '# ANR Analysis Report';
+    default:
+      return zh ? '# 性能分析报告' : '# Performance Analysis Report';
+  }
+}
+
+function looksLikeStructuredDeliverableReport(text: string): boolean {
+  const trimmed = text.trim();
+  const headingCount = (trimmed.match(/(^|\n)\s{0,3}#{1,3}\s+\S/g) || []).length;
+  if (headingCount < 2) return false;
+  return /(?:evidence_ref_id|source_ref|art-\d+|data:art-\d+|data:skill:|##?\s*(?:概览|关键发现|根因|优化建议|Recommendations|Evidence))/i.test(trimmed);
+}
+
+function ensureClaudeFinalReportHeading(
+  text: string,
+  sceneType: SceneType | undefined,
+  outputLanguage: string,
+): string {
+  const trimmed = sanitizeClaudeConclusionText(text);
+  if (!trimmed || hasDeliverableFinalReportHeading(trimmed)) return trimmed;
+  if (!looksLikeStructuredDeliverableReport(trimmed)) return trimmed;
+  return `${reportHeadingForScene(sceneType, outputLanguage)}\n\n${trimmed}`;
+}
+
+function shouldMarkCorrectionTimeoutPartial(input: {
+  correctedResult: string;
+  existingConclusion: string;
+}): boolean {
+  if (correctionResultLooksUsable(sanitizeClaudeConclusionText(input.correctedResult))) {
+    return false;
+  }
+  return !correctionResultLooksUsable(sanitizeClaudeConclusionText(input.existingConclusion));
+}
+
+function chooseClaudeConclusionText(input: {
+  finalResult: string;
+  accumulatedAnswer: string;
+}): string {
+  const finalResult = sanitizeClaudeConclusionText(input.finalResult);
+  const accumulatedAnswer = sanitizeClaudeConclusionText(input.accumulatedAnswer);
+  if (!finalResult) return accumulatedAnswer;
+  if (!accumulatedAnswer) return finalResult;
+  if (
+    isConclusionIncomplete(finalResult) &&
+    accumulatedAnswer.length > finalResult.length &&
+    hasDeliverableFinalReportHeading(accumulatedAnswer)
+  ) {
+    return accumulatedAnswer;
+  }
+  if (
+    !hasDeliverableFinalReportHeading(finalResult) &&
+    hasDeliverableFinalReportHeading(accumulatedAnswer)
+  ) {
+    return accumulatedAnswer;
+  }
+  return finalResult;
+}
 import { probeTraceCompleteness } from './traceCompletenessProber';
-import {
-  captureEntitiesFromResponses,
-  applyCapturedEntities,
-} from '../agent/core/entityCapture';
-import { DEFAULT_OUTPUT_LANGUAGE, localize } from './outputLanguage';
+import { localize } from './outputLanguage';
 import {
   deleteClaudeSessionMapRuntimeSnapshot,
   deleteClaudeSessionMapRuntimeSnapshots,
@@ -178,14 +296,26 @@ import {
   legacyFilesystemReadAuthorityEnabled,
   legacyFilesystemWritesEnabled,
 } from '../services/enterpriseMigration';
-import type { ProviderScope } from '../services/providerManager';
-import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
+import {
+  SDK_SESSION_FRESHNESS_MS,
+  buildEntityContext,
+  buildQuickConversationContext,
+  buildRuntimeSessionMapKey,
+  captureSkillDisplayEntities,
+  collectRecentFindings,
+  createRuntimeSkillNotesBudget,
+  formatTraceContext,
+  getLruCacheEntry,
+  isFreshRuntimeEntry,
+  knowledgeScopeFromAnalysisOptions,
+  providerScopeFromAnalysisOptions,
+  setLruCacheEntry,
+  toProtocolHypothesis as toRuntimeProtocolHypothesis,
+} from '../agentRuntime/runtimeCommon';
 
 const SESSION_MAP_FILE = backendLogPath('claude_session_map.json');
 /** Max age for session map entries before pruning (24 hours). */
 const SESSION_MAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-/** Claude SDK sessions expire server-side after roughly 4 hours. */
-const SDK_SESSION_FRESHNESS_MS = 4 * 60 * 60 * 1000;
 
 interface SessionMapEntry {
   sdkSessionId: string;
@@ -241,25 +371,6 @@ function loadSessionMapForCurrentMode(): Map<string, SessionMapEntry> {
   return new Map();
 }
 
-function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | undefined {
-  if (!options.tenantId || !options.workspaceId) return undefined;
-  return {
-    tenantId: options.tenantId,
-    workspaceId: options.workspaceId,
-    userId: options.userId,
-  };
-}
-
-function knowledgeScopeFromOptions(options: AnalysisOptions): KnowledgeScope | undefined {
-  if (!options.tenantId || !options.workspaceId) return undefined;
-  return {
-    tenantId: options.tenantId,
-    workspaceId: options.workspaceId,
-    userId: options.userId,
-    sourceRunId: options.runId,
-  };
-}
-
 /**
  * Debounce timer for session map persistence — avoids blocking event loop on every SDK message.
  * P2-1: Use a Map keyed by the Map reference to support multiple ClaudeRuntime instances.
@@ -304,33 +415,6 @@ function savePersistedSessionMapSync(map: Map<string, SessionMapEntry>): void {
 // P2-G1: ALLOWED_TOOLS is now auto-derived from createClaudeMcpServer() return value.
 // No longer hardcoded — adding a new MCP tool automatically includes it.
 
-/**
- * Format pre-queried trace datasets as Markdown tables to prepend to the AI prompt.
- * Mirrors smartperfetto's approach: data is ready upfront so the AI skips basic SQL turns.
- */
-function formatTraceContext(
-  datasets: import('../agent/core/orchestratorTypes').TraceDataset[],
-  outputLanguage = DEFAULT_OUTPUT_LANGUAGE,
-): string {
-  if (!datasets || datasets.length === 0) return '';
-  const parts = datasets.map((d) => {
-    const header = `| ${d.columns.join(' | ')} |`;
-    const sep = `| ${d.columns.map(() => '---').join(' | ')} |`;
-    const rows = (d.rows as unknown[][]).slice(0, 100).map(
-      (r) => `| ${r.map((v) => String(v ?? '—')).join(' | ')} |`,
-    );
-    const truncNote = d.rows.length > 100
-      ? localize(outputLanguage, `\n*(前 100 行，共 ${d.rows.length} 行)*`, `\n*(first 100 rows out of ${d.rows.length})*`)
-      : '';
-    return `### ${d.label}\n${header}\n${sep}\n${rows.join('\n')}${truncNote}`;
-  });
-  return localize(
-    outputLanguage,
-    `## 前端预查询 Trace 数据\n\n以下数据已由前端查询完毕，直接使用，无需重复 SQL 查询：\n\n${parts.join('\n\n')}`,
-    `## Frontend Pre-queried Trace Data\n\nThe frontend has already queried the following data. Use it directly; do not repeat the same SQL query.\n\n${parts.join('\n\n')}`,
-  );
-}
-
 /** Check if an error is retryable (API overload/server errors). */
 function isRetryableError(err: Error): boolean {
   const msg = err.message || '';
@@ -371,49 +455,7 @@ function isMissingSdkConversationError(message: string): boolean {
 function isFreshFullSdkSessionEntry(entry: SessionMapEntry | undefined, now = Date.now()): entry is SessionMapEntry & { mode: 'full' } {
   return !!entry
     && entry.mode === 'full'
-    && now - (entry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS;
-}
-
-function compactForPrompt(value: unknown, maxChars: number): string {
-  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 1))}...`;
-}
-
-function buildQuickConversationContext(
-  previousTurns: ConversationTurn[],
-  outputLanguage = DEFAULT_OUTPUT_LANGUAGE,
-): string | undefined {
-  const turns = previousTurns.filter(turn => turn.completed).slice(-3);
-  if (turns.length === 0) return undefined;
-
-  const lines = [
-    localize(
-      outputLanguage,
-      '## 最近对话上下文\n\n以下是 SmartPerfetto 本地保存的最近问答，用于理解“继续/刚才/这个”等指代；不要把它当作当前问题的新证据。',
-      '## Recent Conversation Context\n\nThe following recent SmartPerfetto turns are local context for references like "continue", "earlier", or "this"; do not treat them as new evidence for the current question.',
-    ),
-  ];
-
-  for (const turn of turns) {
-    const query = compactForPrompt(turn.query, 220);
-    const answer = compactForPrompt(turn.result?.message || '', 700);
-    const findings = turn.findings
-      .slice(0, 3)
-      .map(f => `[${f.severity}] ${compactForPrompt(f.title, 160)}`)
-      .filter(Boolean);
-
-    lines.push(`### Turn ${turn.turnIndex + 1}`);
-    lines.push(`- ${localize(outputLanguage, '用户', 'User')}: ${query}`);
-    if (answer) {
-      lines.push(`- ${localize(outputLanguage, '上轮回答', 'Previous answer')}: ${answer}`);
-    }
-    if (findings.length > 0) {
-      lines.push(`- ${localize(outputLanguage, '上轮发现', 'Previous findings')}: ${findings.join('; ')}`);
-    }
-  }
-
-  return lines.join('\n');
+    && isFreshRuntimeEntry(entry, SDK_SESSION_FRESHNESS_MS, now);
 }
 
 export const __testing = {
@@ -421,6 +463,11 @@ export const __testing = {
   isMissingSdkConversationError,
   isFreshFullSdkSessionEntry,
   buildQuickConversationContext,
+  correctionResultLooksUsable,
+  chooseClaudeConclusionText,
+  ensureClaudeFinalReportHeading,
+  sanitizeClaudeConclusionText,
+  shouldMarkCorrectionTimeoutPartial,
 };
 
 /** Sleep for the given milliseconds. */
@@ -574,7 +621,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
   /** Restore a cached architecture detection result (e.g., from session persistence). */
   restoreArchitectureCache(traceId: string, architecture: ArchitectureInfo): void {
-    this.architectureCache.set(traceId, architecture);
+    setLruCacheEntry(this.architectureCache, traceId, architecture);
   }
 
   /** Get cached architecture for a traceId (used for persistence). */
@@ -589,7 +636,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   }
 
   private buildSessionMapKey(sessionId: string, referenceTraceId?: string): string {
-    return referenceTraceId ? `${sessionId}:ref:${referenceTraceId}` : sessionId;
+    return buildRuntimeSessionMapKey(sessionId, referenceTraceId);
   }
 
   private persistSessionMapEntry(
@@ -649,7 +696,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
     if (enterpriseSessionMapDbWritesEnabled()) {
       try {
-        deleteClaudeSessionMapRuntimeSnapshot(sessionId, sessionMapKey, providerScopeFromOptions(options));
+        deleteClaudeSessionMapRuntimeSnapshot(sessionId, sessionMapKey, providerScopeFromAnalysisOptions(options));
       } catch (err) {
         console.warn('[ClaudeRuntime] Failed to delete stale SDK session map from runtime_snapshots:', (err as Error).message);
       }
@@ -741,7 +788,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         hasPriorFullAnalysis: previousTurns.some(t => t.intent?.complexity !== 'simple'),
       };
 
-      const cachedArch = this.architectureCache.get(traceId);
+      const cachedArch = getLruCacheEntry(this.architectureCache, traceId);
 
       // Focus detection runs for every path — kick it off once and let the classifier
       // (if needed) share the wait. Explicit 'fast'/'full' skips the classifier entirely.
@@ -751,7 +798,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         return { apps: [], primaryApp: undefined, method: 'none' as const };
       });
 
-      const providerScope = providerScopeFromOptions(options);
+      const providerScope = providerScopeFromAnalysisOptions(options);
       const runtimeConfig = resolveRuntimeConfig(this.config, options.providerId, providerScope);
 
       let queryComplexity: QueryComplexity;
@@ -796,6 +843,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         sessionContext,
         previousTurns,
         sceneType,
+        runtimeConfig,
       });
 
       const { handleMessage: bridge, getAccumulatedAnswer } = createSseBridge((update: StreamingUpdate) => {
@@ -1317,8 +1365,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               terminationMessage = buildMaxTurnsTerminationMessage({
                 mode: 'full',
                 turns: rounds,
-                maxTurns: this.config.maxTurns,
-                outputLanguage: this.config.outputLanguage,
+                maxTurns: runtimeConfig.maxTurns,
+                outputLanguage: runtimeConfig.outputLanguage,
               });
             }
             // Record SDK token usage and prompt cache metrics
@@ -1410,12 +1458,30 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         });
       }
 
-      // Use SDK terminal result if available; fall back to accumulated streamed answer tokens.
-      // On timeout, the SDK result message may never arrive, but answer_token events
-      // were already streamed to the frontend — use that text to populate the report.
-      conclusionText = finalResult || getAccumulatedAnswer() || '';
+      // Prefer a deliverable streamed report over a short SDK terminal summary.
+      // Some compatible providers put the full report in answer_token chunks but
+      // return only a terse summary in the terminal result.
+      const accumulatedAnswerBeforeVerification = getAccumulatedAnswer();
+      conclusionText = chooseClaudeConclusionText({
+        finalResult: finalResult || '',
+        accumulatedAnswer: accumulatedAnswerBeforeVerification,
+      });
+      conclusionText = ensureClaudeFinalReportHeading(
+        conclusionText,
+        ctx.sceneType,
+        runtimeConfig.outputLanguage,
+      );
       if (!finalResult && conclusionText) {
         console.warn(`[ClaudeRuntime] Session ${sessionId}: SDK result was empty, recovered ${conclusionText.length} chars from streamed answer tokens`);
+      } else if (
+        finalResult &&
+        conclusionText === sanitizeClaudeConclusionText(accumulatedAnswerBeforeVerification) &&
+        conclusionText !== sanitizeClaudeConclusionText(finalResult)
+      ) {
+        console.warn(
+          `[ClaudeRuntime] Session ${sessionId}: SDK result was a short terminal summary ` +
+          `(${finalResult.length} chars), using streamed report (${conclusionText.length} chars) before verification`,
+        );
       }
       allFindings.push(extractFindingsFromText(conclusionText));
       let mergedFindings = mergeFindings(allFindings);
@@ -1528,8 +1594,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                 phase: 'concluding',
                 message: localize(
                   this.config.outputLanguage,
-                  `发现 ${errorIssues.length} 个 ERROR 级问题，启动修正重试 (${attempt + 1}/${MAX_CORRECTION_ATTEMPTS})...`,
-                  `Found ${errorIssues.length} ERROR-level issue(s). Starting correction retry (${attempt + 1}/${MAX_CORRECTION_ATTEMPTS})...`,
+                  `最终报告仍需补齐，正在自动修正 (${attempt + 1}/${MAX_CORRECTION_ATTEMPTS})...`,
+                  `The final report still needs completion; applying automatic correction (${attempt + 1}/${MAX_CORRECTION_ATTEMPTS})...`,
                 ),
               },
               timestamp: Date.now(),
@@ -1628,16 +1694,23 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               if (!correctedResult && !correctionTimedOut) {
                 correctedResult = correctionAnswerBridge.getAccumulatedAnswer();
               }
+              correctedResult = ensureClaudeFinalReportHeading(
+                correctedResult,
+                ctx.sceneType,
+                runtimeConfig.outputLanguage,
+              );
 
               if (correctionTimedOut) {
                 console.warn(`[ClaudeRuntime] Correction attempt ${attempt + 1} timed out, using partial result (${correctedResult.length} chars)`);
-                if (!correctionResultLooksUsable(correctedResult)) {
+                if (shouldMarkCorrectionTimeoutPartial({ correctedResult, existingConclusion: conclusionText })) {
                   correctedResult = '';
                   verificationDegradedMessage = localize(
                     this.config.outputLanguage,
-                    'Claude 修正重试超时，且没有产出可独立交付的修正报告；已保留原结论并标记为 partial。',
-                    'Claude correction retry timed out without a deliverable corrected report; keeping the previous conclusion and marking the result partial.',
+                    '修正重试超时，且当前结论仍不可独立交付；已保留原结论并标记为 partial。',
+                    'Correction retry timed out and the current conclusion is still not independently deliverable; keeping the previous conclusion and marking the result partial.',
                   );
+                } else if (!correctionResultLooksUsable(correctedResult)) {
+                  correctedResult = '';
                 }
               }
 
@@ -1681,28 +1754,33 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         allFindings.push(extractFindingsFromText(conclusionText));
         mergedFindings = mergeFindings(allFindings);
       }
+      conclusionText = ensureClaudeFinalReportHeading(
+        conclusionText,
+        ctx.sceneType,
+        runtimeConfig.outputLanguage,
+      );
 
       const isPartialResult = terminationReason === MAX_TURNS_TERMINATION_REASON;
       if (isPartialResult) {
         terminationMessage ||= buildMaxTurnsTerminationMessage({
           mode: 'full',
           turns: rounds,
-          maxTurns: this.config.maxTurns,
-          outputLanguage: this.config.outputLanguage,
+          maxTurns: runtimeConfig.maxTurns,
+          outputLanguage: runtimeConfig.outputLanguage,
         });
         conclusionText = conclusionText.trim()
-          ? prependPartialNotice(conclusionText, terminationMessage, this.config.outputLanguage)
+          ? prependPartialNotice(conclusionText, terminationMessage, runtimeConfig.outputLanguage)
           : buildMaxTurnsFallbackConclusion({
               mode: 'full',
               turns: rounds,
-              maxTurns: this.config.maxTurns,
-              outputLanguage: this.config.outputLanguage,
+              maxTurns: runtimeConfig.maxTurns,
+              outputLanguage: runtimeConfig.outputLanguage,
             });
         allFindings.push(extractFindingsFromText(conclusionText));
         mergedFindings = mergeFindings(allFindings);
         failedApproaches.push({
           type: 'strategy_failure',
-          approach: `analysis reached ${this.config.maxTurns} full-mode turns`,
+          approach: `analysis reached ${runtimeConfig.maxTurns} full-mode turns`,
           reason: 'SDK returned error_max_turns before a normal success result',
         });
         this.emitUpdate({
@@ -1715,7 +1793,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             partial: true,
             terminationReason,
             turns: rounds,
-            maxTurns: this.config.maxTurns,
+            maxTurns: runtimeConfig.maxTurns,
           },
           timestamp: Date.now(),
         });
@@ -1727,12 +1805,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           ? `${terminationMessage}\n\n${verificationDegradedMessage}`
           : verificationDegradedMessage;
         conclusionText = conclusionText.trim()
-          ? prependPartialNotice(conclusionText, verificationDegradedMessage, this.config.outputLanguage)
+          ? prependPartialNotice(conclusionText, verificationDegradedMessage, runtimeConfig.outputLanguage)
           : buildMaxTurnsFallbackConclusion({
               mode: 'full',
               turns: rounds,
-              maxTurns: this.config.maxTurns,
-              outputLanguage: this.config.outputLanguage,
+              maxTurns: runtimeConfig.maxTurns,
+              outputLanguage: runtimeConfig.outputLanguage,
             });
         mergedFindings = mergeFindings([extractFindingsFromText(conclusionText)]);
         this.emitUpdate({
@@ -1834,7 +1912,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             sessionId,
             turnIndex: ctx.previousTurns.length,
           },
-          knowledgeScope: knowledgeScopeFromOptions(options),
+          knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
         };
         saveAnalysisPattern(fullFeatures, insights, sceneType, ctx.architecture?.type, finalAnalysisResult.confidence, patternExtras)
           .catch(err => console.warn('[ClaudeRuntime] Pattern save failed:', (err as Error).message));
@@ -1847,7 +1925,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           sceneType,
           architectureType: ctx.architecture?.type,
           verifierPassed: true,
-          knowledgeScope: knowledgeScopeFromOptions(options),
+          knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
         }).catch(err => console.warn('[ClaudeRuntime] Quick→full promote failed:', (err as Error).message));
       }
 
@@ -1867,7 +1945,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       // P1: Save negative patterns to long-term memory (fire-and-forget)
       if (failedApproaches.length > 0 && fullFeatures.length > 0) {
         saveNegativePattern(fullFeatures, failedApproaches, sceneType, ctx.architecture?.type, {
-          knowledgeScope: knowledgeScopeFromOptions(options),
+          knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
         })
           .catch(err => console.warn('[ClaudeRuntime] Negative pattern save failed:', (err as Error).message));
       }
@@ -1878,7 +1956,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const errMsg = explainClaudeRuntimeError(
         rawErrorMessage,
         this.config.outputLanguage,
-        getCredentialSourceHint(options.providerId, providerScopeFromOptions(options)),
+        getCredentialSourceHint(options.providerId, providerScopeFromAnalysisOptions(options)),
       );
       const quotaExceeded = isClaudeQuotaError(rawErrorMessage);
       console.error('[ClaudeRuntime] Analysis failed:', errMsg);
@@ -2004,12 +2082,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               packageName: effectivePackageName,
             });
             if (arch) {
-              this.architectureCache.set(traceId, arch);
-              // LRU eviction: match full path's 50-entry cap
-              if (this.architectureCache.size > 50) {
-                const firstKey = this.architectureCache.keys().next().value;
-                if (firstKey) this.architectureCache.delete(firstKey);
-              }
+              setLruCacheEntry(this.architectureCache, traceId, arch);
             }
             return arch;
           } catch (err) {
@@ -2027,12 +2100,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const watchdogWarning: { current: string | null } = { current: null };
       // Quick path defaults to no skill-notes injection per §8 of the
       // self-improving design. Operators can opt-in via the env override.
-      const quickNotesBudget = process.env.SELF_IMPROVE_NOTES_INJECT_ENABLED === '1'
-        ? new SkillNotesBudget({
-            mode: 'quick',
-            quickOverrideTotal: parseQuickBudgetEnv(),
-          })
-        : undefined;
+      const quickNotesBudget = createRuntimeSkillNotesBudget(true);
       const { server: mcpServer, allowedTools } = createClaudeMcpServer({
         sessionId,
         traceId,
@@ -2045,7 +2113,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         lightweight: true,
         skillNotesBudget: quickNotesBudget,
         outputLanguage: this.config.outputLanguage,
-        knowledgeScope: knowledgeScopeFromOptions(options),
+        knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
         codeAwareMode: options.codeAwareMode,
         codebaseIds: options.codebaseIds,
       });
@@ -2059,8 +2127,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         outputLanguage: this.config.outputLanguage,
       });
 
-      const providerScope = providerScopeFromOptions(options);
-      const quickConfig = createQuickConfig(resolveRuntimeConfig(this.config, options.providerId, providerScope));
+      const providerScope = providerScopeFromAnalysisOptions(options);
+      const sdkEnv = createSdkEnv(options.providerId, providerScope);
+      const quickConfig = createQuickConfig(
+        resolveRuntimeConfig(this.config, options.providerId, providerScope),
+        sdkEnv,
+      );
 
       const { handleMessage: bridge, getAccumulatedAnswer } = createSseBridge((update: StreamingUpdate) => {
         this.emitUpdate(update);
@@ -2078,8 +2150,6 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         },
         timestamp: Date.now(),
       });
-
-      const sdkEnv = createSdkEnv(options.providerId, providerScope);
 
       // Quick calls intentionally do not resume or persist Claude SDK sessions.
       // The SDK's maxTurns budget is tied to the resumed conversation, while
@@ -2293,7 +2363,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         saveQuickPathPattern(quickFeatures, insights, sceneType, cachedArch?.type, {
           status: 'provisional',
           provenance: { sessionId, turnIndex: previousTurns.length },
-          knowledgeScope: knowledgeScopeFromOptions(options),
+          knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
         }).catch(err => console.warn('[ClaudeRuntime] Quick pattern save failed:', (err as Error).message));
       }
 
@@ -2303,7 +2373,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const errMsg = explainClaudeRuntimeError(
         rawErrorMessage,
         this.config.outputLanguage,
-        getCredentialSourceHint(options.providerId, providerScopeFromOptions(options)),
+        getCredentialSourceHint(options.providerId, providerScopeFromAnalysisOptions(options)),
       );
       const quotaExceeded = isClaudeQuotaError(rawErrorMessage);
       console.error('[ClaudeRuntime] Quick analysis failed:', errMsg);
@@ -2492,7 +2562,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     }
 
     if (snapshot.architecture) {
-      this.architectureCache.set(traceId, snapshot.architecture);
+      setLruCacheEntry(this.architectureCache, traceId, snapshot.architecture);
     }
 
     if (snapshot.sdkSessionId && snapshot.sdkSessionMode === 'full') {
@@ -2506,24 +2576,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
   /** P0-1: Convert agentv3 Hypothesis to agentProtocol Hypothesis format for AnalysisResult. */
   private toProtocolHypothesis(h: Hypothesis): ProtocolHypothesis {
-    const statusMap: Record<string, ProtocolHypothesis['status']> = {
-      formed: 'proposed',
-      confirmed: 'confirmed',
-      rejected: 'rejected',
-    };
-    const confidenceMap: Record<string, number> = { formed: 0.5, confirmed: 0.85, rejected: 0.1 };
-    return {
-      id: h.id,
-      description: h.statement,
-      status: statusMap[h.status] || 'proposed',
-      confidence: confidenceMap[h.status] ?? 0.5,
-      supportingEvidence: h.evidence && h.status === 'confirmed' ? [{ id: `${h.id}-ev`, type: 'observation' as const, description: h.evidence, source: 'claude', strength: 0.8 }] : [],
-      contradictingEvidence: h.evidence && h.status === 'rejected' ? [{ id: `${h.id}-ev`, type: 'observation' as const, description: h.evidence, source: 'claude', strength: 0.8 }] : [],
-      proposedBy: 'claude',
-      relevantAgents: ['claude'],
-      createdAt: h.formedAt,
-      updatedAt: h.resolvedAt || h.formedAt,
-    };
+    return toRuntimeProtocolHypothesis(h, 'claude');
   }
 
   reset(): void {
@@ -2549,15 +2602,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
    * Caps at 5 findings to prevent unbounded prompt growth.
    */
   private collectPreviousFindings(sessionContext: any, maxTurns?: number): Finding[] {
-    try {
-      let turns = sessionContext.getAllTurns?.() || [];
-      if (maxTurns && maxTurns > 0) {
-        turns = turns.slice(-maxTurns);
-      }
-      return turns.flatMap((turn: any) => turn.findings || []).slice(-5);
-    } catch {
-      return [];
-    }
+    return collectRecentFindings(sessionContext, { maxTurns, maxFindings: 5 });
   }
 
   /**
@@ -2565,42 +2610,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
    * Gives Claude awareness of known frames/sessions for drill-down resolution.
    */
   private buildEntityContext(entityStore: any): string | undefined {
-    try {
-      const stats = entityStore.getStats();
-      if (stats.totalEntityCount === 0) return undefined;
-
-      const lines: string[] = [];
-
-      const frames = entityStore.getAllFrames?.() || [];
-      if (frames.length > 0) {
-        lines.push(`**帧 (${frames.length})**:`);
-        for (const f of frames.slice(0, 15)) {
-          const parts = [`frame_id=${f.frame_id}`];
-          if (f.start_ts) parts.push(`ts=${f.start_ts}`);
-          if (f.jank_type) parts.push(`jank=${f.jank_type}`);
-          if (f.dur_ms) parts.push(`dur=${f.dur_ms}ms`);
-          if (f.process_name) parts.push(`proc=${f.process_name}`);
-          lines.push(`- ${parts.join(', ')}`);
-        }
-        if (frames.length > 15) lines.push(`- ...及其他 ${frames.length - 15} 帧`);
-      }
-
-      const sessions = entityStore.getAllSessions?.() || [];
-      if (sessions.length > 0) {
-        lines.push(`**滑动会话 (${sessions.length})**:`);
-        for (const s of sessions.slice(0, 8)) {
-          const parts = [`session_id=${s.session_id}`];
-          if (s.start_ts) parts.push(`ts=${s.start_ts}`);
-          if (s.jank_count) parts.push(`janks=${s.jank_count}`);
-          if (s.process_name) parts.push(`proc=${s.process_name}`);
-          lines.push(`- ${parts.join(', ')}`);
-        }
-      }
-
-      return lines.length > 0 ? lines.join('\n') : undefined;
-    } catch {
-      return undefined;
-    }
+    return buildEntityContext(entityStore);
   }
 
   /**
@@ -2619,8 +2629,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       sessionContext?: ReturnType<typeof sessionContextManager.getOrCreate>;
       previousTurns?: any[];
       sceneType?: SceneType;
+      runtimeConfig?: ClaudeAgentConfig;
     },
   ) {
+    const providerScope = providerScopeFromAnalysisOptions(options);
+    const runtimeConfig = precomputed?.runtimeConfig
+      ?? resolveRuntimeConfig(this.config, options.providerId, providerScope);
+
     // Phase 0: Selection context logging
     if (options.selectionContext) {
       const sc = options.selectionContext;
@@ -2646,7 +2661,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         content: {
           phase: 'starting',
           message: localize(
-            this.config.outputLanguage,
+            runtimeConfig.outputLanguage,
             `检测到焦点应用: ${focusResult.primaryApp} (${focusResult.method})`,
             `Detected focus app: ${focusResult.primaryApp} (${focusResult.method})`,
           ),
@@ -2662,12 +2677,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     skillExecutor.setFragmentRegistry(skillRegistry.getFragmentCache());
 
     // Phase 2: Architecture detection (LRU cached per traceId)
-    let architecture = this.architectureCache.get(traceId);
-    if (architecture) {
-      // LRU touch: delete and re-insert to move to end of Map iteration order
-      this.architectureCache.delete(traceId);
-      this.architectureCache.set(traceId, architecture);
-    } else {
+    let architecture = getLruCacheEntry(this.architectureCache, traceId);
+    if (!architecture) {
       try {
         const detector = createArchitectureDetector();
         architecture = await detector.detect({
@@ -2676,12 +2687,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           packageName: effectivePackageName,
         });
         if (architecture) {
-          this.architectureCache.set(traceId, architecture);
-          // LRU eviction: remove oldest entry (first key in Map)
-          if (this.architectureCache.size > 50) {
-            const firstKey = this.architectureCache.keys().next().value;
-            if (firstKey) this.architectureCache.delete(firstKey);
-          }
+          setLruCacheEntry(this.architectureCache, traceId, architecture);
         }
         this.emitUpdate({ type: 'architecture_detected', content: { architecture }, timestamp: Date.now() });
       } catch (err) {
@@ -2690,7 +2696,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     }
 
     // Phase 2.5: Vendor detection (LRU cached per traceId, reuses SkillAnalysisAdapter.detectVendor)
-    let detectedVendor = this.vendorCache.get(traceId) ?? null;
+    let detectedVendor = getLruCacheEntry(this.vendorCache, traceId) ?? null;
     if (!detectedVendor) {
       try {
         const adapter = getSkillAnalysisAdapter(this.traceProcessorService);
@@ -2698,12 +2704,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         const vendorResult = await adapter.detectVendor(traceId);
         detectedVendor = vendorResult.vendor;
         if (detectedVendor && detectedVendor !== 'aosp') {
-          this.vendorCache.set(traceId, detectedVendor);
-          // LRU eviction: match architectureCache limit
-          if (this.vendorCache.size > 50) {
-            const firstKey = this.vendorCache.keys().next().value;
-            if (firstKey) this.vendorCache.delete(firstKey);
-          }
+          setLruCacheEntry(this.vendorCache, traceId, detectedVendor);
         }
       } catch (err) {
         console.warn('[ClaudeRuntime] Vendor detection failed:', (err as Error).message);
@@ -2720,7 +2721,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         content: {
           phase: 'starting',
           message: localize(
-            this.config.outputLanguage,
+            runtimeConfig.outputLanguage,
             '对比模式：正在检测参考 Trace...',
             'Comparison mode: detecting the reference trace...',
           ),
@@ -2733,7 +2734,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const [refFocusResult, refArchitecture, currentTables, refTables] = await Promise.all([
         detectFocusApps(this.traceProcessorService, referenceTraceId).catch(() => ({ apps: [], method: 'none' as const, primaryApp: undefined })),
         (async () => {
-          let refArch = this.architectureCache.get(referenceTraceId);
+          let refArch = getLruCacheEntry(this.architectureCache, referenceTraceId);
           if (!refArch) {
             try {
               const detector = createArchitectureDetector();
@@ -2742,7 +2743,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                 traceProcessorService: this.traceProcessorService,
                 packageName: undefined,
               }) ?? undefined;
-              if (refArch) this.architectureCache.set(referenceTraceId, refArch);
+              if (refArch) setLruCacheEntry(this.architectureCache, referenceTraceId, refArch);
             } catch { /* non-fatal */ }
           }
           return refArch;
@@ -2783,7 +2784,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     }
 
     // Phase 2.9: Trace data completeness probe (cached per traceId, ~50ms first run)
-    let traceCompleteness = this.completenessCache.get(traceId);
+    let traceCompleteness = getLruCacheEntry(this.completenessCache, traceId);
     if (!traceCompleteness) {
       try {
         traceCompleteness = await probeTraceCompleteness(
@@ -2791,11 +2792,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           traceId,
           architecture?.type,
         );
-        this.completenessCache.set(traceId, traceCompleteness);
-        if (this.completenessCache.size > 50) {
-          const firstKey = this.completenessCache.keys().next().value;
-          if (firstKey) this.completenessCache.delete(firstKey);
-        }
+        setLruCacheEntry(this.completenessCache, traceId, traceCompleteness);
       } catch (err) {
         console.warn('[ClaudeRuntime] Trace completeness probe failed (non-fatal):', (err as Error).message);
       }
@@ -2828,7 +2825,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
     // Phase 5: Scene classification + effort resolution (reuse precomputed if available)
     const sceneType = precomputed?.sceneType ?? classifyScene(query);
-    const effectiveEffort = resolveEffort(this.config, sceneType);
+    const effectiveEffort = resolveEffort(runtimeConfig, sceneType, {
+      configuredEffortOverridesScene: hasConfiguredClaudeEffortOverride(options.providerId, providerScope),
+    });
 
     // Phase 5.5: Pattern memory — match similar historical traces (P2-2)
     const traceFeatures = extractTraceFeatures({
@@ -2838,11 +2837,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     });
     const patternContext = buildPatternContextSection(
       traceFeatures,
-      knowledgeScopeFromOptions(options),
+      knowledgeScopeFromAnalysisOptions(options),
     );
     const negativePatternContext = buildNegativePatternSection(
       traceFeatures,
-      knowledgeScopeFromOptions(options),
+      knowledgeScopeFromAnalysisOptions(options),
     );
 
     // Phase 6: Session-scoped artifact store + analysis notes
@@ -2892,15 +2891,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     // Seed new sessions with previously learned fix pairs from disk (cross-session learning)
     let sqlErrors = this.sessionSqlErrors.get(sessionId);
     if (!sqlErrors) {
-      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScopeFromOptions(options));
+      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScopeFromAnalysisOptions(options));
       this.sessionSqlErrors.set(sessionId, sqlErrors);
     }
 
     // Phase 8: MCP server with all session-scoped state
     // P2-G1: Destructure to get both server and auto-derived allowedTools
-    const fullNotesBudget = process.env.SELF_IMPROVE_NOTES_INJECT_ENABLED === '1'
-      ? new SkillNotesBudget({ mode: 'full' })
-      : undefined;
+    const fullNotesBudget = createRuntimeSkillNotesBudget(false);
     const { server: mcpServer, allowedTools } = createClaudeMcpServer({
       sessionId,
       traceId,
@@ -2926,8 +2923,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       referenceTraceId,
       comparisonContext,
       skillNotesBudget: fullNotesBudget,
-      outputLanguage: this.config.outputLanguage,
-      knowledgeScope: knowledgeScopeFromOptions(options),
+      outputLanguage: runtimeConfig.outputLanguage,
+      knowledgeScope: knowledgeScopeFromAnalysisOptions(options),
       codeAwareMode: options.codeAwareMode,
       codebaseIds: options.codebaseIds,
     });
@@ -2946,12 +2943,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
     // Phase 11: Sub-agent definitions (feature-gated)
     let agents: Record<string, any> | undefined;
-    if (this.config.enableSubAgents && sceneType !== 'anr') {
+    if (runtimeConfig.enableSubAgents && sceneType !== 'anr') {
       agents = buildAgentDefinitions(sceneType, {
         architecture,
         packageName: effectivePackageName,
         allowedTools,
-        subAgentModel: this.config.subAgentModel,
+        subAgentModel: runtimeConfig.subAgentModel,
       });
     }
 
@@ -2986,7 +2983,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       traceCompleteness,
       traceOs: traceInfo?.traceOs,
       traceFormat: traceInfo?.traceFormat,
-      outputLanguage: this.config.outputLanguage,
+      outputLanguage: runtimeConfig.outputLanguage,
       codeAwareMode: options.codeAwareMode,
       codebaseIds: options.codebaseIds,
     };
@@ -3022,21 +3019,6 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     displayResults: Array<{ stepId?: string; data?: any }>,
     entityStore: any,
   ): void {
-    try {
-      const data: Record<string, any> = {};
-      for (const dr of displayResults) {
-        if (dr.stepId && dr.data) {
-          data[dr.stepId] = dr.data;
-        }
-      }
-      const captured = captureEntitiesFromResponses([{
-        agentId: 'claude-agent',
-        success: true,
-        toolResults: [{ toolName: 'invoke_skill', data }],
-      } as any]);
-      applyCapturedEntities(entityStore, captured);
-    } catch (err) {
-      console.warn('[ClaudeRuntime] Entity capture failed:', (err as Error).message);
-    }
+    captureSkillDisplayEntities(displayResults, entityStore, 'claude-agent');
   }
 }

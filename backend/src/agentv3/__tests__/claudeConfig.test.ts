@@ -129,6 +129,15 @@ describe('createQuickConfig', () => {
 
     expect(config.maxTurns).toBe(10);
   });
+
+  it('can resolve quick max turns from an isolated SDK env', () => {
+    process.env.CLAUDE_QUICK_MAX_TURNS = '8';
+
+    expect(createQuickConfig(loadClaudeConfig({ maxTurns: 60 }), {}).maxTurns).toBe(10);
+    expect(createQuickConfig(loadClaudeConfig({ maxTurns: 60 }), {
+      CLAUDE_QUICK_MAX_TURNS: '6',
+    }).maxTurns).toBe(6);
+  });
 });
 
 describe('getClaudeRuntimeDiagnostics', () => {

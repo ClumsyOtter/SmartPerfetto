@@ -21,6 +21,14 @@ export type {
 export { ProviderService } from './providerService';
 export { ProviderStore } from './providerStore';
 export { officialTemplates } from './templates';
+export {
+  DUAL_SURFACE_PROVIDER_TYPES,
+  isAgentRuntimeKind,
+  isDualSurfaceProviderType,
+  resolveProviderAgentRuntime,
+  sharedKeyShouldUseClaudeAuthToken,
+  supportsAgentRuntimeType,
+} from './runtimeCapabilities';
 
 let instance: ProviderService | null = null;
 

@@ -307,9 +307,13 @@ describe('ProviderService', () => {
         connection: { openaiApiKey: 'sk-openai-test' },
         tuning: {
           maxTurns: 80,
+          maxBudgetUsd: 12,
+          effort: 'max',
           fullPerTurnMs: 90000,
           quickPerTurnMs: 45000,
+          verifierTimeoutMs: 70000,
           classifierTimeoutMs: 15000,
+          enableSubAgents: true,
           enableVerification: false,
         },
       });
@@ -320,7 +324,11 @@ describe('ProviderService', () => {
       expect(env.OPENAI_FULL_PER_TURN_MS).toBe('90000');
       expect(env.OPENAI_QUICK_PER_TURN_MS).toBe('45000');
       expect(env.OPENAI_CLASSIFIER_TIMEOUT_MS).toBe('15000');
-      expect(env.OPENAI_ENABLE_VERIFICATION).toBe('false');
+      expect(env.OPENAI_MAX_BUDGET_USD).toBeUndefined();
+      expect(env.OPENAI_EFFORT).toBeUndefined();
+      expect(env.OPENAI_VERIFIER_TIMEOUT_MS).toBeUndefined();
+      expect(env.OPENAI_ENABLE_SUB_AGENTS).toBeUndefined();
+      expect(env.OPENAI_ENABLE_VERIFICATION).toBeUndefined();
       expect(env.CLAUDE_MAX_TURNS).toBeUndefined();
     });
 

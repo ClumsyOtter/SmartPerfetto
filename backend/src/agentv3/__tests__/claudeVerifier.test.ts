@@ -43,6 +43,7 @@ import {
   verifyPlanAdherence,
   verifyHypotheses,
   verifySceneCompleteness,
+  verifyConclusion,
   generateCorrectionPrompt,
   learnFromVerificationResults,
   normalizeLLMSeverity,
@@ -663,6 +664,30 @@ describe('verifySceneCompleteness — startup cold-start checks', () => {
     const issues = verifySceneCompleteness('startup', findings, conclusion);
     expect(issues.filter(i => i.message.includes('Phase 2.6'))).toHaveLength(0);
     expect(issues.filter(i => i.message.includes('JIT'))).toHaveLength(0);
+  });
+});
+
+describe('verifyConclusion progress output', () => {
+  it('emits user-facing progress without exposing internal issue details', async () => {
+    const emitted: any[] = [];
+
+    const result = await verifyConclusion([], 'short', {
+      enableLLM: false,
+      plan: null,
+      emitUpdate: update => emitted.push(update),
+      outputLanguage: 'zh-CN',
+    });
+
+    expect(result.passed).toBe(false);
+    const progressMessages = emitted
+      .filter(update => update.type === 'progress')
+      .map(update => String(update.content?.message || ''));
+    expect(progressMessages).toEqual(expect.arrayContaining([
+      '质量校验发现报告仍需补齐，系统已记录详细诊断并将尝试自动修正。',
+    ]));
+    expect(progressMessages.join('\n')).not.toContain('[ERROR]');
+    expect(progressMessages.join('\n')).not.toContain('未提交分析计划');
+    expect(progressMessages.join('\n')).not.toContain('验证发现');
   });
 });
 

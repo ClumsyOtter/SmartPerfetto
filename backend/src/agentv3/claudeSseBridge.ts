@@ -140,7 +140,7 @@ export function createSseBridge(
         type: 'progress',
         content: {
           phase: 'starting',
-          message: localize(language, 'Claude 分析引擎已初始化', 'Claude analysis engine initialized'),
+          message: localize(language, 'AI 分析引擎已初始化', 'AI analysis engine initialized'),
           model: msg.model,
           tools: msg.tools,
         },
