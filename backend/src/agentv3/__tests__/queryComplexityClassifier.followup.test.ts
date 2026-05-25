@@ -12,7 +12,7 @@
  *   - DRILL_DOWN_KEYWORDS positive cases (zh + en)
  *   - CONFIRM_KEYWORDS positive cases + length boundary
  *   - Hard rules (selection / comparison / findings / prior-full / deterministic scene)
- *   - Priority: keyword pre-filter runs before hard rules
+ *   - Priority: comparison/selection scope rules run before keywords; keywords run before continuity/scene hard rules
  */
 
 import { jest, describe, it, expect } from '@jest/globals';
@@ -214,6 +214,34 @@ describe('classifyQueryComplexity — hard rules (no keyword match)', () => {
 });
 
 describe('classifyQueryComplexity — priority ordering', () => {
+  it('selection context keeps drill-down wording on the quick scoped path', async () => {
+    const result = await classifyQueryComplexity(makeInput({
+      query: '为什么这段里 RenderThread 一直在小核上跑，详细分析根因',
+      hasSelectionContext: true,
+      selectionContext: {
+        kind: 'area',
+        source: 'area_selection',
+        startNs: 100,
+        endNs: 200,
+      },
+      hasPriorFullAnalysis: true,
+    }));
+    expect(result.complexity).toBe('quick');
+    expect(result.source).toBe('hard_rule');
+    expect(result.reason).toMatch(/UI area selection context/);
+  });
+
+  it('comparison mode still wins over selection context', async () => {
+    const result = await classifyQueryComplexity(makeInput({
+      query: '对比这段为什么变慢',
+      hasReferenceTrace: true,
+      hasSelectionContext: true,
+      selectionContext: { kind: 'area', startNs: 100, endNs: 200 },
+    }));
+    expect(result.complexity).toBe('full');
+    expect(result.reason).toMatch(/comparison mode/);
+  });
+
   it('drill-down keyword overrides scrolling deterministic scene', async () => {
     const result = await classifyQueryComplexity(makeInput({
       query: '为什么滑动卡',

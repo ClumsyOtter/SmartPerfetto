@@ -1834,13 +1834,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'invoke_skill',
     'Execute a named SmartPerfetto skill pipeline against the current trace. ' +
     'Skills are pre-built analysis routines that produce layered results (overview → list → diagnosis → deep). ' +
-    'Use list_skills first to find the right skill ID.\n\n' +
+    'Use list_skills first to find the right skill ID when list_skills is available; quick mode may name the relevant skill in the prompt.\n\n' +
     'Use when: a pre-built skill covers your analysis need — always prefer this over raw SQL for supported scenarios.\n' +
     'Don\'t use when: you need a custom query not covered by any skill (use execute_sql), or exploring what skills exist (use list_skills).\n\n' +
     'Examples:\n' +
     '1. Full scrolling analysis: skillId="scrolling_analysis", params={process_name: "com.example.app"}\n' +
     '2. Single jank frame detail: skillId="jank_frame_detail", params={frame_number: 42, process_name: "com.example.app"}\n' +
-    '3. Startup analysis: skillId="startup_analysis", params={process_name: "com.example.app"}',
+    '3. Startup analysis: skillId="startup_analysis", params={process_name: "com.example.app"}\n' +
+    '4. Selected range CPU scheduling/frequency: skillId="selection_range_cpu_sched_summary", params={start_ts: 123, end_ts: 456}',
     {
       skillId: z.string().describe('Skill identifier (e.g. "scrolling_analysis", "jank_frame_detail", "cpu_analysis")'),
       params: z.record(z.string(), z.any()).optional().describe(

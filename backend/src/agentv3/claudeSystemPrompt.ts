@@ -44,6 +44,12 @@ function buildOutputLanguageSection(language: OutputLanguage): string {
     ?? '';
 }
 
+function formatSelectionSource(sel: SelectionContext): string {
+  if (sel.kind === 'track_event') return 'Perfetto slice selection';
+  if (sel.source === 'visible_window') return 'current visible timeline window';
+  return 'Perfetto area/time-range selection';
+}
+
 /**
  * Build architecture description section. Used by both full and quick prompts.
  * @param detailed When true, includes Compose/WebView details and loads arch-specific guidance template.
@@ -169,6 +175,7 @@ export function buildSelectionContextSection(sel: SelectionContext): string {
       durationMs: sel.durationNs ? (sel.durationNs / 1e6).toFixed(2) : '未知',
       trackCount: sel.trackCount ?? '未知',
       trackSummary,
+      sourceLabel: formatSelectionSource(sel),
     });
   }
 

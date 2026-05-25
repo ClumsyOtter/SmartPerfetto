@@ -185,9 +185,10 @@ export interface TraceCompleteness {
 // Keep both in sync when modifying.
 // =============================================================================
 
-/** Area selection — user pressed M key to mark a time range. */
+/** Area selection — user marked a time or track range in Perfetto, or the UI used the current viewport as a range scope. */
 export interface AreaSelectionContext {
   kind: 'area';
+  source?: 'area_selection' | 'visible_window';
   startNs: number;
   endNs: number;
   durationNs?: number;
@@ -198,6 +199,7 @@ export interface AreaSelectionContext {
 /** Single slice selection — user clicked a slice in the timeline. */
 export interface TrackEventSelectionContext {
   kind: 'track_event';
+  source?: 'track_event_selection';
   trackUri?: string;
   eventId: number;
   ts: number;
@@ -216,6 +218,8 @@ export type SelectionContext = AreaSelectionContext | TrackEventSelectionContext
 /** Human-readable metadata for a track in an area selection. */
 export interface SelectionTrackInfo {
   uri: string;
+  utid?: number;
+  upid?: number;
   threadName?: string;
   processName?: string;
   tid?: number;

@@ -6,8 +6,8 @@
  * Query Complexity Classifier — routes queries to quick vs full analysis pipeline.
  *
  * Two-stage classification:
- * 1. Hard rules (instant, no LLM): selection context → scoped quick,
- *    comparison/drill-down/deterministic scenes → full
+ * 1. Local rules (instant, no LLM): comparison → full, selection context → scoped quick,
+ *    then drill-down/confirm keywords and deterministic scenes for non-selection queries
  * 2. AI classification (Haiku, ~1-2s): for remaining queries, determine if the question
  *    is a simple factual lookup or requires multi-step analysis
  *
@@ -50,13 +50,19 @@ const DETERMINISTIC_SCENES = new Set([
 ]);
 
 /**
- * Local-only classification using keyword pre-filter + hard rules.
+ * Local-only classification using scope rules + keyword pre-filter + hard rules.
  * Returns null when no local rule matches, so callers can decide their own
  * AI fallback. Provider-agnostic: zero LLM/SDK dependency.
  */
 export function classifyQueryComplexityLocal(
   input: ComplexityClassifierInput,
 ): { complexity: QueryComplexity; reason: string; source: 'hard_rule' } | null {
+  const scopeResult = applyScopeHardRules(input);
+  if (scopeResult) {
+    console.log(`[ComplexityClassifier] Scope rule → ${scopeResult.complexity}: ${scopeResult.reason}`);
+    return { ...scopeResult, source: 'hard_rule' };
+  }
+
   const kwResult = applyKeywordRules(input.query);
   if (kwResult) {
     console.log(`[ComplexityClassifier] Keyword → ${kwResult.complexity}: ${kwResult.reason}`);
@@ -93,10 +99,11 @@ export async function classifyQueryComplexity(
 }
 
 /**
- * Hard rules that route without needing AI.
- * Returns null if no hard rule matches (proceed to AI classification).
+ * Scope rules that route before keyword pre-filters.
+ * A UI selection is a bounded scope signal: even "why/root cause" questions
+ * about that range should stay quick unless comparison mode is active.
  */
-function applyHardRules(
+function applyScopeHardRules(
   input: ComplexityClassifierInput,
 ): { complexity: QueryComplexity; reason: string } | null {
   if (input.hasReferenceTrace) {
@@ -106,6 +113,16 @@ function applyHardRules(
     const kind = input.selectionContext?.kind ?? 'unknown';
     return { complexity: 'quick', reason: `UI ${kind} selection context present` };
   }
+  return null;
+}
+
+/**
+ * Hard rules that route without needing AI after scope and keyword rules.
+ * Returns null if no hard rule matches (proceed to AI classification).
+ */
+function applyHardRules(
+  input: ComplexityClassifierInput,
+): { complexity: QueryComplexity; reason: string } | null {
   if (input.hasExistingFindings) {
     return { complexity: 'full', reason: 'prior findings exist' };
   }
@@ -119,7 +136,7 @@ function applyHardRules(
 }
 
 /**
- * Keyword-based pre-filter (runs before applyHardRules).
+ * Keyword-based pre-filter (runs after scope rules, before continuity/scene hard rules).
  * - Drill-down keywords → force full (user explicitly wants depth even as follow-up)
  * - Confirm-like keywords in short queries → force quick (pure acknowledgement follow-ups)
  * Returns null when nothing matches, so hard rules + Haiku still get a turn.
