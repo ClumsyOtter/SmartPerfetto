@@ -140,6 +140,10 @@ Then check:
 - [http://localhost:3000/health](http://localhost:3000/health) returns `status: "OK"`.
 - Uploading a small trace starts `trace_processor_shell.exe` in the backend log.
 
+Set `SMARTPERFETTO_BACKEND_PORT` or `SMARTPERFETTO_FRONTEND_PORT` before
+launching the executable if the default ports conflict with other local
+services.
+
 ## Limits
 
 - The current package target is Windows x64 only.

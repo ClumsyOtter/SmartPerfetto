@@ -144,6 +144,10 @@ Windows 用户使用 Docker Desktop，并启用 WSL2 backend。发布的是 Linu
 - 前端：[http://localhost:10000](http://localhost:10000)
 - 后端健康检查：[http://localhost:3000/health](http://localhost:3000/health)
 
+如果需要改默认端口，启动 Compose 前设置 `SMARTPERFETTO_BACKEND_PORT` 和
+`SMARTPERFETTO_FRONTEND_PORT`。如果浏览器可访问的后端地址和容器内监听端口
+不同，设置 `SMARTPERFETTO_BACKEND_PUBLIC_URL`。
+
 停止容器时运行 `docker compose -f docker-compose.hub.yml down`。
 
 上传文件、日志和 Provider Manager profile 保存在 Docker volume 中，容器重启后仍会保留。
@@ -158,7 +162,7 @@ Windows 用户使用 Docker Desktop，并启用 WSL2 backend。发布的是 Linu
 - `smartperfetto-v<version>-macos-arm64.zip`：解压后双击 `SmartPerfetto.app`。
 - `smartperfetto-v<version>-linux-x64.tar.gz`：解压后运行 `./SmartPerfetto`。
 
-启动器会拉起后端和预构建 Perfetto UI，并打开 [http://localhost:10000](http://localhost:10000)。AI 分析需要在 UI 里配置 Provider profile，或在对应平台的用户数据 env 文件中配置凭证。
+启动器会拉起后端和预构建 Perfetto UI，并打开 [http://localhost:10000](http://localhost:10000)。端口可用 `SMARTPERFETTO_BACKEND_PORT` 和 `SMARTPERFETTO_FRONTEND_PORT` 覆盖。AI 分析需要在 UI 里配置 Provider profile，或在对应平台的用户数据 env 文件中配置凭证。
 
 维护者打包命令：
 
@@ -194,7 +198,7 @@ macOS 用户如果看到 `trace_processor_shell failed the --version smoke test`
 
 步骤 2：选择模型凭证来源。如果同一终端里的 Claude Code 已经能用，先运行 `claude` 验证，不需要创建 `.env`。如果要显式配置 API key 或兼容代理，运行 `cp backend/.env.example backend/.env`，然后编辑 `backend/.env`：Anthropic 直连解注释 `ANTHROPIC_API_KEY`，第三方 Claude Code / Anthropic 兼容 provider 解注释一个 provider block，OpenAI / OpenAI-compatible provider 使用 OpenAI Agents SDK 相关字段。
 
-步骤 3：启动服务。运行 `./start.sh`。这个脚本会同时启动后端 `http://localhost:3000` 和仓库内置的预构建 Perfetto UI `http://localhost:10000`；普通使用不需要初始化 `perfetto/` submodule，也不需要等待 Perfetto UI 从源码编译。
+步骤 3：启动服务。运行 `./start.sh`。这个脚本会同时启动后端 `http://localhost:3000` 和仓库内置的预构建 Perfetto UI `http://localhost:10000`；普通使用不需要初始化 `perfetto/` submodule，也不需要等待 Perfetto UI 从源码编译。如果默认端口和本机其他服务冲突，用 `SMARTPERFETTO_BACKEND_PORT` 和 `SMARTPERFETTO_FRONTEND_PORT` 覆盖。
 
 ## 开发者
 

@@ -13,28 +13,28 @@
 // Helper Functions
 // =============================================================================
 
-function parseIntEnv(key: string, defaultValue: number): number {
-  const value = process.env[key];
+function parseIntEnv(key: string, defaultValue: number, env: NodeJS.ProcessEnv = process.env): number {
+  const value = env[key];
   if (!value) return defaultValue;
   const parsed = parseInt(value, 10);
   return isNaN(parsed) ? defaultValue : parsed;
 }
 
-function parseFloatEnv(key: string, defaultValue: number): number {
-  const value = process.env[key];
+function parseFloatEnv(key: string, defaultValue: number, env: NodeJS.ProcessEnv = process.env): number {
+  const value = env[key];
   if (!value) return defaultValue;
   const parsed = parseFloat(value);
   return isNaN(parsed) ? defaultValue : parsed;
 }
 
-function parseArrayEnv(key: string, defaultValue: string[]): string[] {
-  const value = process.env[key];
+function parseArrayEnv(key: string, defaultValue: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  const value = env[key];
   if (!value) return defaultValue;
   return value.split(',').map(s => s.trim()).filter(s => s.length > 0);
 }
 
-function parseBoolEnv(key: string, defaultValue: boolean): boolean {
-  const value = process.env[key];
+function parseBoolEnv(key: string, defaultValue: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env[key];
   if (!value) return defaultValue;
   return value.toLowerCase() === 'true' || value === '1';
 }
@@ -52,6 +52,12 @@ function parseFeatureFlag(value: string | undefined, defaultValue: boolean = fal
 // =============================================================================
 
 export const ENTERPRISE_FEATURE_FLAG_ENV = 'SMARTPERFETTO_ENTERPRISE';
+export const SMARTPERFETTO_BACKEND_PORT_ENV = 'SMARTPERFETTO_BACKEND_PORT';
+export const SMARTPERFETTO_FRONTEND_PORT_ENV = 'SMARTPERFETTO_FRONTEND_PORT';
+export const SMARTPERFETTO_BACKEND_PUBLIC_PORT_ENV = 'SMARTPERFETTO_BACKEND_PUBLIC_PORT';
+export const SMARTPERFETTO_BACKEND_PUBLIC_URL_ENV = 'SMARTPERFETTO_BACKEND_PUBLIC_URL';
+export const DEFAULT_BACKEND_PORT = 3000;
+export const DEFAULT_FRONTEND_PORT = 10000;
 
 export interface FeatureConfig {
   /**
@@ -75,28 +81,92 @@ export const featureConfig = resolveFeatureConfig();
 // Server Configuration
 // =============================================================================
 
-export const serverConfig = {
-  /** Server port */
-  port: parseIntEnv('PORT', 3000),
+function parsePortValue(value: string | undefined): number | null {
+  if (!value) return null;
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) return null;
+  return parsed;
+}
 
-  /** Node environment */
-  nodeEnv: process.env.NODE_ENV || 'development',
+function resolvePort(
+  env: NodeJS.ProcessEnv,
+  keys: string[],
+  defaultValue: number,
+): number {
+  for (const key of keys) {
+    const parsed = parsePortValue(env[key]);
+    if (parsed !== null) return parsed;
+  }
+  return defaultValue;
+}
 
-  /** CORS allowed origins */
-  corsOrigins: parseArrayEnv('CORS_ORIGINS', [
+function defaultCorsOrigins(frontendPort: number, env: NodeJS.ProcessEnv): string[] {
+  const origins = [
     'http://localhost:8080',
     'http://localhost:5173',
     'http://localhost:5174',
-    'http://localhost:10000',
+    `http://localhost:${frontendPort}`,
     'http://127.0.0.1:8080',
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5174',
-    'http://127.0.0.1:10000',
-  ]),
+    `http://127.0.0.1:${frontendPort}`,
+  ];
+  if (env.FRONTEND_URL) origins.push(env.FRONTEND_URL);
+  return Array.from(new Set(origins));
+}
 
-  /** Request body size limit */
-  bodyLimit: process.env.BODY_LIMIT || '50mb',
-} as const;
+export function resolveServerConfig(env: NodeJS.ProcessEnv = process.env) {
+  const frontendPort = resolvePort(
+    env,
+    [SMARTPERFETTO_FRONTEND_PORT_ENV],
+    DEFAULT_FRONTEND_PORT,
+  );
+
+  return {
+    /** Server port */
+    port: resolvePort(
+      env,
+      [SMARTPERFETTO_BACKEND_PORT_ENV, 'PORT'],
+      DEFAULT_BACKEND_PORT,
+    ),
+
+    /** Perfetto UI/static frontend port */
+    frontendPort,
+
+    /** Browser-visible backend port for generated runtime config. */
+    backendPublicPort: resolvePort(
+      env,
+      [
+        SMARTPERFETTO_BACKEND_PUBLIC_PORT_ENV,
+        SMARTPERFETTO_BACKEND_PORT_ENV,
+        'PORT',
+      ],
+      DEFAULT_BACKEND_PORT,
+    ),
+
+    /** Browser-visible backend URL for reverse proxy / HTTPS deployments. */
+    backendPublicUrl: env[SMARTPERFETTO_BACKEND_PUBLIC_URL_ENV]
+      || env.SMARTPERFETTO_BACKEND_URL
+      || '',
+
+    /** Node environment */
+    nodeEnv: env.NODE_ENV || 'development',
+
+    /** CORS allowed origins */
+    corsOrigins: parseArrayEnv(
+      'CORS_ORIGINS',
+      defaultCorsOrigins(frontendPort, env),
+      env,
+    ),
+
+    /** Request body size limit */
+    bodyLimit: env.BODY_LIMIT || '50mb',
+  } as const;
+}
+
+export const serverConfig = resolveServerConfig();
 
 // =============================================================================
 // Trace Processor Configuration
@@ -110,7 +180,7 @@ export const traceProcessorConfig = {
   },
 
   /** Perfetto UI origin for CORS */
-  perfettoUiOrigin: process.env.PERFETTO_UI_ORIGIN || 'http://localhost:10000',
+  perfettoUiOrigin: process.env.PERFETTO_UI_ORIGIN || `http://localhost:${serverConfig.frontendPort}`,
 
   /** Server startup timeout (ms) */
   startupTimeoutMs: parseIntEnv('TP_STARTUP_TIMEOUT_MS', 30000),
@@ -385,7 +455,9 @@ export const sceneStoryConfig = {
 
 export const frontendConfig = {
   /** Default backend URL */
-  backendUrl: process.env.BACKEND_URL || 'http://localhost:3000',
+  backendUrl: process.env.BACKEND_URL
+    || serverConfig.backendPublicUrl
+    || `http://localhost:${serverConfig.backendPublicPort}`,
 
   /** Default Ollama URL */
   ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',

@@ -12,6 +12,24 @@ echo "=============================================="
 echo "SmartPerfetto (Docker)"
 echo "=============================================="
 
+validate_port() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+    echo "ERROR: $name must be a TCP port in the range 1..65535, got '$value'." >&2
+    exit 1
+  fi
+}
+
+BACKEND_PORT="${SMARTPERFETTO_BACKEND_PORT:-${PORT:-3000}}"
+FRONTEND_PORT="${SMARTPERFETTO_FRONTEND_PORT:-10000}"
+validate_port "SMARTPERFETTO_BACKEND_PORT" "$BACKEND_PORT"
+validate_port "SMARTPERFETTO_FRONTEND_PORT" "$FRONTEND_PORT"
+if [ "$BACKEND_PORT" = "$FRONTEND_PORT" ]; then
+  echo "ERROR: backend and frontend ports must be different (both are $BACKEND_PORT)." >&2
+  exit 1
+fi
+
 # Verify LLM credentials are configured for Docker runs. Docker cannot use the
 # host's Claude Code login, but health/UI smoke checks still work without AI.
 ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
@@ -103,15 +121,18 @@ if [ "$HAS_ACTIVE_PROVIDER_PROFILE" != true ] && \
 fi
 
 # Start backend
-echo "Starting backend on port ${PORT:-3000}..."
+echo "Starting backend on port ${BACKEND_PORT}..."
 cd /app/backend
+PORT="$BACKEND_PORT" \
+SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
 node dist/index.js &
 BACKEND_PID=$!
 
 # Wait for backend health
 echo "Waiting for backend..."
 for i in $(seq 1 30); do
-  if curl -fsS "http://localhost:${PORT:-3000}/health" >/dev/null 2>&1; then
+  if curl -fsS "http://localhost:${BACKEND_PORT}/health" >/dev/null 2>&1; then
     echo "Backend ready (${i}s)"
     break
   fi
@@ -120,7 +141,7 @@ done
 
 # shellcheck disable=SC2016 # The single-quoted body is JavaScript for node -e.
 HEALTH_SUMMARY="$(
-  { curl -fsS "http://localhost:${PORT:-3000}/health" 2>/dev/null || true; } | node -e '
+  { curl -fsS "http://localhost:${BACKEND_PORT}/health" 2>/dev/null || true; } | node -e '
 let raw = "";
 process.stdin.on("data", chunk => { raw += chunk; });
 process.stdin.on("end", () => {
@@ -146,16 +167,21 @@ if [ -n "$HEALTH_SUMMARY" ]; then
 fi
 
 # Start frontend (pre-built Perfetto UI static server)
-echo "Starting frontend on port 10000..."
+echo "Starting frontend on port ${FRONTEND_PORT}..."
 cd /app/perfetto/out/ui/ui
-PORT=10000 node server.js &
+PORT="$FRONTEND_PORT" \
+SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+SMARTPERFETTO_BACKEND_PUBLIC_PORT="${SMARTPERFETTO_BACKEND_PUBLIC_PORT:-$BACKEND_PORT}" \
+SMARTPERFETTO_BACKEND_PUBLIC_URL="${SMARTPERFETTO_BACKEND_PUBLIC_URL:-${SMARTPERFETTO_BACKEND_URL:-}}" \
+SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+node server.js &
 FRONTEND_PID=$!
 
 echo ""
 echo "=============================================="
 echo "SmartPerfetto is running!"
-echo "  Perfetto UI: http://localhost:10000"
-echo "  Backend API: http://localhost:${PORT:-3000}"
+echo "  Perfetto UI: http://localhost:${FRONTEND_PORT}"
+echo "  Backend API: http://localhost:${BACKEND_PORT}"
 echo "=============================================="
 
 # shellcheck disable=SC2317,SC2329 # Invoked indirectly by trap.

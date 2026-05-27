@@ -113,6 +113,7 @@ RUN mkdir -p backend/uploads backend/logs/sessions backend/data backend/provider
 
 # Environment defaults
 ENV PORT=3000
+ENV SMARTPERFETTO_FRONTEND_PORT=10000
 ENV NODE_ENV=production
 ENV FRONTEND_URL=http://localhost:10000
 ENV PROVIDER_DATA_DIR_OVERRIDE=/app/backend/provider-data
@@ -121,7 +122,7 @@ EXPOSE 3000 10000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:3000/health || exit 1
+    CMD-SHELL curl -f "http://localhost:${SMARTPERFETTO_BACKEND_PORT:-${PORT:-3000}}/health" || exit 1
 
 # Start both services
 COPY scripts/docker-entrypoint.sh /app/docker-entrypoint.sh

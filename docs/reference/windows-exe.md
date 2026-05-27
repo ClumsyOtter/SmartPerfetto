@@ -130,6 +130,9 @@ C:\SmartPerfettoSmoke\smartperfetto-v1.0.1-windows-x64\SmartPerfetto.exe
 - [http://localhost:3000/health](http://localhost:3000/health) 返回 `status: "OK"`。
 - 上传一条小 trace 后，后端日志里能看到 `trace_processor_shell.exe` 启动。
 
+如果默认端口被本机其他服务占用，启动可执行文件前设置
+`SMARTPERFETTO_BACKEND_PORT` 或 `SMARTPERFETTO_FRONTEND_PORT`。
+
 ## 限制
 
 - 当前只产出 Windows x64 包。

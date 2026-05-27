@@ -21,7 +21,20 @@
     } catch (_) {
       // ignore
     }
-    return 'http://localhost:3000';
+    try {
+      const config = window.__SMARTPERFETTO_CONFIG__ || {};
+      if (typeof config.backendUrl === 'string' && config.backendUrl.trim()) {
+        return config.backendUrl.replace(/\/+$/, '');
+      }
+      const port = String(config.backendPort || '3000').trim();
+      const parsedPort = Number(port);
+      const safePort =
+        /^\d+$/.test(port) && parsedPort >= 1 && parsedPort <= 65535 ? port : '3000';
+      const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+      return `${protocol}//${window.location.hostname}:${safePort}`;
+    } catch (_) {
+      return 'http://localhost:3000';
+    }
   }
 
   async function fetchJson(url, options) {

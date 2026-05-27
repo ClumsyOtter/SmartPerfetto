@@ -212,9 +212,13 @@ The frontend persists the selected mode in `localStorage['ai-analysis-mode']`.
 ## Service Configuration
 
 ```bash
+SMARTPERFETTO_BACKEND_PORT=3000
+SMARTPERFETTO_FRONTEND_PORT=10000
 PORT=3000
 NODE_ENV=development
 FRONTEND_URL=http://localhost:10000
+# For reverse proxies, HTTPS, or custom Docker host ports:
+# SMARTPERFETTO_BACKEND_PUBLIC_URL=http://localhost:3000
 ```
 
 Default local ports:
@@ -222,6 +226,11 @@ Default local ports:
 - Backend: `3000`
 - Perfetto UI: `10000`
 - trace_processor HTTP RPC pool: `9100-9900`
+
+Use `SMARTPERFETTO_BACKEND_PORT` for the backend port. `PORT` remains a
+compatibility fallback for Node/Docker/PaaS environments. Use
+`SMARTPERFETTO_FRONTEND_PORT` for the Perfetto UI server. When the browser
+cannot infer the backend address, set `SMARTPERFETTO_BACKEND_PUBLIC_URL`.
 
 ## API Authentication
 

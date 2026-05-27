@@ -23,13 +23,22 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 NODE_ENV_HELPERS="$PROJECT_ROOT/scripts/node-env.sh"
+SERVICE_PORT_HELPERS="$PROJECT_ROOT/scripts/service-ports.sh"
 # shellcheck source=scripts/node-env.sh
 . "$NODE_ENV_HELPERS"
+# shellcheck source=scripts/service-ports.sh
+. "$SERVICE_PORT_HELPERS"
 LOGS_DIR="$PROJECT_ROOT/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 CLEAN_LOGS=false
 BACKEND_PID=""
 FRONTEND_PID=""
+BACKEND_PORT=""
+FRONTEND_PORT=""
+BACKEND_URL=""
+FRONTEND_URL=""
+
+smartperfetto_init_service_ports
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -338,8 +347,8 @@ trap 'cleanup 130' SIGINT SIGTERM
 # ── Kill existing processes ───────────────────────────────────────────────────
 
 echo "Stopping existing processes..."
-kill_processes_on_port 3000
-kill_processes_on_port 10000
+kill_processes_on_port "$BACKEND_PORT"
+kill_processes_on_port "$FRONTEND_PORT"
 pkill -f "$PROJECT_ROOT/backend/node_modules/.bin/tsx watch src/index.ts" 2>/dev/null || true
 pkill -f "trace_processor_shell.*--httpd" 2>/dev/null || true
 sleep 1
@@ -382,12 +391,18 @@ smartperfetto_ensure_backend_deps "$PROJECT_ROOT"
 
 echo "Starting backend..."
 cd "$PROJECT_ROOT/backend"
-start_with_logs BACKEND_PID "BACKEND" "$BACKEND_LOG" npm run dev
+start_with_logs BACKEND_PID "BACKEND" "$BACKEND_LOG" env \
+  PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+  FRONTEND_URL="$FRONTEND_URL" \
+  SMARTPERFETTO_LOCK_SERVICE_PORTS=1 \
+  npm run dev
 
 echo "Waiting for backend..."
 for i in {1..30}; do
-  if curl -fs http://localhost:3000/health >/dev/null 2>&1 || \
-     curl -fs http://localhost:3000/api/traces/stats >/dev/null 2>&1; then
+  if curl -fs "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1 || \
+     curl -fs "http://localhost:$BACKEND_PORT/api/traces/stats" >/dev/null 2>&1; then
     echo "Backend is ready! (took ${i}s)"
     break
   fi
@@ -398,11 +413,17 @@ done
 
 echo "Starting frontend..."
 cd "$PROJECT_ROOT/frontend"
-start_with_logs FRONTEND_PID "FRONTEND" "$FRONTEND_LOG" node server.js
+start_with_logs FRONTEND_PID "FRONTEND" "$FRONTEND_LOG" env \
+  PORT="$FRONTEND_PORT" \
+  SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_BACKEND_PUBLIC_PORT="$BACKEND_PUBLIC_PORT" \
+  SMARTPERFETTO_BACKEND_PUBLIC_URL="$BACKEND_PUBLIC_URL" \
+  SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+  node server.js
 
 echo "Waiting for frontend..."
 for i in {1..15}; do
-  if curl -fs http://localhost:10000/ >/dev/null 2>&1; then
+  if curl -fs "http://localhost:$FRONTEND_PORT/" >/dev/null 2>&1; then
     echo "Frontend is ready! (took ${i}s)"
     break
   fi
@@ -415,8 +436,8 @@ echo ""
 echo "=============================================="
 echo "SmartPerfetto is running!"
 echo "=============================================="
-echo "  Frontend:  http://localhost:10000"
-echo "  Backend:   http://localhost:3000"
+echo "  Frontend:  http://localhost:$FRONTEND_PORT"
+echo "  Backend:   http://localhost:$BACKEND_PORT"
 echo "  Backend PID:  $BACKEND_PID"
 echo "  Frontend PID: $FRONTEND_PID"
 echo ""
@@ -426,9 +447,9 @@ echo "=============================================="
 
 # Open browser automatically
 if command -v open >/dev/null 2>&1; then
-  open http://localhost:10000
+  open "http://localhost:$FRONTEND_PORT"
 elif command -v xdg-open >/dev/null 2>&1; then
-  xdg-open http://localhost:10000
+  xdg-open "http://localhost:$FRONTEND_PORT"
 fi
 
 echo "$BACKEND_PID"  > "$PROJECT_ROOT/.backend.pid"

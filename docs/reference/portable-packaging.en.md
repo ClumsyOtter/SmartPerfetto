@@ -112,6 +112,10 @@ AI analysis should normally use Provider profiles configured in the UI. For env
 credentials, create an `env` file in the platform user data directory and
 restart the launcher.
 
+The bundled launcher defaults to backend `3000` and frontend `10000`. Override
+them with `SMARTPERFETTO_BACKEND_PORT` and `SMARTPERFETTO_FRONTEND_PORT` before
+starting the launcher.
+
 ## Verification
 
 The scripts verify package structure, version, manifest, Node runtime, target

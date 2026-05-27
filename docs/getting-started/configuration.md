@@ -224,9 +224,13 @@ OPENAI_CLASSIFIER_TIMEOUT_MS=30000
 ## 服务配置
 
 ```bash
+SMARTPERFETTO_BACKEND_PORT=3000
+SMARTPERFETTO_FRONTEND_PORT=10000
 PORT=3000
 NODE_ENV=development
 FRONTEND_URL=http://localhost:10000
+# 反向代理、HTTPS 或 Docker 宿主端口不等于容器端口时设置：
+# SMARTPERFETTO_BACKEND_PUBLIC_URL=http://localhost:3000
 ```
 
 本地开发默认端口：
@@ -234,6 +238,11 @@ FRONTEND_URL=http://localhost:10000
 - Backend: `3000`
 - Perfetto UI: `10000`
 - trace_processor HTTP RPC pool: `9100-9900`
+
+后端端口优先使用 `SMARTPERFETTO_BACKEND_PORT`；`PORT` 仍保留为
+Node/Docker/PaaS 兼容 fallback。Perfetto UI 端口使用
+`SMARTPERFETTO_FRONTEND_PORT`。浏览器无法安全推导后端地址时，显式设置
+`SMARTPERFETTO_BACKEND_PUBLIC_URL`。
 
 ## API 鉴权
 

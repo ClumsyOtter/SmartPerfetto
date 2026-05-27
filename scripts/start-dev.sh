@@ -18,8 +18,11 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_ENV_HELPERS="$PROJECT_ROOT/scripts/node-env.sh"
+SERVICE_PORT_HELPERS="$PROJECT_ROOT/scripts/service-ports.sh"
 # shellcheck source=scripts/node-env.sh
 . "$NODE_ENV_HELPERS"
+# shellcheck source=scripts/service-ports.sh
+. "$SERVICE_PORT_HELPERS"
 LOGS_DIR="$PROJECT_ROOT/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 SKIP_BUILD=false
@@ -28,6 +31,12 @@ BUILD_FROM_SOURCE=false
 PREBUILT_ONLY=false
 BACKEND_PID=""
 FRONTEND_PID=""
+BACKEND_PORT=""
+FRONTEND_PORT=""
+BACKEND_URL=""
+FRONTEND_URL=""
+
+smartperfetto_init_service_ports
 
 require_command() {
   local cmd="$1"
@@ -394,7 +403,7 @@ extract_frontend_version() {
 is_frontend_bundle_ready() {
   local version="$1"
   local bundle_file=""
-  local manifest_url="http://localhost:10000/$version/manifest.json"
+  local manifest_url="http://localhost:$FRONTEND_PORT/$version/manifest.json"
 
   for candidate in \
     "$PERFETTO_DIR/out/ui/ui/dist/$version/frontend_bundle.js" \
@@ -678,10 +687,10 @@ fi
 trap on_exit EXIT
 trap 'cleanup 130' SIGINT SIGTERM
 
-# Kill existing processes on ports 3000 and 10000
+# Kill existing service listeners
 echo "Stopping existing processes..."
-kill_processes_on_port 3000
-kill_processes_on_port 10000
+kill_processes_on_port "$BACKEND_PORT"
+kill_processes_on_port "$FRONTEND_PORT"
 
 # Kill any zombie tsc/rollup watch processes from previous runs
 echo "Cleaning up zombie watch processes..."
@@ -804,13 +813,19 @@ fi
 # Start backend
 echo "Starting backend..."
 cd "$PROJECT_ROOT/backend"
-start_with_logs BACKEND_PID "BACKEND" "$BACKEND_LOG" npm run dev
+start_with_logs BACKEND_PID "BACKEND" "$BACKEND_LOG" env \
+  PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+  FRONTEND_URL="$FRONTEND_URL" \
+  SMARTPERFETTO_LOCK_SERVICE_PORTS=1 \
+  npm run dev
 
 # Wait for backend to start and verify health
 echo "Waiting for backend to start..."
 BACKEND_READY=false
 for i in {1..30}; do
-  if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
+  if curl -fsS "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
     BACKEND_READY=true
     echo "Backend is ready! (took ${i}s)"
     break
@@ -825,14 +840,19 @@ fi
 # Start frontend (Perfetto run-dev-server with watch mode)
 echo "Starting frontend..."
 cd "$UI_DIR"
-start_with_logs FRONTEND_PID "FRONTEND" "$FRONTEND_LOG" ./run-dev-server
+start_with_logs FRONTEND_PID "FRONTEND" "$FRONTEND_LOG" env \
+  SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_BACKEND_PUBLIC_PORT="$BACKEND_PUBLIC_PORT" \
+  SMARTPERFETTO_BACKEND_PUBLIC_URL="$BACKEND_PUBLIC_URL" \
+  SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+  ./run-dev-server --serve-port "$FRONTEND_PORT"
 
 # Wait for frontend to start and verify health
 echo "Waiting for frontend to start..."
 FRONTEND_READY=false
 FRONTEND_VERSION=""
 for i in {1..90}; do
-  INDEX_HTML=$(curl -fsS http://localhost:10000/ 2>/dev/null || true)
+  INDEX_HTML=$(curl -fsS "http://localhost:$FRONTEND_PORT/" 2>/dev/null || true)
   if [ -n "$INDEX_HTML" ]; then
     FRONTEND_VERSION=$(extract_frontend_version "$INDEX_HTML" || true)
     if [ -n "$FRONTEND_VERSION" ] && is_frontend_bundle_ready "$FRONTEND_VERSION"; then
@@ -857,8 +877,8 @@ echo "Backend PID:  $BACKEND_PID $([ "$BACKEND_READY" = true ] && echo "✅" || 
 echo "Frontend PID: $FRONTEND_PID $([ "$FRONTEND_READY" = true ] && echo "✅" || echo "⏳")"
 echo ""
 echo "URLs:"
-echo "  Perfetto UI: http://localhost:10000"
-echo "  Backend API: http://localhost:3000"
+echo "  Perfetto UI: http://localhost:$FRONTEND_PORT"
+echo "  Backend API: http://localhost:$BACKEND_PORT"
 echo ""
 echo "Logs:"
 echo "  tail -f $BACKEND_LOG"

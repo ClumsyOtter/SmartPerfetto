@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	backendPort  = "3000"
-	frontendPort = "10000"
+	defaultBackendPort  = "3000"
+	defaultFrontendPort = "10000"
 )
 
 var version = "dev"
@@ -33,7 +33,45 @@ type serviceProcess struct {
 	log  *os.File
 }
 
+func resolveServicePorts() (string, string, error) {
+	backendPort, err := resolvePortEnv("SMARTPERFETTO_BACKEND_PORT", "PORT", defaultBackendPort)
+	if err != nil {
+		return "", "", err
+	}
+	frontendPort, err := resolvePortEnv("SMARTPERFETTO_FRONTEND_PORT", "", defaultFrontendPort)
+	if err != nil {
+		return "", "", err
+	}
+	if backendPort == frontendPort {
+		return "", "", fmt.Errorf("backend and frontend ports must be different (both are %s)", backendPort)
+	}
+	return backendPort, frontendPort, nil
+}
+
+func resolvePortEnv(primaryKey string, fallbackKey string, defaultValue string) (string, error) {
+	value := os.Getenv(primaryKey)
+	key := primaryKey
+	if value == "" && fallbackKey != "" {
+		value = os.Getenv(fallbackKey)
+		key = fallbackKey
+	}
+	if value == "" {
+		value = defaultValue
+		key = primaryKey
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 || parsed > 65535 {
+		return "", fmt.Errorf("%s must be a TCP port in the range 1..65535, got %q", key, value)
+	}
+	return strconv.Itoa(parsed), nil
+}
+
 func main() {
+	backendPort, frontendPort, err := resolveServicePorts()
+	if err != nil {
+		fatal(err)
+	}
+
 	root, err := executableDir()
 	if err != nil {
 		fatal(err)
@@ -73,22 +111,31 @@ func main() {
 	pathEnv := fmt.Sprintf("%s%c%s", filepath.Join(root, "runtime", "node"), os.PathListSeparator, os.Getenv("PATH"))
 
 	backendEnv := mergeEnv(baseEnv, map[string]string{
-		"NODE_ENV":                      "production",
-		"PORT":                          backendPort,
-		"PATH":                          pathEnv,
-		"TRACE_PROCESSOR_PATH":          traceProcessor,
-		"SMARTPERFETTO_WINDOWS_PACKAGE": "1",
-		"SMARTPERFETTO_OUTPUT_LANGUAGE": envOrDefault("SMARTPERFETTO_OUTPUT_LANGUAGE", "zh-CN"),
-		"PROVIDER_DATA_DIR_OVERRIDE":    filepath.Join(root, "backend", "data"),
-		"TRACE_PROCESSOR_DOWNLOAD_BASE": os.Getenv("TRACE_PROCESSOR_DOWNLOAD_BASE"),
-		"TRACE_PROCESSOR_DOWNLOAD_URL":  os.Getenv("TRACE_PROCESSOR_DOWNLOAD_URL"),
-		"SMARTPERFETTO_AGENT_RUNTIME":   os.Getenv("SMARTPERFETTO_AGENT_RUNTIME"),
-		"SMARTPERFETTO_API_KEY":         os.Getenv("SMARTPERFETTO_API_KEY"),
-		"SMARTPERFETTO_HOME":            filepath.Join(root, "data", "user"),
+		"NODE_ENV":                          "production",
+		"PORT":                              backendPort,
+		"SMARTPERFETTO_BACKEND_PORT":        backendPort,
+		"SMARTPERFETTO_FRONTEND_PORT":       frontendPort,
+		"SMARTPERFETTO_BACKEND_PUBLIC_PORT": envOrDefault("SMARTPERFETTO_BACKEND_PUBLIC_PORT", backendPort),
+		"SMARTPERFETTO_BACKEND_PUBLIC_URL":  os.Getenv("SMARTPERFETTO_BACKEND_PUBLIC_URL"),
+		"SMARTPERFETTO_LOCK_SERVICE_PORTS":  "1",
+		"PATH":                              pathEnv,
+		"TRACE_PROCESSOR_PATH":              traceProcessor,
+		"SMARTPERFETTO_WINDOWS_PACKAGE":     "1",
+		"SMARTPERFETTO_OUTPUT_LANGUAGE":     envOrDefault("SMARTPERFETTO_OUTPUT_LANGUAGE", "zh-CN"),
+		"PROVIDER_DATA_DIR_OVERRIDE":        filepath.Join(root, "backend", "data"),
+		"TRACE_PROCESSOR_DOWNLOAD_BASE":     os.Getenv("TRACE_PROCESSOR_DOWNLOAD_BASE"),
+		"TRACE_PROCESSOR_DOWNLOAD_URL":      os.Getenv("TRACE_PROCESSOR_DOWNLOAD_URL"),
+		"SMARTPERFETTO_AGENT_RUNTIME":       os.Getenv("SMARTPERFETTO_AGENT_RUNTIME"),
+		"SMARTPERFETTO_API_KEY":             os.Getenv("SMARTPERFETTO_API_KEY"),
+		"SMARTPERFETTO_HOME":                filepath.Join(root, "data", "user"),
 	})
 	frontendEnv := mergeEnv(baseEnv, map[string]string{
-		"PORT": frontendPort,
-		"PATH": pathEnv,
+		"PORT":                              frontendPort,
+		"SMARTPERFETTO_BACKEND_PORT":        backendPort,
+		"SMARTPERFETTO_FRONTEND_PORT":       frontendPort,
+		"SMARTPERFETTO_BACKEND_PUBLIC_PORT": envOrDefault("SMARTPERFETTO_BACKEND_PUBLIC_PORT", backendPort),
+		"SMARTPERFETTO_BACKEND_PUBLIC_URL":  os.Getenv("SMARTPERFETTO_BACKEND_PUBLIC_URL"),
+		"PATH":                              pathEnv,
 	})
 
 	backend, err := startService("backend", nodeExe, []string{backendEntry}, filepath.Join(root, "backend"), backendEnv, logsDir)

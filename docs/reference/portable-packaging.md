@@ -111,6 +111,9 @@ AI 分析推荐在 UI 里配置 Provider profile。需要 env 凭证时，在对
 脚本会校验包结构、版本、manifest、Node runtime、目标平台 native 依赖和
 `trace_processor_shell` pin。真实发布前仍需要在目标平台做最小 smoke：
 
+包内 launcher 默认后端端口 `3000`、前端端口 `10000`。启动前可用
+`SMARTPERFETTO_BACKEND_PORT` 和 `SMARTPERFETTO_FRONTEND_PORT` 覆盖。
+
 1. 启动包内 launcher。
 2. 打开 [http://localhost:10000](http://localhost:10000)。
 3. 检查 [http://localhost:3000/health](http://localhost:3000/health)。

@@ -2,7 +2,9 @@
 
 [English](api.en.md) | [中文](api.md)
 
-The default backend address is `http://localhost:3000`. If `SMARTPERFETTO_API_KEY` is set, protected APIs require:
+The default backend address is `http://localhost:3000`. Set
+`SMARTPERFETTO_BACKEND_PORT` to use a different backend port. If
+`SMARTPERFETTO_API_KEY` is set, protected APIs require:
 
 ```http
 Authorization: Bearer <token>

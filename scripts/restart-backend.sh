@@ -13,10 +13,17 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_ENV_HELPERS="$PROJECT_ROOT/scripts/node-env.sh"
+SERVICE_PORT_HELPERS="$PROJECT_ROOT/scripts/service-ports.sh"
 # shellcheck source=scripts/node-env.sh
 . "$NODE_ENV_HELPERS"
+# shellcheck source=scripts/service-ports.sh
+. "$SERVICE_PORT_HELPERS"
 
 smartperfetto_ensure_node "$PROJECT_ROOT"
+BACKEND_PORT="$(smartperfetto_resolve_backend_port)"
+FRONTEND_PORT="$(smartperfetto_resolve_frontend_port)"
+FRONTEND_URL="$(smartperfetto_env_value FRONTEND_URL)"
+FRONTEND_URL="${FRONTEND_URL:-http://localhost:$FRONTEND_PORT}"
 
 # Kill only the backend process
 echo "Stopping backend..."
@@ -31,8 +38,8 @@ if [ -f "$PROJECT_ROOT/.backend.pid" ]; then
   fi
 fi
 
-# Also kill any tsx/node processes on port 3000
-PORT_PIDS=$(lsof -ti:3000 2>/dev/null || true)
+# Also kill any tsx/node processes on the backend port.
+PORT_PIDS=$(lsof -ti "tcp:$BACKEND_PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$PORT_PIDS" ]; then
   echo "$PORT_PIDS" | xargs kill 2>/dev/null || true
 fi
@@ -54,6 +61,11 @@ BACKEND_LOG="$LOGS_DIR/backend_${TIMESTAMP}.log"
 # the calling shell exits after the script completes. If tee's stdout is connected to
 # that shell's pipe, it gets EPIPE when the backend writes — this propagates to the
 # Claude Agent SDK subprocess and crashes the analysis with "exited with code 1".
+PORT="$BACKEND_PORT" \
+SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+FRONTEND_URL="$FRONTEND_URL" \
+SMARTPERFETTO_LOCK_SERVICE_PORTS=1 \
 npm run dev >> "$BACKEND_LOG" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PROJECT_ROOT/.backend.pid"
@@ -62,7 +74,7 @@ ln -sf "$BACKEND_LOG" "$LOGS_DIR/backend_latest.log"
 # Wait for health check
 echo "Waiting for backend..."
 for i in {1..15}; do
-  if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
+  if curl -fsS "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
     echo "Backend ready! (${i}s) PID: $NEW_PID"
     echo "Log: $BACKEND_LOG"
     echo ""

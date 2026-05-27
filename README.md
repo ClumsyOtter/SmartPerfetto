@@ -146,6 +146,11 @@ Step 5: Open the service URLs.
 - Frontend: [http://localhost:10000](http://localhost:10000)
 - Backend health: [http://localhost:3000/health](http://localhost:3000/health)
 
+To use non-default service ports, set `SMARTPERFETTO_BACKEND_PORT` and
+`SMARTPERFETTO_FRONTEND_PORT` before running Compose. If the browser-visible
+backend address differs from the container listen port, set
+`SMARTPERFETTO_BACKEND_PUBLIC_URL`.
+
 Stop the container with `docker compose -f docker-compose.hub.yml down`.
 
 Uploads, logs, and Provider Manager profiles are stored in Docker volumes, so they survive container restarts.
@@ -162,7 +167,7 @@ Assets:
 - `smartperfetto-v<version>-macos-arm64.zip`: extract and double-click `SmartPerfetto.app`.
 - `smartperfetto-v<version>-linux-x64.tar.gz`: extract and run `./SmartPerfetto`.
 
-All launchers start the backend and pre-built Perfetto UI, then open [http://localhost:10000](http://localhost:10000). AI analysis needs a Provider profile configured in the UI, or env credentials in the package's user data env file.
+All launchers start the backend and pre-built Perfetto UI, then open [http://localhost:10000](http://localhost:10000). Override ports with `SMARTPERFETTO_BACKEND_PORT` and `SMARTPERFETTO_FRONTEND_PORT`. AI analysis needs a Provider profile configured in the UI, or env credentials in the package's user data env file.
 
 Maintainer build command:
 
@@ -198,7 +203,7 @@ Step 1: Download the source. Run `git clone https://github.com/Gracker/SmartPerf
 
 Step 2: Choose the model credential source. If Claude Code already works in the same terminal, run `claude` to verify it and do not create `.env`. If you want an explicit API key or compatible proxy, run `cp backend/.env.example backend/.env`, then edit `backend/.env`: uncomment `ANTHROPIC_API_KEY` for direct Anthropic, uncomment one Claude Code / Anthropic-compatible provider block for compatible providers, or use the OpenAI Agents SDK fields for OpenAI / OpenAI-compatible providers.
 
-Step 3: Start services. Run `./start.sh`. This script starts both the backend at `http://localhost:3000` and the repository's pre-built Perfetto UI at `http://localhost:10000`; regular use does not require initializing the `perfetto/` submodule or compiling Perfetto UI from source.
+Step 3: Start services. Run `./start.sh`. This script starts both the backend at `http://localhost:3000` and the repository's pre-built Perfetto UI at `http://localhost:10000`; regular use does not require initializing the `perfetto/` submodule or compiling Perfetto UI from source. Use `SMARTPERFETTO_BACKEND_PORT` and `SMARTPERFETTO_FRONTEND_PORT` when those defaults conflict with other local services.
 
 ## For Developers
 

@@ -2,7 +2,8 @@
 
 [English](api.en.md) | [中文](api.md)
 
-默认后端地址是 `http://localhost:3000`。如果设置了 `SMARTPERFETTO_API_KEY`，受保护接口需要：
+默认后端地址是 `http://localhost:3000`。如需修改后端端口，设置
+`SMARTPERFETTO_BACKEND_PORT`。如果设置了 `SMARTPERFETTO_API_KEY`，受保护接口需要：
 
 ```http
 Authorization: Bearer <token>

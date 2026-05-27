@@ -1,10 +1,33 @@
 import dotenv from 'dotenv';
+
+const SERVICE_PORT_ENV_KEYS = [
+  'PORT',
+  'SMARTPERFETTO_BACKEND_PORT',
+  'SMARTPERFETTO_FRONTEND_PORT',
+  'SMARTPERFETTO_BACKEND_PUBLIC_PORT',
+  'SMARTPERFETTO_BACKEND_PUBLIC_URL',
+  'SMARTPERFETTO_BACKEND_URL',
+  'FRONTEND_URL',
+];
+const lockedServiceEnv = process.env.SMARTPERFETTO_LOCK_SERVICE_PORTS === '1'
+  ? Object.fromEntries(
+    SERVICE_PORT_ENV_KEYS
+      .filter((key) => process.env[key] !== undefined)
+      .map((key) => [key, process.env[key] as string]),
+  )
+  : null;
+
 // Load environment variables FIRST before importing routes
 dotenv.config(
   process.env.SMARTPERFETTO_ENV_FILE
     ? { path: process.env.SMARTPERFETTO_ENV_FILE, override: true }
     : { override: true },
 );
+if (lockedServiceEnv) {
+  for (const [key, value] of Object.entries(lockedServiceEnv)) {
+    process.env[key] = value;
+  }
+}
 
 import { installEpipeGuard } from './utils/epipeGuard';
 
@@ -69,23 +92,31 @@ import { failInterruptedAnalysisRunsOnStartup } from './services/analysisRunStor
 const app = express();
 const PORT = serverConfig.port;
 const NODE_ENV = serverConfig.nodeEnv;
+const corsAllowedOrigins = new Set(
+  serverConfig.corsOrigins.map((origin) => origin.replace(/\/+$/, '')),
+);
 const workspaceRouteContextMiddleware: express.RequestHandler[] = [
   bindWorkspaceRouteContext,
   authenticate,
   requireWorkspaceRouteContext,
 ];
 
-// Middleware — dynamic CORS: allow any origin whose port is 10000 (Perfetto frontend)
+function isCorsOriginAllowed(requestOrigin: string): boolean {
+  try {
+    const url = new URL(requestOrigin);
+    const normalized = `${url.protocol}//${url.host}`;
+    return corsAllowedOrigins.has(normalized) || url.port === String(serverConfig.frontendPort);
+  } catch {
+    return false;
+  }
+}
+
+// Middleware — dynamic CORS: allow configured origins and the active Perfetto frontend port.
 app.use(cors({
   origin: (requestOrigin: string | undefined, callback: (err: Error | null, allow?: boolean | string) => void) => {
     // No Origin header (server-to-server, curl, etc.) → allow
     if (!requestOrigin) return callback(null, true);
-    try {
-      const url = new URL(requestOrigin);
-      if (url.port === '10000') {
-        return callback(null, true);
-      }
-    } catch { /* malformed origin → block */ }
+    if (isCorsOriginAllowed(requestOrigin)) return callback(null, true);
     callback(new Error(`CORS blocked: ${requestOrigin}`));
   },
   credentials: true,

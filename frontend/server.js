@@ -9,7 +9,8 @@
  * No build step required — just run: node server.js
  *
  * Environment variables:
- *   PORT  Listening port (default: 10000)
+ *   SMARTPERFETTO_FRONTEND_PORT  Listening port (default: 10000)
+ *   PORT                         Legacy listening port fallback
  */
 
 'use strict';
@@ -18,7 +19,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = parseInt(process.env.PORT || '10000', 10);
+const PORT = Number(safePort(process.env.SMARTPERFETTO_FRONTEND_PORT || process.env.PORT, '10000'));
 const DIST_DIR = __dirname;
 
 const MIME_TYPES = {
@@ -41,6 +42,48 @@ function getMime(filePath) {
   if (filePath.endsWith('.js.map') || filePath.endsWith('.css.map')) return 'application/json';
   const ext = path.extname(filePath).toLowerCase();
   return MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+function safePort(value, fallback) {
+  const text = String(value || '').trim();
+  if (!/^\d+$/.test(text)) return fallback;
+  const parsed = Number(text);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535
+    ? String(parsed)
+    : fallback;
+}
+
+function runtimeConfigScript() {
+  const backendUrl = (
+    process.env.SMARTPERFETTO_BACKEND_PUBLIC_URL ||
+    process.env.SMARTPERFETTO_BACKEND_URL ||
+    ''
+  ).trim();
+  const config = {
+    backendPort: safePort(
+      process.env.SMARTPERFETTO_BACKEND_PUBLIC_PORT ||
+      process.env.SMARTPERFETTO_BACKEND_PORT,
+      '3000',
+    ),
+    frontendPort: safePort(
+      process.env.SMARTPERFETTO_FRONTEND_PORT ||
+      process.env.PORT,
+      '10000',
+    ),
+    ...(backendUrl ? {backendUrl} : {}),
+  };
+  return `<script>window.__SMARTPERFETTO_CONFIG__=${JSON.stringify(config)};</script>`;
+}
+
+function injectRuntimeConfig(filePath, data) {
+  if (path.basename(filePath) !== 'index.html') return data;
+  const html = data.toString('utf8');
+  const script = runtimeConfigScript();
+  const marker = '</head>';
+  if (html.includes(marker)) {
+    return Buffer.from(html.replace(marker, `${script}\n${marker}`));
+  }
+  return Buffer.from(`${script}\n${html}`);
 }
 
 const server = http.createServer((req, res) => {
@@ -84,8 +127,9 @@ const server = http.createServer((req, res) => {
         res.end('Not found');
         return;
       }
+      const body = injectRuntimeConfig(filePath, data);
       res.writeHead(200, { 'Content-Type': getMime(filePath) });
-      res.end(data);
+      res.end(body);
     });
   });
 });

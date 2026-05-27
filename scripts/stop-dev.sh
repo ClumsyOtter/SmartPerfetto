@@ -9,6 +9,11 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SERVICE_PORT_HELPERS="$PROJECT_ROOT/scripts/service-ports.sh"
+# shellcheck source=scripts/service-ports.sh
+. "$SERVICE_PORT_HELPERS"
+BACKEND_PORT="$(smartperfetto_resolve_backend_port)"
+FRONTEND_PORT="$(smartperfetto_resolve_frontend_port)"
 
 echo "=============================================="
 echo "Stopping SmartPerfetto Services"
@@ -32,16 +37,16 @@ fi
 # Kill processes listening on ports (NOT connected clients — `-sTCP:LISTEN`
 # avoids SIGKILL'ing a Claude Code CLI that has an SSE/keep-alive socket
 # open against the backend).
-echo "Cleaning up port 3000..."
-PORT_3000_PIDS=$(lsof -ti tcp:3000 -sTCP:LISTEN 2>/dev/null || true)
-if [ -n "$PORT_3000_PIDS" ]; then
-  echo "$PORT_3000_PIDS" | xargs kill -9 2>/dev/null || true
+echo "Cleaning up backend port $BACKEND_PORT..."
+BACKEND_PORT_PIDS=$(lsof -ti "tcp:$BACKEND_PORT" -sTCP:LISTEN 2>/dev/null || true)
+if [ -n "$BACKEND_PORT_PIDS" ]; then
+  echo "$BACKEND_PORT_PIDS" | xargs kill -9 2>/dev/null || true
 fi
 
-echo "Cleaning up port 10000..."
-PORT_10000_PIDS=$(lsof -ti tcp:10000 -sTCP:LISTEN 2>/dev/null || true)
-if [ -n "$PORT_10000_PIDS" ]; then
-  echo "$PORT_10000_PIDS" | xargs kill -9 2>/dev/null || true
+echo "Cleaning up frontend port $FRONTEND_PORT..."
+FRONTEND_PORT_PIDS=$(lsof -ti "tcp:$FRONTEND_PORT" -sTCP:LISTEN 2>/dev/null || true)
+if [ -n "$FRONTEND_PORT_PIDS" ]; then
+  echo "$FRONTEND_PORT_PIDS" | xargs kill -9 2>/dev/null || true
 fi
 
 # Kill zombie watch processes
