@@ -215,6 +215,78 @@ function readCompletedStreamFinalOutput(
   return stream.finalOutput;
 }
 
+function readPlanEligibleStreamFinalOutput(
+  stream: { finalOutput: unknown },
+  state: {
+    streamCompleted: boolean;
+    completedByPlanIdle: boolean;
+    timedOut: boolean;
+    quickMode: boolean;
+    planComplete: boolean;
+  },
+): unknown | undefined {
+  const finalOutput = readCompletedStreamFinalOutput(stream, state);
+  if (finalOutput === undefined) return undefined;
+  return state.quickMode || state.planComplete ? finalOutput : undefined;
+}
+
+function stripOpenAiReasoningArtifacts(text: string, options: { preserveWhitespace?: boolean } = {}): string {
+  const stripped = text
+    .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '')
+    .replace(/<\/?think>/gi, '');
+  if (options.preserveWhitespace) return stripped;
+  return stripped.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+interface OpenAiReasoningFilterState {
+  insideThink: boolean;
+  pendingTagPrefix: string;
+}
+
+function createOpenAiReasoningFilterState(): OpenAiReasoningFilterState {
+  return {
+    insideThink: false,
+    pendingTagPrefix: '',
+  };
+}
+
+function isReasoningTagPrefix(value: string): boolean {
+  const lower = value.toLowerCase();
+  return '<think>'.startsWith(lower) || '</think>'.startsWith(lower);
+}
+
+function filterOpenAiVisibleAnswerDelta(delta: string, state: OpenAiReasoningFilterState): string {
+  const input = `${state.pendingTagPrefix}${delta}`;
+  state.pendingTagPrefix = '';
+  let output = '';
+  let index = 0;
+
+  while (index < input.length) {
+    const remaining = input.slice(index);
+    const lower = remaining.toLowerCase();
+    if (lower.startsWith('<think>')) {
+      state.insideThink = true;
+      index += '<think>'.length;
+      continue;
+    }
+    if (lower.startsWith('</think>')) {
+      state.insideThink = false;
+      index += '</think>'.length;
+      continue;
+    }
+    if (remaining[0] === '<' && isReasoningTagPrefix(remaining)) {
+      state.pendingTagPrefix = remaining;
+      break;
+    }
+    if (!state.insideThink) {
+      output += remaining[0];
+    }
+    index += 1;
+  }
+
+  return output;
+}
+
 function looksLikeProcessNarrationParagraph(paragraph: string): boolean {
   const compact = paragraph.trim().replace(/\s+/g, ' ');
   if (!compact) return false;
@@ -289,8 +361,10 @@ function sanitizeOpenAiConclusionText(
     fallbackConclusion?: string;
   } = {},
 ): string {
-  const trimmed = conclusion.trim();
-  const fallback = options.fallbackConclusion?.trim();
+  const trimmed = stripOpenAiReasoningArtifacts(conclusion);
+  const fallback = options.fallbackConclusion
+    ? stripOpenAiReasoningArtifacts(options.fallbackConclusion)
+    : undefined;
   if (!trimmed) return fallback || '';
 
   const embeddedReportStart = findEmbeddedFinalReportStart(trimmed);
@@ -448,6 +522,10 @@ function resolveOpenAIRunInput(params: {
 export const __testing = {
   isMissingOpenAIPreviousResponseError,
   readCompletedStreamFinalOutput,
+  readPlanEligibleStreamFinalOutput,
+  stripOpenAiReasoningArtifacts,
+  createOpenAiReasoningFilterState,
+  filterOpenAiVisibleAnswerDelta,
   sanitizeOpenAiConclusionText,
   chooseOpenAiConclusionText,
   selectOpenAiRecoveryAnswer,
@@ -699,6 +777,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           let runAnswer = '';
           let runTurns = 0;
           let completedByPlanIdle = false;
+          const answerStreamFilter = createOpenAiReasoningFilterState();
           let planCompleteIdleTimer: ReturnType<typeof setTimeout> | undefined;
           const clearPlanCompleteIdleTimer = () => {
             if (planCompleteIdleTimer) {
@@ -743,7 +822,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               for await (const event of stream) {
                 clearPlanCompleteIdleTimer();
                 runTurns = stream.currentTurn || runTurns;
-                const delta = this.handleStreamEvent(event, config.outputLanguage);
+                const delta = this.handleStreamEvent(event, config.outputLanguage, {
+                  sessionId,
+                  quickMode,
+                  answerStreamFilter,
+                });
                 if (delta) {
                   runAnswer += delta;
                   accumulatedAnswer += delta;
@@ -766,15 +849,17 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           }
 
           rounds += runTurns || stream.currentTurn || 0;
-          const streamFinalOutput = readCompletedStreamFinalOutput(stream, {
+          const planStatus = this.getPlanCompletionStatus(sessionId, quickMode);
+          const streamFinalOutput = readPlanEligibleStreamFinalOutput(stream, {
             streamCompleted,
             completedByPlanIdle,
             timedOut,
+            quickMode,
+            planComplete: planStatus.complete,
           });
           const finalOutput = typeof streamFinalOutput === 'string'
             ? streamFinalOutput
             : (streamFinalOutput ? JSON.stringify(streamFinalOutput) : runAnswer);
-          const planStatus = this.getPlanCompletionStatus(sessionId, quickMode);
           const fallbackConclusion = this.buildCompletedPlanFallbackConclusion(sessionId, quickMode, config.outputLanguage);
           const recoveryAnswer = selectOpenAiRecoveryAnswer({ runAnswer, accumulatedAnswer });
           conclusion = chooseOpenAiConclusionText({
@@ -1943,13 +2028,30 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       : warning;
   }
 
-  private handleStreamEvent(event: RunStreamEvent, outputLanguage: OutputLanguage): string {
+  private shouldExposeOpenAiAnswerDelta(sessionId: string, quickMode: boolean): boolean {
+    return quickMode || this.getPlanCompletionStatus(sessionId, quickMode).complete;
+  }
+
+  private handleStreamEvent(
+    event: RunStreamEvent,
+    outputLanguage: OutputLanguage,
+    streamContext: {
+      sessionId: string;
+      quickMode: boolean;
+      answerStreamFilter: OpenAiReasoningFilterState;
+    },
+  ): string {
     const now = Date.now();
     if (event.type === 'raw_model_stream_event') {
       const data = event.data as any;
       if (data?.type === 'output_text_delta' && typeof data.delta === 'string') {
-        this.emitUpdate({ type: 'answer_token', content: { token: data.delta }, timestamp: now });
-        return data.delta;
+        const delta = filterOpenAiVisibleAnswerDelta(data.delta, streamContext.answerStreamFilter);
+        if (!this.shouldExposeOpenAiAnswerDelta(streamContext.sessionId, streamContext.quickMode)) {
+          return '';
+        }
+        if (!delta) return '';
+        this.emitUpdate({ type: 'answer_token', content: { token: delta }, timestamp: now });
+        return delta;
       }
       return '';
     }

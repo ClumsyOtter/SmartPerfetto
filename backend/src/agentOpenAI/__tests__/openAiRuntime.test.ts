@@ -29,6 +29,31 @@ function plan(phases: PlanPhase[]): AnalysisPlanV3 {
   };
 }
 
+function rawOutputTextDelta(delta: string): any {
+  return {
+    type: 'raw_model_stream_event',
+    data: {
+      type: 'output_text_delta',
+      delta,
+    },
+  };
+}
+
+function streamContext(sessionId: string, quickMode: boolean): any {
+  return {
+    sessionId,
+    quickMode,
+    answerStreamFilter: __testing.createOpenAiReasoningFilterState(),
+  };
+}
+
+function createRuntimeWithUpdates(): { runtime: any; updates: any[] } {
+  const runtime = new OpenAIRuntime({} as any) as any;
+  const updates: any[] = [];
+  runtime.on('update', (update: any) => updates.push(update));
+  return { runtime, updates };
+}
+
 describe('OpenAIRuntime plan completion guard', () => {
   it('treats full-mode runs as incomplete until every plan phase is closed', () => {
     const runtime = new OpenAIRuntime({} as any) as any;
@@ -141,6 +166,151 @@ describe('OpenAIRuntime plan completion guard', () => {
       completedByPlanIdle: false,
       timedOut: false,
     })).toBe('done');
+  });
+
+  it('does not treat stream finalOutput as final before a full-mode plan is complete', () => {
+    expect(__testing.readPlanEligibleStreamFinalOutput({ finalOutput: '我将先查询 FrameTimeline。' }, {
+      streamCompleted: true,
+      completedByPlanIdle: false,
+      timedOut: false,
+      quickMode: false,
+      planComplete: false,
+    })).toBeUndefined();
+
+    expect(__testing.readPlanEligibleStreamFinalOutput({ finalOutput: 'quick answer' }, {
+      streamCompleted: true,
+      completedByPlanIdle: false,
+      timedOut: false,
+      quickMode: true,
+      planComplete: false,
+    })).toBe('quick answer');
+
+    expect(__testing.readPlanEligibleStreamFinalOutput({ finalOutput: '## 综合结论\n\n证据完整。' }, {
+      streamCompleted: true,
+      completedByPlanIdle: false,
+      timedOut: false,
+      quickMode: false,
+      planComplete: true,
+    })).toBe('## 综合结论\n\n证据完整。');
+  });
+
+  it('suppresses full-mode answer deltas before a plan is submitted', () => {
+    const { runtime, updates } = createRuntimeWithUpdates();
+
+    const delta = runtime.handleStreamEvent(
+      rawOutputTextDelta('我将分析这个 doFrame 帧，首先查询 FrameTimeline。'),
+      'zh-CN',
+      streamContext('s-pre-plan', false),
+    );
+
+    expect(delta).toBe('');
+    expect(updates.some(update => update.type === 'answer_token')).toBe(false);
+  });
+
+  it('suppresses full-mode answer deltas while the plan is still pending', () => {
+    const { runtime, updates } = createRuntimeWithUpdates();
+    runtime.sessionPlans.set('s-pending', {
+      current: plan([phase('p1', 'completed'), phase('p2', 'pending')]),
+      history: [],
+    });
+
+    const delta = runtime.handleStreamEvent(
+      rawOutputTextDelta('我将重新制定计划并继续分析。'),
+      'zh-CN',
+      streamContext('s-pending', false),
+    );
+
+    expect(delta).toBe('');
+    expect(updates.some(update => update.type === 'answer_token')).toBe(false);
+  });
+
+  it('streams answer deltas after a full-mode plan is complete', () => {
+    const { runtime, updates } = createRuntimeWithUpdates();
+    runtime.sessionPlans.set('s-complete', {
+      current: plan([phase('p1', 'completed'), phase('p2', 'skipped')]),
+      history: [],
+    });
+
+    const delta = runtime.handleStreamEvent(
+      rawOutputTextDelta('## 综合结论\n\nFrame 卡顿来自主线程长时间 Sleeping。'),
+      'zh-CN',
+      streamContext('s-complete', false),
+    );
+
+    expect(delta).toBe('## 综合结论\n\nFrame 卡顿来自主线程长时间 Sleeping。');
+    expect(updates).toContainEqual(expect.objectContaining({
+      type: 'answer_token',
+      content: { token: '## 综合结论\n\nFrame 卡顿来自主线程长时间 Sleeping。' },
+    }));
+  });
+
+  it('keeps quick-mode answer streaming unchanged', () => {
+    const { runtime, updates } = createRuntimeWithUpdates();
+
+    const delta = runtime.handleStreamEvent(
+      rawOutputTextDelta('快速结论：主线程 Running 时间最高。'),
+      'zh-CN',
+      streamContext('s-quick', true),
+    );
+
+    expect(delta).toBe('快速结论：主线程 Running 时间最高。');
+    expect(updates.some(update => update.type === 'answer_token')).toBe(true);
+  });
+
+  it('strips OpenAI-compatible reasoning markers from visible text', () => {
+    expect(__testing.stripOpenAiReasoningArtifacts(
+      '<think>内部推理不应展示</think>\n\n## 综合结论\n\n用户可见结论。</think>',
+    )).toBe('## 综合结论\n\n用户可见结论。');
+
+    expect(__testing.stripOpenAiReasoningArtifacts(
+      '## 综合结论\n\n用户可见结论。\n\n<think>未闭合内部推理',
+    )).toBe('## 综合结论\n\n用户可见结论。');
+
+    expect(__testing.sanitizeOpenAiConclusionText(
+      '## 综合结论\n\nFrame 卡顿主要来自主线程阻塞。</think>',
+    )).toBe('## 综合结论\n\nFrame 卡顿主要来自主线程阻塞。');
+  });
+
+  it('strips reasoning markers across split answer deltas', () => {
+    const state = __testing.createOpenAiReasoningFilterState();
+
+    expect(__testing.filterOpenAiVisibleAnswerDelta('<thi', state)).toBe('');
+    expect(__testing.filterOpenAiVisibleAnswerDelta('nk>内部推理', state)).toBe('');
+    expect(__testing.filterOpenAiVisibleAnswerDelta('仍然不可见</thi', state)).toBe('');
+    expect(__testing.filterOpenAiVisibleAnswerDelta('nk>## 综合结论', state)).toBe('## 综合结论');
+    expect(__testing.filterOpenAiVisibleAnswerDelta('\n\n用户可见。', state)).toBe('\n\n用户可见。');
+  });
+
+  it('tracks reasoning state while full-mode answer deltas are suppressed', () => {
+    const { runtime, updates } = createRuntimeWithUpdates();
+    runtime.sessionPlans.set('s-transition', {
+      current: plan([phase('p1', 'pending')]),
+      history: [],
+    });
+    const context = streamContext('s-transition', false);
+
+    expect(runtime.handleStreamEvent(
+      rawOutputTextDelta('<think>内部推理开始'),
+      'zh-CN',
+      context,
+    )).toBe('');
+
+    runtime.sessionPlans.set('s-transition', {
+      current: plan([phase('p1', 'completed')]),
+      history: [],
+    });
+
+    const delta = runtime.handleStreamEvent(
+      rawOutputTextDelta('仍然不可见</think>## 综合结论'),
+      'zh-CN',
+      context,
+    );
+
+    expect(delta).toBe('## 综合结论');
+    expect(updates).toContainEqual(expect.objectContaining({
+      type: 'answer_token',
+      content: { token: '## 综合结论' },
+    }));
   });
 
   it('strips leading process narration from plan-idle conclusions', () => {
