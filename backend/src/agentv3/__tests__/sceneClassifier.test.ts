@@ -38,7 +38,19 @@ jest.mock('../strategyLoader', () => ({
     {
       scene: 'scrolling',
       priority: 3,
-      keywords: ['滑动', 'scroll', 'jank', '卡顿', '掉帧', 'fling'],
+      keywords: [
+        '滑动',
+        'scroll',
+        'jank',
+        '卡顿',
+        '掉帧',
+        'fling',
+        'frame',
+        'recycler',
+        'recyclerview',
+        'scrollview',
+        'scrollstate',
+      ],
       compoundPatterns: [],
     },
     {
@@ -69,6 +81,11 @@ describe('classifyScene', () => {
     it('should classify scrolling queries', () => {
       expect(classifyScene('分析滑动卡顿')).toBe('scrolling');
       expect(classifyScene('why is scroll janky?')).toBe('scrolling');
+      expect(classifyScene('scroll-demo-customer-scroll.pftrace')).toBe('scrolling');
+      expect(classifyScene('RecyclerView 性能')).toBe('scrolling');
+      expect(classifyScene('RecyclerViewAdapter 性能')).toBe('scrolling');
+      expect(classifyScene('NestedScrollView 性能')).toBe('scrolling');
+      expect(classifyScene('LazyColumnScrollState 性能')).toBe('scrolling');
       expect(classifyScene('查看掉帧情况')).toBe('scrolling');
     });
 
@@ -134,6 +151,13 @@ describe('classifyScene', () => {
       expect(classifyScene('what happened in this trace?')).toBe('general');
       expect(classifyScene('帮我分析一下这个 trace')).toBe('general');
       expect(classifyScene('')).toBe('general');
+    });
+
+    it('should not classify identifier substrings as scene keywords', () => {
+      expect(classifyScene('上面 rcustomscroller 这个线程的核心摆放和 running 时候对应的频率是多少')).toBe('general');
+      expect(classifyScene('com.example.wechatfriendforcustomscroller')).toBe('general');
+      expect(classifyScene('FrameTimeline 里面这个 slice 的 dur 是多少')).toBe('general');
+      expect(classifyScene('com.foo.startupmanager 这个进程的 CPU 是多少')).toBe('general');
     });
 
     it('should return general for empty query', () => {

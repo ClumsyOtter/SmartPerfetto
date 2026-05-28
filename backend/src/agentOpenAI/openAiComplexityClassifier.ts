@@ -14,8 +14,8 @@
  *   graceful fallback to 'full' on any failure.
  */
 
-import { loadPromptTemplate, renderTemplate } from '../agentv3/strategyLoader';
-import type { QueryComplexity } from '../agentv3/types';
+import { buildComplexityClassifierPrompt } from '../agentv3/queryComplexityPrompt';
+import type { ComplexityClassifierInput, QueryComplexity } from '../agentv3/types';
 import type { OpenAIAgentConfig } from './openAiConfig';
 
 interface ChatCompletionsResponse {
@@ -24,13 +24,6 @@ interface ChatCompletionsResponse {
       content?: string;
     };
   }>;
-}
-
-function buildClassifierPrompt(query: string): string {
-  const template = loadPromptTemplate('prompt-complexity-classifier');
-  return template
-    ? renderTemplate(template, { query })
-    : `Classify this Android trace analysis query as "quick" (factual) or "full" (analysis).\nQuery: ${query}\nOutput JSON: {"complexity": "quick" or "full", "reason": "..."}`;
 }
 
 function parseClassifierJson(text: string): { complexity: QueryComplexity; reason: string } {
@@ -66,14 +59,14 @@ export function buildChatCompletionsUrl(baseUrl: string): URL {
  * DeepSeek, Qwen, and most local LLM gateways that expose /chat/completions.
  */
 export async function classifyQueryWithOpenAILightModel(
-  query: string,
+  input: string | ComplexityClassifierInput,
   config: Pick<OpenAIAgentConfig, 'baseURL' | 'apiKey' | 'lightModel' | 'classifierTimeoutMs'>,
 ): Promise<{ complexity: QueryComplexity; reason: string }> {
   if (!config.baseURL) {
     return { complexity: 'full', reason: 'OpenAI baseURL missing' };
   }
 
-  const prompt = buildClassifierPrompt(query);
+  const prompt = buildComplexityClassifierPrompt(input);
   const url = buildChatCompletionsUrl(config.baseURL);
   const controller = new AbortController();
   const timeoutMs = config.classifierTimeoutMs ?? 30_000;

@@ -127,6 +127,42 @@ describe('classifyQueryWithOpenAILightModel', () => {
     expect(Array.isArray(capturedBody?.messages)).toBe(true);
   });
 
+  it('sends structured classifier context in the prompt', async () => {
+    let capturedBody: { messages?: Array<{ content?: string }> } | undefined;
+    const longPreviousQuery = `${'x'.repeat(260)}TAIL_SHOULD_BE_CUT`;
+
+    installFetchMock(async ({ init }) => {
+      capturedBody = JSON.parse((init?.body as string) ?? '{}');
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: '{"complexity":"quick","reason":"bounded"}' } }] }),
+        { status: 200 },
+      );
+    });
+
+    await classifyQueryWithOpenAILightModel({
+      query: '上面 rcustomscroller 这个线程的核心摆放和 running 时候对应的频率是多少',
+      sceneType: 'general',
+      hasSelectionContext: false,
+      hasReferenceTrace: false,
+      hasExistingFindings: true,
+      hasPriorFullAnalysis: true,
+      previousQueries: [
+        '找到 Trace 里面 running time 排名前十的线程，从大到小排序',
+        longPreviousQuery,
+      ],
+      previousFindings: ['rcustomscroller high running time | category=scheduling | severity=medium'],
+    }, baseConfig);
+
+    const prompt = capturedBody?.messages?.[0]?.content ?? '';
+    expect(prompt).toContain('sceneType: general');
+    expect(prompt).toContain('hasPriorFullAnalysis: true');
+    expect(prompt).toContain('找到 Trace 里面 running time 排名前十的线程');
+    expect(prompt).not.toContain('TAIL_SHOULD_BE_CUT');
+    expect(prompt).toContain('rcustomscroller');
+    expect(prompt).toContain('previousFindings:');
+    expect(prompt).toContain('rcustomscroller high running time');
+  });
+
   it('omits Authorization header when no apiKey is configured', async () => {
     let capturedAuth: string | undefined;
     installFetchMock(async ({ init }) => {

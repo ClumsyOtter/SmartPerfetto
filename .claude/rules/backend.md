@@ -128,10 +128,11 @@ Important whitelisted examples:
 
 - `fast`: quick mode, lightweight tool surface, no verifier/sub-agent path.
 - `full`: full tool surface, plan/verifier path where supported.
-- `auto`: keyword rules, deterministic hard rules, then classifier fallback.
+- `auto`: minimal non-negotiable local rules (for example comparison mode),
+  then shared semantic classifier fallback.
 
 Keep scoped selection questions lightweight. A selected slice/range is a scope
-signal, not automatically a reason to upgrade to full mode.
+signal, not an automatic quick/full decision.
 
 ## Provider and Session Invariants
 

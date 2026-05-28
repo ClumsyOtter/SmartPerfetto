@@ -54,6 +54,7 @@ import type {
   UncertaintyFlag,
 } from '../agentv3/types';
 import { classifyQueryComplexityLocal } from '../agentv3/queryComplexityClassifier';
+import { buildComplexityClassifierInput } from '../agentv3/queryComplexityContext';
 import { classifyQueryWithOpenAILightModel } from './openAiComplexityClassifier';
 import { ArtifactStore } from '../agentv3/artifactStore';
 import type { SessionFieldsForSnapshot, SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
@@ -1466,17 +1467,13 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
 
     const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = sessionContext.getAllTurns?.() ?? [];
-    const classifierInput: ComplexityClassifierInput = {
+    const classifierInput: ComplexityClassifierInput = buildComplexityClassifierInput({
       query,
       sceneType,
-      hasSelectionContext: !!options.selectionContext,
       selectionContext: options.selectionContext,
       hasReferenceTrace: !!options.referenceTraceId,
-      hasExistingFindings: previousTurns.some(
-        t => t.intent?.complexity !== 'simple' && (t.findings?.length ?? 0) > 0,
-      ),
-      hasPriorFullAnalysis: previousTurns.some(t => t.intent?.complexity !== 'simple'),
-    };
+      previousTurns,
+    });
 
     const local = classifyQueryComplexityLocal(classifierInput);
     if (local) {
@@ -1484,7 +1481,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       return local.complexity === 'quick';
     }
 
-    const ai = await classifyQueryWithOpenAILightModel(query, config);
+    const ai = await classifyQueryWithOpenAILightModel(classifierInput, config);
     console.log(`[OpenAIRuntime] auto → ${ai.complexity} (ai: ${ai.reason})`);
     return ai.complexity === 'quick';
   }

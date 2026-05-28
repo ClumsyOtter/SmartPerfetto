@@ -36,6 +36,11 @@ keywords:
   - 刷新
   - 滚动
   - recycler
+  - recyclerview
+  - scrollview
+  - scrollstate
+  - lazycolumn
+  - lazyrow
   - listview
   - lazy
   - 快滑

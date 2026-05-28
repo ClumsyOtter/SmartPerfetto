@@ -31,6 +31,10 @@ export interface ComplexityClassifierInput {
   hasExistingFindings: boolean;
   /** Whether the session already has a full analysis in a prior turn */
   hasPriorFullAnalysis: boolean;
+  /** Recent user queries in this session, oldest to newest. Used by semantic intent classification. */
+  previousQueries?: string[];
+  /** Compact recent finding summaries from the same recent window as previousQueries. */
+  previousFindings?: string[];
 }
 
 export interface SqlSchemaEntry {

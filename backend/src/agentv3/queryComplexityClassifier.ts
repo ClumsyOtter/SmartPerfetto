@@ -6,28 +6,18 @@
  * Query Complexity Classifier — routes queries to quick vs full analysis pipeline.
  *
  * Two-stage classification:
- * 1. Local rules (instant, no LLM): comparison → full, selection context → scoped quick,
- *    then drill-down/confirm keywords and deterministic scenes for non-selection queries
+ * 1. Local rules (instant, no LLM): comparison → full,
+ *    then pure confirmation keywords for short acknowledgement follow-ups
  * 2. AI classification (Haiku, ~1-2s): for remaining queries, determine if the question
- *    is a simple factual lookup or requires multi-step analysis
+ *    is a simple factual lookup or requires multi-step analysis, using recent turn context
  *
  * Graceful degradation: if Haiku call fails, defaults to 'full' (safe fallback).
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { createSdkEnv, getSdkBinaryOption, type ClaudeAgentConfig } from './claudeConfig';
-import { loadPromptTemplate, renderTemplate } from './strategyLoader';
+import { buildComplexityClassifierPrompt } from './queryComplexityPrompt';
 import type { ComplexityClassifierInput, QueryComplexity } from './types';
-
-/** Drill-down keywords force 'full' — user explicitly wants deeper analysis even as follow-up.
- *  These short-circuit Haiku classification to save 1-2s latency on obvious drill-downs. */
-const DRILL_DOWN_KEYWORDS = [
-  // 中文
-  '为什么', '根因', '原因', '深入', '进一步', '详细分析',
-  '具体看看', '哪里慢', '细说', '为啥',
-  // 英文 (matched case-insensitive)
-  'why', 'root cause', 'deeper', 'drill down', 'investigate', 'detail', 'explain', 'dig into',
-];
 
 /** Confirm-like keywords force 'quick' when the query is short — covers "谢谢"/"ok" style follow-ups. */
 const CONFIRM_KEYWORDS = [
@@ -41,16 +31,8 @@ const CONFIRM_KEYWORDS = [
  *  Longer queries (e.g., "谢谢你，但具体第几帧最卡") mix confirmation with real follow-up intent. */
 const CONFIRM_MAX_LENGTH = 20;
 
-/** Scenes that always require full analysis (prescriptive multi-step workflows).
- *  Note: memory/game/overview/touch-tracking are intentionally NOT included — they have
- *  valid quick-query use cases (e.g., "内存多少？", "帧率是多少？"). Only `general` uses Haiku fallback. */
-const DETERMINISTIC_SCENES = new Set([
-  'scrolling', 'startup', 'anr', 'interaction', 'scroll_response',
-  'teaching', 'pipeline',
-]);
-
 /**
- * Local-only classification using scope rules + keyword pre-filter + hard rules.
+ * Local-only classification using non-negotiable scope and acknowledgement rules.
  * Returns null when no local rule matches, so callers can decide their own
  * AI fallback. Provider-agnostic: zero LLM/SDK dependency.
  */
@@ -63,24 +45,18 @@ export function classifyQueryComplexityLocal(
     return { ...scopeResult, source: 'hard_rule' };
   }
 
-  const kwResult = applyKeywordRules(input.query);
-  if (kwResult) {
-    console.log(`[ComplexityClassifier] Keyword → ${kwResult.complexity}: ${kwResult.reason}`);
-    return { ...kwResult, source: 'hard_rule' };
-  }
-
-  const hardResult = applyHardRules(input);
-  if (hardResult) {
-    console.log(`[ComplexityClassifier] Hard rule → ${hardResult.complexity}: ${hardResult.reason}`);
-    return { ...hardResult, source: 'hard_rule' };
+  const acknowledgementResult = applyAcknowledgementRule(input.query);
+  if (acknowledgementResult) {
+    console.log(
+      `[ComplexityClassifier] Acknowledgement rule → ${acknowledgementResult.complexity}: ${acknowledgementResult.reason}`,
+    );
+    return { ...acknowledgementResult, source: 'hard_rule' };
   }
 
   return null;
 }
 
-/**
- * Classify query complexity using hard rules + optional AI classification.
- */
+/** Classify query complexity using local safety rules + semantic AI classification. */
 export async function classifyQueryComplexity(
   input: ComplexityClassifierInput,
   config?: Pick<ClaudeAgentConfig, 'lightModel' | 'classifierTimeoutMs'>,
@@ -89,7 +65,7 @@ export async function classifyQueryComplexity(
   if (local) return local;
 
   try {
-    const aiResult = await classifyWithHaiku(input.query, config?.lightModel, config?.classifierTimeoutMs);
+    const aiResult = await classifyWithHaiku(input, config?.lightModel, config?.classifierTimeoutMs);
     console.log(`[ComplexityClassifier] AI → ${aiResult.complexity}: ${aiResult.reason}`);
     return { ...aiResult, source: 'ai' };
   } catch (err) {
@@ -99,9 +75,10 @@ export async function classifyQueryComplexity(
 }
 
 /**
- * Scope rules that route before keyword pre-filters.
- * A UI selection is a bounded scope signal: even "why/root cause" questions
- * about that range should stay quick unless comparison mode is active.
+ * Scope rules that route before semantic classification.
+ * Keep this list minimal: selection is a range signal, not a complexity
+ * signal, so selection-aware quick/full decisions belong in the shared
+ * classifier prompt rather than a local hard lock.
  */
 function applyScopeHardRules(
   input: ComplexityClassifierInput,
@@ -109,50 +86,23 @@ function applyScopeHardRules(
   if (input.hasReferenceTrace) {
     return { complexity: 'full', reason: 'comparison mode' };
   }
-  if (input.hasSelectionContext) {
-    const kind = input.selectionContext?.kind ?? 'unknown';
-    return { complexity: 'quick', reason: `UI ${kind} selection context present` };
-  }
   return null;
 }
 
 /**
- * Hard rules that route without needing AI after scope and keyword rules.
- * Returns null if no hard rule matches (proceed to AI classification).
- */
-function applyHardRules(
-  input: ComplexityClassifierInput,
-): { complexity: QueryComplexity; reason: string } | null {
-  if (input.hasExistingFindings) {
-    return { complexity: 'full', reason: 'prior findings exist' };
-  }
-  if (input.hasPriorFullAnalysis) {
-    return { complexity: 'full', reason: 'multi-turn continuity' };
-  }
-  if (DETERMINISTIC_SCENES.has(input.sceneType)) {
-    return { complexity: 'full', reason: `deterministic scene: ${input.sceneType}` };
-  }
-  return null;
-}
-
-/**
- * Keyword-based pre-filter (runs after scope rules, before continuity/scene hard rules).
- * - Drill-down keywords → force full (user explicitly wants depth even as follow-up)
+ * Acknowledgement pre-filter (runs after scope rules, before semantic AI classification).
+ * Keep this intentionally narrow: "why/root cause/deep" needs semantic scope judgment,
+ * because it may refer to a specific thread/slice/range rather than a whole-scene diagnosis.
  * - Confirm-like keywords in short queries → force quick (pure acknowledgement follow-ups)
- * Returns null when nothing matches, so hard rules + Haiku still get a turn.
+ * Returns null when nothing matches, so Haiku still gets a turn.
  */
-function applyKeywordRules(
+function applyAcknowledgementRule(
   query: string,
 ): { complexity: QueryComplexity; reason: string } | null {
-  const lower = query.toLowerCase();
-  for (const kw of DRILL_DOWN_KEYWORDS) {
-    if (lower.includes(kw.toLowerCase())) {
-      return { complexity: 'full', reason: `drill-down keyword match: "${kw}"` };
-    }
-  }
+  const normalizedQuery = normalizeAcknowledgement(query);
   if (query.length < CONFIRM_MAX_LENGTH) {
     for (const kw of CONFIRM_KEYWORDS) {
-      if (lower.includes(kw.toLowerCase())) {
+      if (normalizedQuery === normalizeAcknowledgement(kw)) {
         return { complexity: 'quick', reason: `confirm-like follow-up: "${kw}"` };
       }
     }
@@ -160,19 +110,22 @@ function applyKeywordRules(
   return null;
 }
 
+function normalizeAcknowledgement(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s,，.。!！?？~～…]+/g, '');
+}
+
 /**
  * AI-based classification using Claude Haiku.
  * Prompt loaded from prompt-complexity-classifier.template.md.
  */
 async function classifyWithHaiku(
-  query: string,
+  input: ComplexityClassifierInput,
   model?: string,
   timeoutMs?: number,
 ): Promise<{ complexity: QueryComplexity; reason: string }> {
-  const template = loadPromptTemplate('prompt-complexity-classifier');
-  const prompt = template
-    ? renderTemplate(template, { query })
-    : `Classify this Android trace analysis query as "quick" (factual) or "full" (analysis).\nQuery: ${query}\nOutput JSON: {"complexity": "quick" or "full", "reason": "..."}`;
+  const prompt = buildComplexityClassifierPrompt(input);
 
   // Default 30s; Haiku usually finishes in 1-2s, but non-Haiku light models can need longer.
   const CLASSIFY_TIMEOUT_MS = timeoutMs ?? 30_000;

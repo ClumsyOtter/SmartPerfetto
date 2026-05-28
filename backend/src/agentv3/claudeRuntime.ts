@@ -50,6 +50,7 @@ import {
 import { detectFocusApps } from './focusAppDetector';
 import { classifyScene, type SceneType } from './sceneClassifier';
 import { classifyQueryComplexity } from './queryComplexityClassifier';
+import { buildComplexityClassifierInput } from './queryComplexityContext';
 import { buildAgentDefinitions } from './claudeAgentDefinitions';
 import { getExtendedKnowledgeBase } from '../services/sqlKnowledgeBase';
 import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityClassifierInput, FailedApproach, Hypothesis, QueryComplexity, TraceCompleteness, ToolCallRecord, UncertaintyFlag } from './types';
@@ -776,17 +777,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       // a hot-reload mid-flight can't split-brain the agent's reasoning.
       runSnapshots.capture(sessionId, sceneType);
 
-      const classifierInput: ComplexityClassifierInput = {
+      const classifierInput: ComplexityClassifierInput = buildComplexityClassifierInput({
         query,
         sceneType,
-        hasSelectionContext: !!options.selectionContext,
         selectionContext: options.selectionContext,
         hasReferenceTrace: !!options.referenceTraceId,
-        // Only count findings from full (non-simple) turns as "existing findings" for drill-down detection
-        hasExistingFindings: previousTurns.some(t => t.intent?.complexity !== 'simple' && t.findings?.length > 0),
-        // Distinguish: only full analysis turns trigger multi-turn continuity (not prior quick turns)
-        hasPriorFullAnalysis: previousTurns.some(t => t.intent?.complexity !== 'simple'),
-      };
+        previousTurns,
+      });
 
       const cachedArch = getLruCacheEntry(this.architectureCache, traceId);
 
