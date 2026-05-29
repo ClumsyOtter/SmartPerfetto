@@ -2151,6 +2151,32 @@ export class SkillExecutor {
           主线程阻塞: l.main_blocked ? '是' : '否',
         })),
       },
+      {
+        column: 'input_events_json',
+        key: 'Input 事件详情',
+        title: 'Input 事件（按 App 处理耗时降序）',
+        transform: (items) => items.map((e: any) => ({
+          动作: e.action,
+          窗口: e.channel,
+          App处理: e.handling_ms + 'ms',
+          分发: e.dispatch_ms + 'ms',
+          ACK: e.ack_ms + 'ms',
+          总延迟: e.total_ms + 'ms',
+          Input到Present: e.e2e_ms == null ? 'n/a' : e.e2e_ms + 'ms',
+          推测帧: e.speculative ? '是' : '否',
+        })),
+      },
+      {
+        column: 'input_slices_json',
+        key: 'Input 阶段 Slice',
+        title: 'Input 阶段 Slice（帧窗口重叠）',
+        transform: (items) => items.map((s: any) => ({
+          阶段: s.stage,
+          重叠: s.overlap_ms + 'ms',
+          次数: s.count,
+          最大耗时: s.max_ms + 'ms',
+        })),
+      },
       // --- Per-session sections (from session_stats_batch) ---
       {
         column: 'quadrant_json',
@@ -2249,6 +2275,31 @@ export class SkillExecutor {
     }
     if (hasCpuMix) {
       sections['关键操作 CPU 分布'] = { title: '关键操作 CPU 分布 (大核/小核/Runnable)', data: [cpuMixData] };
+    }
+
+    // Section: Input pipeline evidence
+    const inputFields = [
+      'input_event_count',
+      'input_move_count',
+      'input_handling_ms',
+      'input_handling_total_ms',
+      'input_dispatch_ms',
+      'input_e2e_ms',
+      'input_slice_ms',
+      'input_stage',
+      'input_speculative_events',
+    ];
+    const inputData: Record<string, any> = {};
+    let hasInputData = false;
+    for (const f of inputFields) {
+      const value = row[f];
+      if (value != null && value !== '' && Number(value) !== 0) {
+        inputData[f] = f.endsWith('_ms') ? value + 'ms' : value;
+        hasInputData = true;
+      }
+    }
+    if (hasInputData) {
+      sections['Input 管线'] = { title: 'Input 管线证据', data: [inputData] };
     }
 
     // Section: GPU / Shader

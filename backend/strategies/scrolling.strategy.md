@@ -169,7 +169,8 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 - 返回结果以 artifact 引用形式返回（紧凑摘要），包含：
   - `jank_type_stats`：掉帧类型分布，**注意 real_jank_count（真实掉帧）vs false_positive（假阳性）**
   - `scroll_sessions`：滑动区间列表
-  - `batch_frame_root_cause`（主掉帧列表）：所有掉帧帧的**完整分析**（frame_id + start_ts + jank_type + jank_responsibility + vsync_missed + reason_code + 四象限 MainThread/RenderThread + CPU 频率 + Binder/GC 重叠 + 根因分类），覆盖所有掉帧帧
+  - `input_data_check` / `input_latency_summary`：可选的 android.input 证据源检测和输入分发/处理/ACK/跟手度概览。缺数据时只能说明 trace 未包含完整 input event 链路，不可据此否定输入延迟问题
+  - `batch_frame_root_cause`（主掉帧列表）：所有掉帧帧的**完整分析**（frame_id + start_ts + jank_type + jank_responsibility + vsync_missed + reason_code + 四象限 MainThread/RenderThread + CPU 频率 + Binder/GC 重叠 + Input 处理证据 + 根因分类），覆盖所有掉帧帧
   - `get_app_jank_frames`（内部数据源，无独立显示）：掉帧帧列表，供 Agent 内部使用（焦点区间、帧实体捕获）
   - `scroll_sessions` 可展开：点击展开某个滑动区间，可查看该区间的**四象限分布、CPU 频率、关键线程大小核分布**（由 `session_stats_batch` 提供）
   - `session_quadrant_summary`（兼容数据源，不独立显示）：**滑动过程整体**四象限分布，Agent 可通过 save_as 引用
@@ -238,6 +239,7 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | **多帧 `reason_code = render_thread_heavy`** | 对最严重帧调用 `invoke_skill("jank_frame_detail")` 查看 RT top slices | uploadBitmap？shader 初始化？syncFrameState？drawFrame 内部哪个阶段慢？ |
 | **多帧 `reason_code = gpu_fence_wait` 或 `shader_compile`** | 调用 `invoke_skill("gpu_analysis")` 或 `execute_sql` 查询 GPU 频率/利用率 | GPU 频率被限？shader 复杂度？GPU 负载过高？ |
 | **多帧 `reason_code = binder_sync_blocking` / `binder_timeout` / `lock_binder_wait` / `blocking_io` / `main_thread_file_io`** | 对最严重帧调用 `invoke_skill("frame_blocking_calls", {process_name, start_ts, end_ts})` | 帧窗口里真正重叠的是 Binder、GC、锁竞争、futex 还是文件 IO？重叠多久？ |
+| **多帧 `reason_code = input_handling_slow`** | 先读取 `input_events_json` / `input_slices_json`，再对最严重帧调用 `frame_blocking_calls` 或 `jank_frame_detail` | 是 `deliverInputEvent` / `dispatchTouchEvent` / `onTouchEvent` 本身慢，还是 input 回调里同步 Binder/IO/锁/RecyclerView inflate/bind？ |
 | **VRR 设备（VSync 周期 ≠ 16.67ms）** | 注意 1.5x VSync 阈值需基于实际 VSync 周期 | 如 120Hz = 8.33ms, 1.5x = 12.5ms |
 
 **Phase 1.8 — 帧内指标 / GPU / CPU 利用率补充（按需执行）：**
@@ -270,6 +272,7 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 |------|---------|------|
 | **任何 reason_code + Q4>20%** | `invoke_skill("blocking_chain_analysis", {start_ts, end_ts, process_name})` | 阻塞链：谁阻塞了主线程？是锁？Binder？IO？唤醒者是谁？ |
 | **帧内 Binder/IO/futex/锁信号**（`reason_code` 为 `binder_sync_blocking` / `binder_timeout` / `lock_binder_wait` / `blocking_io` / `main_thread_file_io`，或 `top_slice_name` 包含 `Binder` / `SharedPreferences` / `sqlite` / `fsync` / `futex` / `monitor` / `Lock`） | `invoke_skill("frame_blocking_calls", {start_ts, end_ts, process_name})` | 将掉帧帧和阻塞调用做时间重叠，确认真实影响帧窗口的调用类型、重叠时长和频次 |
+| **input_handling_slow** | 读取 `input_stage`、`input_slice_ms`、`input_handling_ms`、`input_events_json`；若 input slice 内有 Binder/IO/锁，再调用 `frame_blocking_calls` | 确认 input-bound 的直接机制：App input callback 慢、事件批处理过多、还是 input 内同步阻塞 |
 | **binder_overlap >5ms** | `invoke_skill("binder_root_cause", {start_ts, end_ts, process_name})` | 服务端还是客户端慢？具体原因（GC？锁？IO？内存回收？）|
 | **gc_overlap >3ms 或 gc_pressure_cascade** | 查询 `android_garbage_collection_events` WHERE gc_ts 在帧窗口内 | 哪种 GC？回收了多少？GC 运行耗时？是否有内存泄漏趋势？|
 | **thermal_throttling / cpu_max_limited** | `lookup_knowledge("thermal-throttling")` | 温度驱动 vs policy 驱动？限频比例？是否持续恶化？|
@@ -287,7 +290,7 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | `layout` / `measure` / `onLayout` / `onMeasure` | 布局计算密集 | [App层] 减少嵌套层级，使用 ConstraintLayout，避免 requestLayout 连锁 |
 | `obtainView` / `inflate` / `createViewFromTag` / `RecyclerView` / `prefetch` | View 创建/Inflate/预取过长 | [App层] 启用 RecyclerView 预创建、异步 inflate、ViewStub 延迟加载 |
 | `animation` / `Animator` / `ValueAnimator` | 动画回调过长 | [App层] 检查是否有多个动画叠加，或动画回调中执行了耗时操作 |
-| `input` / `dispatchTouchEvent` / `onTouch` / `onScrollChanged` | 输入处理阻塞 | [App层] 避免在 onTouchEvent/onScrollChanged 中执行耗时操作 |
+| `input` / `dispatchTouchEvent` / `onTouch` / `onScrollChanged` | 输入处理阻塞 | [App层] 优先查看 `input_stage`、`input_slice_ms`、`input_events_json`，避免在 onTouchEvent/onScrollChanged 中执行耗时同步逻辑 |
 | `decodeBitmap` / `BitmapFactory` / `decodeResource` / `decode` | 主线程图片解码 | [App层] 使用 Glide/Coil 异步加载，避免主线程 decode |
 | `SharedPreferences` / `sqlite` / `QueuedWork` / `waitToFinish` | 主线程 IO | [App层] 迁移到 DataStore/Room 异步 API，避免 apply() 后 waitToFinish |
 | `traversal` / `performTraversal` / `relayoutWindow` | ViewRootImpl traversal 过长 | [App层] 减少 View 树深度，检查是否有不必要的 invalidate |
@@ -341,6 +344,7 @@ Phase 1 的 `batch_frame_root_cause` 已包含每帧的**完整统计数据**（
 - RenderThread 四象限（render_q1 大核 / render_q3 调度 / render_q4 休眠）
 - CPU 大核频率（big_avg_freq_mhz / big_max_freq_mhz）+ 升频延迟（ramp_ms）
 - Binder 同步重叠（binder_overlap_ms）+ GC 重叠（gc_overlap_ms）
+- Input 管线证据（input_stage / input_slice_ms / input_handling_ms / input_event_count / input_events_json）
 - 根因分类（reason_code）+ 关键操作（top_slice_name / top_slice_ms）
 
 此外，每个滑动区间的**整体运行特征**（四象限分布、CPU 频率、关键线程大小核分布）已内嵌在 `scroll_sessions` 的展开行中（由 `session_stats_batch` 提供），无需调用 jank_frame_detail 或 blocking_chain_analysis 来获取全局指标。兼容数据源 `session_quadrant_summary`、`session_cpu_freq`、`session_thread_core_affinity` 仍可通过 save_as 引用。
@@ -417,6 +421,7 @@ invoke_skill("jank_frame_detail", {
    - 关键操作：[top_slice_name] 耗时 XXms
    - CPU 频率：均频 XXMHz / 峰频 XXMHz，升频延迟 XXms
    - Binder: XXms / GC: XXms
+   - Input: 阶段 [input_stage] / 重叠 XXms / 最慢处理 XXms（如有 input 证据）
    ```
    如有额外深钻帧（来自 jank_frame_detail），标注其 CPU freq timeline 和 slices 详情。
 

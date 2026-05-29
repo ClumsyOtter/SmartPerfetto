@@ -145,6 +145,22 @@ describeWithTrace('scrolling_analysis skill', TRACE_FILE, () => {
       }, 30000);
     });
 
+    describe('input_data_check step', () => {
+      it('should report input data availability without requiring input events', async () => {
+        const result = await evaluator.executeStep('input_data_check');
+
+        expect(result.success).toBe(true);
+        expect(result.data).toHaveLength(1);
+
+        const status = result.data[0];
+        expect(['available', 'no_frame_match', 'unavailable']).toContain(status.input_data_status);
+        expect(typeof status.total_input_events).toBe('number');
+        expect(typeof status.move_events).toBe('number');
+        expect(typeof status.frame_matched_events).toBe('number');
+        expect(status.total_input_events).toBeGreaterThanOrEqual(0);
+      }, 30000);
+    });
+
     describe('jank_type_stats step', () => {
       it('should return jank type distribution', async () => {
         const result = await evaluator.executeStep('jank_type_stats');
@@ -252,6 +268,7 @@ describeWithTrace('scrolling_analysis skill', TRACE_FILE, () => {
       // 应该有 vsync_config 和 performance_summary
       expect(overview).toBeDefined();
       expect(Object.keys(overview!).length).toBeGreaterThan(0);
+      expect(overview!.input_data_check).toBeDefined();
     }, 120000);
 
     it('should have list layer results', async () => {
@@ -319,6 +336,40 @@ describeWithTrace('scrolling_analysis skill', TRACE_FILE, () => {
       if (expanded.data.length > 2) {
         expect(limited.data.length).toBeLessThan(expanded.data.length);
       }
+    }, 120000);
+
+    it('should expose input evidence fields on batch root cause rows', async () => {
+      const result = await evaluator.executeStep('batch_frame_root_cause', {
+        max_frames_per_session: 3,
+      });
+
+      if (!result.success || result.data.length === 0) {
+        console.warn('Skipping test: no batch root cause rows');
+        return;
+      }
+
+      const row = result.data[0];
+      const numericFields = [
+        'input_event_count',
+        'input_move_count',
+        'input_handling_ms',
+        'input_handling_total_ms',
+        'input_dispatch_ms',
+        'input_e2e_ms',
+        'input_slice_ms',
+        'input_speculative_events',
+      ];
+
+      for (const field of numericFields) {
+        expect(row).toHaveProperty(field);
+        expect(Number.isNaN(Number(row[field]))).toBe(false);
+      }
+
+      expect(row).toHaveProperty('input_stage');
+      expect(row).toHaveProperty('input_events_json');
+      expect(row).toHaveProperty('input_slices_json');
+      expect(typeof row.input_events_json).toBe('string');
+      expect(typeof row.input_slices_json).toBe('string');
     }, 120000);
 
     it('should produce consistent normalized output', async () => {
@@ -450,4 +501,45 @@ describeWithTrace('scrolling_analysis edge cases', TRACE_FILE, () => {
       );
     }, 30000);
   });
+});
+
+describeWithTrace('scrolling_analysis input evidence on canonical trace', 'scroll-demo-customer-scroll.pftrace', () => {
+  let evaluator: SkillEvaluator;
+
+  beforeAll(async () => {
+    evaluator = createSkillEvaluator('scrolling_analysis');
+    await evaluator.loadTrace(getTestTracePath('scroll-demo-customer-scroll.pftrace'));
+  }, 60000);
+
+  afterAll(async () => {
+    await evaluator.cleanup();
+    await new Promise(resolve => setTimeout(resolve, 2500));
+  });
+
+  it('should execute input data check on a checked-in scroll trace', async () => {
+    const result = await evaluator.executeStep('input_data_check');
+
+    expect(result.success).toBe(true);
+    expect(result.data).toHaveLength(1);
+    expect(['available', 'no_frame_match', 'unavailable']).toContain(
+      result.data[0].input_data_status
+    );
+  }, 60000);
+
+  it('should keep batch root cause rows compatible with input evidence columns', async () => {
+    const result = await evaluator.executeStep('batch_frame_root_cause', {
+      max_frames_per_session: 3,
+    });
+
+    if (!result.success || result.data.length === 0) {
+      console.warn('Skipping canonical input evidence assertion: no batch root cause rows');
+      return;
+    }
+
+    const row = result.data[0];
+    expect(row).toHaveProperty('input_event_count');
+    expect(row).toHaveProperty('input_slice_ms');
+    expect(row).toHaveProperty('input_events_json');
+    expect(row).toHaveProperty('input_slices_json');
+  }, 120000);
 });

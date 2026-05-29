@@ -3,20 +3,20 @@
 # This file is part of SmartPerfetto. See LICENSE for details.
 
 name: scrolling_analysis
-version: "2.0"  # v2.0: refactored to use shared _cpu_topology VIEW
+version: "2.1"  # v2.1: add android.input pipeline evidence and input-bound frame attribution
 type: composite
 tier: S
 
 meta:
   display_name: "滑动性能分析"
-  description: "基于 Perfetto FrameTimeline 的滑动分析，分层展示：概览 → 区间 → 帧详情"
+  description: "基于 Perfetto FrameTimeline 与 android.input 的滑动分析，分层展示：概览 → 区间 → 帧详情"
   icon: "swipe"
-  tags: [scrolling, jank, fps, frames, layered]
+  tags: [scrolling, jank, fps, frames, input, latency, layered]
 
 triggers:
   keywords:
-    zh: [滑动, 卡顿, 帧率, 掉帧, 丢帧, FPS, 流畅度, 列表滑动, fling]
-    en: [scroll, jank, fps, frame, fling, stutter, smoothness, list]
+    zh: [滑动, 卡顿, 帧率, 掉帧, 丢帧, FPS, 流畅度, 列表滑动, fling, 输入延迟, 触摸延迟, 跟手]
+    en: [scroll, jank, fps, frame, fling, stutter, smoothness, list, input latency, touch latency, follow finger]
   patterns:
     - ".*滑动.*卡.*"
     - ".*scroll.*jank.*"
@@ -24,6 +24,7 @@ triggers:
 
 prerequisites:
   modules:
+    - android.input
     - android.frames.timeline
     - android.binder
     - android.garbage_collection
@@ -65,6 +66,16 @@ inputs:
     required: false
     default: 8
     description: "帧间高抖动阈值（ms）"
+  - name: input_handling_budget_ratio
+    type: number
+    required: false
+    default: 0.5
+    description: "输入处理慢判定阈值：占当前 VSync 帧预算的比例（默认 50%）"
+  - name: input_event_backlog_threshold
+    type: number
+    required: false
+    default: 3
+    description: "同帧输入事件堆积候选阈值（默认 3，必须同时有处理耗时证据才作为根因）"
 
 identity:
   policy: verify_if_present
@@ -519,6 +530,265 @@ steps:
       LIMIT 1
     save_as: perf_summary
     condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && environment.data[0]?.has_data === 1"
+
+  # ==========================================================================
+  # L1: Input Pipeline 数据源与延迟概览
+  # ==========================================================================
+  # android.input stdlib 将 InputDispatcher socket 传输、App ACK 与关联帧
+  # 标准化为 android_input_events。这里把它作为可选证据源：缺数据不阻断
+  # FrameTimeline 滑动分析，有数据时补充分发/处理/ACK/跟手度分解。
+  - id: input_data_fallback_view
+    type: atomic
+    name: "Input 数据源回退视图"
+    optional: true
+    display: false
+    sql: |
+      CREATE VIEW IF NOT EXISTS android_input_events AS
+      SELECT
+        CAST(NULL AS INTEGER) as dispatch_latency_dur,
+        CAST(NULL AS INTEGER) as handling_latency_dur,
+        CAST(NULL AS INTEGER) as ack_latency_dur,
+        CAST(NULL AS INTEGER) as total_latency_dur,
+        CAST(NULL AS INTEGER) as end_to_end_latency_dur,
+        CAST(NULL AS INTEGER) as tid,
+        CAST(NULL AS TEXT) as thread_name,
+        CAST(NULL AS INTEGER) as upid,
+        CAST(NULL AS INTEGER) as pid,
+        CAST(NULL AS TEXT) as process_name,
+        CAST(NULL AS TEXT) as event_type,
+        CAST(NULL AS TEXT) as event_action,
+        CAST(NULL AS INTEGER) as event_seq,
+        CAST(NULL AS TEXT) as event_channel,
+        CAST(NULL AS TEXT) as normalized_event_channel,
+        CAST(NULL AS INTEGER) as input_event_id,
+        CAST(NULL AS INTEGER) as read_time,
+        CAST(NULL AS INTEGER) as dispatch_track_id,
+        CAST(NULL AS INTEGER) as dispatch_ts,
+        CAST(NULL AS INTEGER) as dispatch_dur,
+        CAST(NULL AS INTEGER) as receive_track_id,
+        CAST(NULL AS INTEGER) as receive_ts,
+        CAST(NULL AS INTEGER) as receive_dur,
+        CAST(NULL AS INTEGER) as frame_id,
+        CAST(NULL AS INTEGER) as is_speculative_frame,
+        CAST(NULL AS INTEGER) as event_time
+      WHERE 0
+    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && environment.data[0]?.has_data === 1"
+
+  - id: input_data_check
+    type: atomic
+    name: "Input 数据源检测"
+    optional: true
+    display:
+      level: summary
+      layer: overview
+      title: "Input 数据源"
+      columns:
+        - name: input_data_status
+          label: "状态"
+          type: string
+        - name: total_input_events
+          label: "输入事件"
+          type: number
+          format: compact
+        - name: move_events
+          label: "MOVE事件"
+          type: number
+          format: compact
+        - name: frame_matched_events
+          label: "关联帧事件"
+          type: number
+          format: compact
+        - name: target_processes
+          label: "进程数"
+          type: number
+          format: compact
+    sql: |
+      WITH scoped_events AS (
+        SELECT *
+        FROM android_input_events
+        WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+          AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+          AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
+      )
+      SELECT
+        CASE
+          WHEN COUNT(*) = 0 THEN 'unavailable'
+          WHEN COALESCE(SUM(CASE WHEN frame_id IS NOT NULL THEN 1 ELSE 0 END), 0) = 0 THEN 'no_frame_match'
+          ELSE 'available'
+        END as input_data_status,
+        COUNT(*) as total_input_events,
+        COALESCE(SUM(CASE WHEN event_action = 'MOVE' THEN 1 ELSE 0 END), 0) as move_events,
+        COALESCE(SUM(CASE WHEN frame_id IS NOT NULL THEN 1 ELSE 0 END), 0) as frame_matched_events,
+        COUNT(DISTINCT process_name) as target_processes
+      FROM scoped_events
+    save_as: input_data
+    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && environment.data[0]?.has_data === 1"
+
+  - id: input_latency_summary
+    type: atomic
+    name: "Input 延迟概览"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: total_input_events
+          label: 输入事件
+        - key: max_handling_ms
+          label: 最慢 App 处理
+          format: "{{value}} ms"
+        - key: slow_handling_events
+          label: 慢输入处理事件
+        - key: max_e2e_ms
+          label: 最慢 Input→Present
+          format: "{{value}} ms"
+        - key: input_backlog_frames
+          label: 输入堆积帧
+      insights:
+        - condition: "slow_handling_events > 0"
+          template: "检测到 {{slow_handling_events}} 个输入事件的 App 处理耗时超过帧预算阈值"
+        - condition: "input_backlog_frames > 0"
+          template: "{{input_backlog_frames}} 个帧关联的输入事件数超过堆积候选阈值"
+        - condition: "speculative_frame_matches > 0"
+          template: "{{speculative_frame_matches}} 个输入事件使用推测帧关联，跟手度证据需降权"
+    display:
+      level: summary
+      layer: overview
+      title: "Input 延迟概览"
+      columns:
+        - name: target_process
+          label: "目标进程"
+          type: string
+        - name: total_input_events
+          label: "输入事件"
+          type: number
+          format: compact
+        - name: move_events
+          label: "MOVE事件"
+          type: number
+          format: compact
+        - name: avg_dispatch_ms
+          label: "平均分发"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: p95_handling_ms
+          label: "P95 App处理"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_handling_ms
+          label: "最慢App处理"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_e2e_ms
+          label: "最慢Input→Present"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: slow_handling_events
+          label: "慢处理事件"
+          type: number
+          format: compact
+        - name: input_backlog_frames
+          label: "输入堆积帧"
+          type: number
+          format: compact
+        - name: speculative_frame_matches
+          label: "推测帧关联"
+          type: number
+          format: compact
+        - name: input_latency_rating
+          label: "评级"
+          type: string
+    sql: |
+      WITH
+      vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      timing_config AS (
+        SELECT CASE
+          WHEN raw_ns BETWEEN 5500000 AND 6500000 THEN 6060606
+          WHEN raw_ns BETWEEN 6500001 AND 7500000 THEN 6944444
+          WHEN raw_ns BETWEEN 7500001 AND 9500000 THEN 8333333
+          WHEN raw_ns BETWEEN 9500001 AND 12500000 THEN 11111111
+          WHEN raw_ns BETWEEN 12500001 AND 20000000 THEN 16666667
+          WHEN raw_ns BETWEEN 20000001 AND 35000000 THEN 33333333
+          ELSE raw_ns
+        END AS vsync_period_ns
+        FROM (
+          SELECT CAST(COALESCE(
+            (SELECT PERCENTILE(interval_ns, 0.5)
+             FROM vsync_intervals
+             WHERE interval_ns > 5500000 AND interval_ns < 50000000),
+            16666667
+          ) AS INTEGER) AS raw_ns
+        )
+      ),
+      scoped_events AS (
+        SELECT *
+        FROM android_input_events
+        WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+          AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+          AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
+      ),
+      ranked_processes AS (
+        SELECT
+          process_name,
+          COUNT(*) as event_count,
+          ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC, MAX(total_latency_dur) DESC) as rn
+        FROM scoped_events
+        GROUP BY process_name
+      ),
+      target AS (
+        SELECT process_name
+        FROM ranked_processes
+        WHERE rn = 1
+      ),
+      target_events AS (
+        SELECT e.*
+        FROM scoped_events e
+        JOIN target t ON e.process_name = t.process_name
+      ),
+      frame_backlog AS (
+        SELECT frame_id, COUNT(*) as event_count
+        FROM target_events
+        WHERE frame_id IS NOT NULL
+        GROUP BY frame_id
+      )
+      SELECT
+        (SELECT process_name FROM target) as target_process,
+        COUNT(*) as total_input_events,
+        SUM(CASE WHEN event_action = 'MOVE' THEN 1 ELSE 0 END) as move_events,
+        ROUND(AVG(dispatch_latency_dur) / 1e6, 2) as avg_dispatch_ms,
+        ROUND(MAX(dispatch_latency_dur) / 1e6, 2) as max_dispatch_ms,
+        ROUND(AVG(handling_latency_dur) / 1e6, 2) as avg_handling_ms,
+        ROUND(PERCENTILE(handling_latency_dur, 0.95) / 1e6, 2) as p95_handling_ms,
+        ROUND(MAX(handling_latency_dur) / 1e6, 2) as max_handling_ms,
+        ROUND(AVG(ack_latency_dur) / 1e6, 2) as avg_ack_ms,
+        ROUND(MAX(ack_latency_dur) / 1e6, 2) as max_ack_ms,
+        ROUND(AVG(end_to_end_latency_dur) / 1e6, 2) as avg_e2e_ms,
+        ROUND(MAX(end_to_end_latency_dur) / 1e6, 2) as max_e2e_ms,
+        SUM(CASE
+          WHEN handling_latency_dur > (SELECT vsync_period_ns FROM timing_config) * ${input_handling_budget_ratio|0.5}
+          THEN 1 ELSE 0 END) as slow_handling_events,
+        (SELECT COUNT(*) FROM frame_backlog WHERE event_count >= ${input_event_backlog_threshold|3}) as input_backlog_frames,
+        SUM(CASE WHEN is_speculative_frame = 1 THEN 1 ELSE 0 END) as speculative_frame_matches,
+        ROUND((SELECT vsync_period_ns FROM timing_config) / 1e6, 2) as frame_budget_ms,
+        CASE
+          WHEN COUNT(*) = 0 THEN '无 input 事件'
+          WHEN SUM(CASE WHEN handling_latency_dur > (SELECT vsync_period_ns FROM timing_config) * ${input_handling_budget_ratio|0.5} THEN 1 ELSE 0 END) = 0 THEN '正常'
+          WHEN MAX(handling_latency_dur) > (SELECT vsync_period_ns FROM timing_config) * 2 THEN '严重'
+          ELSE '需关注'
+        END as input_latency_rating
+      FROM target_events
+    save_as: input_latency
+    condition: "input_data.data[0]?.total_input_events > 0"
 
   # ==========================================================================
   # L1: 专家探针 - 时间窗与帧波动
@@ -1787,6 +2057,47 @@ steps:
           type: duration
           format: duration_ms
           hidden: true
+        - name: input_event_count
+          label: "Input事件数"
+          type: number
+          hidden: true
+        - name: input_move_count
+          label: "MOVE事件数"
+          type: number
+          hidden: true
+        - name: input_handling_ms
+          label: "最慢Input处理"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: input_handling_total_ms
+          label: "Input处理总计"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: input_dispatch_ms
+          label: "最慢Input分发"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: input_e2e_ms
+          label: "最慢Input→Present"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: input_slice_ms
+          label: "Input阶段重叠"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: input_stage
+          label: "主要Input阶段"
+          type: string
+          hidden: true
+        - name: input_speculative_events
+          label: "推测帧关联事件"
+          type: number
+          hidden: true
         - name: cpu_freq_clusters_json
           label: "CPU频率详情"
           type: string
@@ -1813,6 +2124,14 @@ steps:
           hidden: true
         - name: lock_contention_json
           label: "锁竞争"
+          type: string
+          hidden: true
+        - name: input_events_json
+          label: "Input事件详情"
+          type: string
+          hidden: true
+        - name: input_slices_json
+          label: "Input阶段Slice"
           type: string
           hidden: true
     sql: |
@@ -1871,6 +2190,8 @@ steps:
       layer_frames AS (
         SELECT
           COALESCE(a.display_frame_token, a.surface_frame_token) as display_frame_token,
+          a.surface_frame_token as surface_frame_token,
+          CASE WHEN a.name GLOB '[0-9]*' THEN CAST(a.name AS INTEGER) ELSE NULL END as timeline_frame_id,
           a.ts as frame_start,
           a.ts + a.dur as frame_end,
           a.dur as frame_dur,
@@ -1907,6 +2228,8 @@ steps:
       all_jank_frames AS (
         SELECT
           sm.display_frame_token,
+          sm.surface_frame_token,
+          sm.timeline_frame_id,
           sm.frame_start,
           sm.frame_end,
           sm.frame_dur,
@@ -1958,7 +2281,7 @@ steps:
       -- 截断后重新编号（与 get_app_jank_frames 的 frame_index 完全对齐）
       jank_frame_list AS (
         SELECT
-          display_frame_token, frame_start, frame_end, frame_dur, jank_type, upid, session_id,
+          display_frame_token, surface_frame_token, timeline_frame_id, frame_start, frame_end, frame_dur, jank_type, upid, session_id,
           pid, process_name, dur_ms, jank_responsibility, vsync_missed, present_interval_ms,
           ROW_NUMBER() OVER (ORDER BY session_id, frame_start) as frame_index
         FROM ranked_jank_frames
@@ -2444,6 +2767,122 @@ steps:
           OR s.name GLOB '*fsync*'
         GROUP BY fl.frame_start
       ),
+      -- 10i. Input event 与帧关联（android.input stdlib，按 FrameTimeline name/frame_id 对齐）。
+      -- input_data_fallback_view 会在 stdlib 缺失时创建同 schema 空视图，因此本查询
+      -- 既能使用真实 input 事件，也不会破坏基础帧根因分析。
+      per_frame_input_events AS (
+        SELECT
+          fl.frame_start,
+          COUNT(*) as input_event_count,
+          SUM(CASE WHEN ie.event_action = 'MOVE' THEN 1 ELSE 0 END) as input_move_count,
+          ROUND(MAX(ie.handling_latency_dur) / 1e6, 2) as input_handling_ms,
+          ROUND(SUM(ie.handling_latency_dur) / 1e6, 2) as input_handling_total_ms,
+          ROUND(MAX(ie.dispatch_latency_dur) / 1e6, 2) as input_dispatch_ms,
+          ROUND(MAX(ie.ack_latency_dur) / 1e6, 2) as input_ack_ms,
+          ROUND(MAX(ie.total_latency_dur) / 1e6, 2) as input_total_ms,
+          ROUND(MAX(ie.end_to_end_latency_dur) / 1e6, 2) as input_e2e_ms,
+          SUM(CASE WHEN ie.is_speculative_frame = 1 THEN 1 ELSE 0 END) as input_speculative_events
+        FROM jank_frame_list fl
+        JOIN android_input_events ie ON ie.upid = fl.upid
+          AND fl.timeline_frame_id IS NOT NULL
+          AND ie.frame_id = fl.timeline_frame_id
+        GROUP BY fl.frame_start
+      ),
+      -- 10j. Atrace-backed input stage slices overlapping the janky frame.
+      per_frame_input_stage_totals AS (
+        SELECT
+          fl.frame_start,
+          CASE
+            WHEN s.name GLOB '*deliverInputEvent*' THEN 'deliverInputEvent'
+            WHEN s.name GLOB '*processInputEventForCompatibility*' THEN 'processInputEventForCompatibility'
+            WHEN s.name GLOB '*dispatchTouchEvent*' THEN 'dispatchTouchEvent'
+            WHEN s.name GLOB '*onInterceptTouchEvent*' THEN 'onInterceptTouchEvent'
+            WHEN s.name GLOB '*onTouchEvent*' THEN 'onTouchEvent'
+            WHEN s.name GLOB '*InputConsumer*' THEN 'InputConsumer'
+            WHEN s.name GLOB '*RV Prefetch*' OR s.name GLOB '*RecyclerView*Prefetch*' THEN 'RecyclerView Prefetch'
+            ELSE 'input'
+          END as input_stage,
+          ROUND(SUM(
+            MAX(MIN(s.ts + s.dur, fl.frame_end) - MAX(s.ts, fl.frame_start), 0)
+          ) / 1e6, 2) as input_slice_ms,
+          COUNT(*) as input_slice_count,
+          ROUND(MAX(s.dur) / 1e6, 2) as input_slice_max_ms
+        FROM jank_frame_list fl
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'main'
+        JOIN thread_track tt ON tt.utid = ptr.utid
+        JOIN slice s ON s.track_id = tt.id
+          AND s.ts < fl.frame_end
+          AND s.ts + s.dur > fl.frame_start
+          AND s.dur >= 100000
+        WHERE s.name GLOB '*deliverInputEvent*'
+          OR s.name GLOB '*processInputEventForCompatibility*'
+          OR s.name GLOB '*dispatchTouchEvent*'
+          OR s.name GLOB '*onInterceptTouchEvent*'
+          OR s.name GLOB '*onTouchEvent*'
+          OR s.name GLOB '*InputConsumer*'
+          OR s.name GLOB '*RV Prefetch*'
+          OR s.name GLOB '*RecyclerView*Prefetch*'
+        GROUP BY fl.frame_start, input_stage
+      ),
+      per_frame_input_slices AS (
+        SELECT
+          frame_start,
+          input_stage,
+          input_slice_ms,
+          input_slice_count,
+          input_slice_max_ms
+        FROM (
+          SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY frame_start ORDER BY input_slice_ms DESC) as rn
+          FROM per_frame_input_stage_totals
+        )
+        WHERE rn = 1
+      ),
+      per_frame_input_detail AS (
+        SELECT frame_start,
+          json_group_array(json_object(
+            'action', event_action,
+            'channel', normalized_event_channel,
+            'handling_ms', handling_ms,
+            'dispatch_ms', dispatch_ms,
+            'ack_ms', ack_ms,
+            'total_ms', total_ms,
+            'e2e_ms', e2e_ms,
+            'speculative', speculative,
+            'input_ts', input_ts
+          )) as input_events_json
+        FROM (
+          SELECT
+            fl.frame_start,
+            ie.event_action,
+            ie.normalized_event_channel,
+            ROUND(ie.handling_latency_dur / 1e6, 2) as handling_ms,
+            ROUND(ie.dispatch_latency_dur / 1e6, 2) as dispatch_ms,
+            ROUND(ie.ack_latency_dur / 1e6, 2) as ack_ms,
+            ROUND(ie.total_latency_dur / 1e6, 2) as total_ms,
+            ROUND(ie.end_to_end_latency_dur / 1e6, 2) as e2e_ms,
+            CASE WHEN ie.is_speculative_frame = 1 THEN 1 ELSE 0 END as speculative,
+            printf('%d', ie.dispatch_ts) as input_ts,
+            ROW_NUMBER() OVER (PARTITION BY fl.frame_start ORDER BY ie.handling_latency_dur DESC) as rn
+          FROM jank_frame_list fl
+          JOIN android_input_events ie ON ie.upid = fl.upid
+            AND fl.timeline_frame_id IS NOT NULL
+            AND ie.frame_id = fl.timeline_frame_id
+        )
+        WHERE rn <= 5
+        GROUP BY frame_start
+      ),
+      per_frame_input_slice_detail AS (
+        SELECT frame_start,
+          json_group_array(json_object(
+            'stage', input_stage,
+            'overlap_ms', input_slice_ms,
+            'count', input_slice_count,
+            'max_ms', input_slice_max_ms
+          )) as input_slices_json
+        FROM per_frame_input_stage_totals
+        GROUP BY frame_start
+      ),
       -- ========== 11. 综合分析 ==========
       analysis AS (
         SELECT
@@ -2498,6 +2937,21 @@ steps:
           COALESCE(pfgd.gc_events_json, '[]') as gc_events_json,
           COALESCE(pfld.lock_contention_json, '[]') as lock_contention_json,
           COALESCE(pfio.file_io_overlap_ms, 0) as file_io_overlap_ms,
+          COALESCE(pfie.input_event_count, 0) as input_event_count,
+          COALESCE(pfie.input_move_count, 0) as input_move_count,
+          COALESCE(pfie.input_handling_ms, pfis.input_slice_max_ms, 0) as input_handling_ms,
+          COALESCE(pfie.input_handling_total_ms, pfis.input_slice_ms, 0) as input_handling_total_ms,
+          COALESCE(pfie.input_dispatch_ms, 0) as input_dispatch_ms,
+          COALESCE(pfie.input_ack_ms, 0) as input_ack_ms,
+          COALESCE(pfie.input_total_ms, 0) as input_total_ms,
+          COALESCE(pfie.input_e2e_ms, 0) as input_e2e_ms,
+          COALESCE(pfie.input_speculative_events, 0) as input_speculative_events,
+          COALESCE(pfis.input_slice_ms, 0) as input_slice_ms,
+          COALESCE(pfis.input_slice_count, 0) as input_slice_count,
+          COALESCE(pfis.input_slice_max_ms, 0) as input_slice_max_ms,
+          COALESCE(pfis.input_stage, '') as input_stage,
+          COALESCE(pfid.input_events_json, '[]') as input_events_json,
+          COALESCE(pfisd.input_slices_json, '[]') as input_slices_json,
           dpf.device_peak_freq_mhz
         FROM jank_frame_list fl
         CROSS JOIN timing_config tc
@@ -2520,6 +2974,10 @@ steps:
         LEFT JOIN per_frame_gc_detail pfgd ON pfgd.frame_start = fl.frame_start
         LEFT JOIN per_frame_lock_detail pfld ON pfld.frame_start = fl.frame_start
         LEFT JOIN per_frame_file_io pfio ON pfio.frame_start = fl.frame_start
+        LEFT JOIN per_frame_input_events pfie ON pfie.frame_start = fl.frame_start
+        LEFT JOIN per_frame_input_slices pfis ON pfis.frame_start = fl.frame_start
+        LEFT JOIN per_frame_input_detail pfid ON pfid.frame_start = fl.frame_start
+        LEFT JOIN per_frame_input_slice_detail pfisd ON pfisd.frame_start = fl.frame_start
       ),
       -- ========== 11. 根因分类（与 jank_frame_detail 相同优先级 CASE 树） ==========
       classified AS (
@@ -2544,6 +3002,18 @@ steps:
             -- 即使单次 GC 重叠 <1ms，密集 GC 累积也会显著影响帧耗时
             WHEN gc_count >= 3 AND gc_overlap_ms > 0.5
               THEN 'gc_pressure_cascade'
+            -- P1.7: App input stage 慢。只使用 App 责任/隐形掉帧帧；android.input
+            -- handling 或主线程 input slice 都可作为直接证据，同帧事件堆积只是辅助信号。
+            WHEN jank_responsibility IN ('APP', 'HIDDEN')
+              AND (
+                input_handling_ms > frame_budget_ms * ${input_handling_budget_ratio|0.5}
+                OR input_slice_ms > frame_budget_ms * ${input_handling_budget_ratio|0.5}
+                OR (
+                  input_event_count >= ${input_event_backlog_threshold|3}
+                  AND input_handling_ms > frame_budget_ms * 0.25
+                )
+              )
+              THEN 'input_handling_slow'
             -- P2: 小核调度（top slice 多数时间在小核执行）
             WHEN top_slice_ms > slice_critical_ms AND little_run_pct >= 45
               THEN 'small_core_placement'
@@ -2635,6 +3105,7 @@ steps:
           WHEN reason_code = 'binder_sync_blocking' THEN '同步Binder阻塞: "' || top_slice_name || '" 中 Binder 重叠 ' || binder_overlap_ms || 'ms'
           WHEN reason_code = 'gc_jank' THEN 'GC暂停: 帧窗口内 GC 重叠 ' || gc_overlap_ms || 'ms (' || gc_count || ' 次)'
           WHEN reason_code = 'gc_pressure_cascade' THEN 'GC压力级联: 帧窗口内 ' || gc_count || ' 次 GC，总重叠 ' || gc_overlap_ms || 'ms（内存压力高）'
+          WHEN reason_code = 'input_handling_slow' THEN '输入处理阻塞: ' || COALESCE(NULLIF(input_stage, ''), 'input') || ' 与帧窗口重叠 ' || input_slice_ms || 'ms，最长相关 slice ' || input_handling_ms || 'ms（预算 ' || frame_budget_ms || 'ms）'
           WHEN reason_code = 'small_core_placement' THEN '小核调度: "' || top_slice_name || '" 小核占比 ' || little_run_pct || '%'
           WHEN reason_code = 'sched_delay_in_slice' THEN '调度延迟: "' || top_slice_name || '" Runnable 占比 ' || runnable_pct || '%'
           WHEN reason_code = 'shader_compile' THEN 'Shader编译: ' || shader_count || ' 次编译，总计 ' || ROUND(total_shader_dur_ns / 1e6, 2) || 'ms'
@@ -2657,6 +3128,7 @@ steps:
           WHEN reason_code = 'sf_composition_slow' THEN '高'
           WHEN reason_code = 'thermal_throttling' THEN '高'
           WHEN reason_code = 'gc_pressure_cascade' THEN '高'
+          WHEN reason_code = 'input_handling_slow' THEN '高'
           WHEN reason_code = 'render_thread_heavy' THEN '中'
           WHEN reason_code = 'cpu_max_limited' THEN '中'
           WHEN reason_code = 'cpu_saturation' THEN '中'
@@ -2706,6 +3178,16 @@ steps:
         device_peak_freq_mhz,
         -- 文件 IO 重叠
         file_io_overlap_ms,
+        -- Input pipeline 证据
+        input_event_count,
+        input_move_count,
+        input_handling_ms,
+        input_handling_total_ms,
+        input_dispatch_ms,
+        input_e2e_ms,
+        input_slice_ms,
+        input_stage,
+        input_speculative_events,
         -- 批量详情 JSON 列（供展开行使用）
         cpu_freq_clusters_json,
         freq_timeline_json,
@@ -2713,7 +3195,9 @@ steps:
         render_slices_json,
         binder_calls_json,
         gc_events_json,
-        lock_contention_json
+        lock_contention_json,
+        input_events_json,
+        input_slices_json
       FROM classified
       ORDER BY session_id, frame_start
     save_as: batch_root_cause
@@ -3022,13 +3506,25 @@ steps:
       -- 掉帧检测：双信号混合策略
       frame_jank_data AS (
         SELECT
+          a.ts as frame_start,
+          a.ts + CASE WHEN a.dur > 0 THEN a.dur ELSE 0 END as frame_end,
+          a.upid,
+          p.pid,
+          p.name as process_name,
           a.jank_type,
           COALESCE(a.present_type, 'Unknown Present') as present_type,
           a.ts + CASE WHEN a.dur > 0 THEN a.dur ELSE 0 END as present_ts,
           LAG(a.ts + CASE WHEN a.dur > 0 THEN a.dur ELSE 0 END)
             OVER (PARTITION BY a.layer_name ORDER BY a.ts) as prev_present_ts,
           a.ts - LAG(a.ts + a.dur)
-            OVER (PARTITION BY a.layer_name ORDER BY a.ts) as time_gap_ns
+            OVER (PARTITION BY a.layer_name ORDER BY a.ts) as time_gap_ns,
+          CASE
+            WHEN a.jank_type IN ('Self Jank', 'App Deadline Missed') THEN 'APP'
+            WHEN a.jank_type GLOB '*SurfaceFlinger*' THEN 'SF'
+            WHEN a.jank_type = 'Buffer Stuffing' THEN 'BUFFER_STUFFING'
+            WHEN a.jank_type = 'None' OR a.jank_type IS NULL THEN 'HIDDEN'
+            ELSE 'UNKNOWN'
+          END as jank_responsibility
         FROM actual_frame_timeline_slice a
         LEFT JOIN process p ON a.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
@@ -3055,6 +3551,26 @@ steps:
           SUM(CASE WHEN present_type IN ('Late Present', 'Dropped Frame')
             AND jank_type GLOB '*SurfaceFlinger*' THEN 1 ELSE 0 END) as sf_jank_count
         FROM frame_jank_data
+      ),
+      jank_frame_windows AS (
+        SELECT
+          frame_start,
+          frame_end,
+          upid,
+          pid,
+          process_name
+        FROM frame_jank_data
+        WHERE jank_responsibility IN ('APP', 'HIDDEN')
+          AND (
+            (present_type IN ('Late Present', 'Dropped Frame') AND (jank_type IS NULL OR jank_type != 'Buffer Stuffing'))
+            OR (
+              jank_type = 'None'
+              AND prev_present_ts IS NOT NULL
+              AND present_ts - prev_present_ts > (SELECT vsync_period_ns FROM vsync_config) * 1.5
+              AND present_ts - prev_present_ts <= (SELECT vsync_period_ns FROM vsync_config) * 6
+              AND (time_gap_ns IS NULL OR time_gap_ns <= (SELECT vsync_period_ns FROM vsync_config) * 6)
+            )
+          )
       ),
       app_frames AS (
         SELECT
@@ -3135,6 +3651,42 @@ steps:
           ROUND(100.0 * q4_sleep_ns / NULLIF(total_dur_ns, 0), 1) as q4_pct
         FROM render_thread_analysis
       ),
+      -- Input 阶段 slice 统计（用于 enable_frame_details 结论面）。
+      -- 仅统计 App/HIDDEN 掉帧帧窗口内、主线程上的 input slice，避免把无关长 slice
+      -- 误归因为最终根因。
+      input_stage_overlaps AS (
+        SELECT
+          jfw.frame_start,
+          s.name,
+          MAX(MIN(s.ts + s.dur, jfw.frame_end) - MAX(s.ts, jfw.frame_start), 0) as overlap_ns
+        FROM jank_frame_windows jfw
+        JOIN thread t ON t.upid = jfw.upid
+          AND (t.tid = jfw.pid OR t.name GLOB '[0-9]*.ui')
+        JOIN thread_track tt ON tt.utid = t.utid
+        JOIN slice s ON s.track_id = tt.id
+          AND s.ts < jfw.frame_end
+          AND s.ts + s.dur > jfw.frame_start
+          AND s.dur >= 100000
+        WHERE s.name GLOB '*deliverInputEvent*'
+          OR s.name GLOB '*processInputEventForCompatibility*'
+          OR s.name GLOB '*dispatchTouchEvent*'
+          OR s.name GLOB '*onInterceptTouchEvent*'
+          OR s.name GLOB '*onTouchEvent*'
+          OR s.name GLOB '*InputConsumer*'
+          OR s.name GLOB '*RV Prefetch*'
+          OR s.name GLOB '*RecyclerView*Prefetch*'
+      ),
+      input_stage_stats AS (
+        SELECT
+          COUNT(*) as total_input_slices,
+          SUM(CASE
+            WHEN overlap_ns > (SELECT vsync_period_ns FROM vsync_config) * ${input_handling_budget_ratio|0.5}
+            THEN 1 ELSE 0 END) as slow_input_slices,
+          MAX(overlap_ns) / 1e6 as max_input_slice_ms,
+          AVG(overlap_ns) / 1e6 as avg_input_slice_ms
+        FROM input_stage_overlaps
+        WHERE overlap_ns > 0
+      ),
       -- Binder 调用统计
       binder_stats AS (
         SELECT
@@ -3162,7 +3714,11 @@ steps:
           (SELECT q2_pct FROM main_pct) as main_q2_pct,
           (SELECT q4_pct FROM render_pct) as render_q4_pct,
           (SELECT total_dur_ms FROM binder_stats) as binder_total_ms,
-          (SELECT max_dur_ms FROM binder_stats) as binder_max_ms
+          (SELECT max_dur_ms FROM binder_stats) as binder_max_ms,
+          (SELECT total_input_slices FROM input_stage_stats) as total_input_slices,
+          (SELECT slow_input_slices FROM input_stage_stats) as slow_input_slices,
+          (SELECT max_input_slice_ms FROM input_stage_stats) as input_max_slice_ms,
+          (SELECT avg_input_slice_ms FROM input_stage_stats) as input_avg_slice_ms
       )
       SELECT
         -- 问题分类: APP / SYSTEM / MIXED
@@ -3171,6 +3727,7 @@ steps:
           WHEN (SELECT app_jank FROM analysis) > (SELECT sf_jank FROM analysis) * 2 THEN 'APP'
           WHEN (SELECT main_q3_pct FROM analysis) > 15 THEN 'SYSTEM'
           WHEN (SELECT main_q4_pct FROM analysis) > 30 AND (SELECT binder_max_ms FROM analysis) > 5 THEN 'MIXED'
+          WHEN (SELECT slow_input_slices FROM analysis) > 0 THEN 'APP'
           WHEN (SELECT app_jank FROM analysis) > 0 THEN 'APP'
           ELSE 'UNKNOWN'
         END as problem_category,
@@ -3183,6 +3740,7 @@ steps:
           WHEN (SELECT main_q3_pct FROM analysis) > 15 THEN 'CPU_SCHEDULING'
           WHEN (SELECT main_q4_pct FROM analysis) > 30 AND (SELECT binder_max_ms FROM analysis) > 5 THEN 'BINDER'
           WHEN (SELECT main_q4_pct FROM analysis) > 30 THEN 'MAIN_THREAD_BLOCKING'
+          WHEN (SELECT slow_input_slices FROM analysis) > 0 THEN 'INPUT_HANDLING'
           WHEN (SELECT render_q4_pct FROM analysis) > 50 THEN 'RENDER_THREAD'
           WHEN (SELECT main_q2_pct FROM analysis) > 50 THEN 'CPU_AFFINITY'
           WHEN (SELECT avg_dur_ms FROM analysis) > COALESCE((SELECT frame_budget_ms FROM analysis), 8.33)
@@ -3196,6 +3754,7 @@ steps:
           WHEN (SELECT app_jank FROM analysis) > (SELECT sf_jank FROM analysis) * 2 THEN 0.85
           WHEN (SELECT main_q3_pct FROM analysis) > 20 THEN 0.8
           WHEN (SELECT main_q4_pct FROM analysis) > 40 THEN 0.8
+          WHEN (SELECT slow_input_slices FROM analysis) > 0 THEN 0.8
           ELSE 0.6
         END as confidence,
         -- 根因总结
@@ -3208,6 +3767,8 @@ steps:
             '跨进程阻塞: Binder 调用最大耗时 ' || ROUND((SELECT binder_max_ms FROM analysis), 1) || 'ms'
           WHEN (SELECT main_q4_pct FROM analysis) > 30 THEN
             '主线程阻塞: ' || (SELECT main_q4_pct FROM analysis) || '% 时间在休眠/等待'
+          WHEN (SELECT slow_input_slices FROM analysis) > 0 THEN
+            '输入处理阻塞: ' || (SELECT slow_input_slices FROM analysis) || ' 个输入阶段 slice 超过帧预算阈值，最长相关 slice ' || ROUND((SELECT input_max_slice_ms FROM analysis), 1) || 'ms'
           WHEN (SELECT render_q4_pct FROM analysis) > 50 THEN
             'RenderThread 等待: ' || (SELECT render_q4_pct FROM analysis) || '% 时间在休眠'
           WHEN (SELECT main_q2_pct FROM analysis) > 50 THEN
@@ -3224,6 +3785,7 @@ steps:
           '"SF 掉帧: ' || (SELECT sf_jank FROM analysis) || '",' ||
           '"主线程 Q3 (等待调度): ' || COALESCE((SELECT main_q3_pct FROM analysis), 0) || '%",' ||
           '"主线程 Q4 (休眠阻塞): ' || COALESCE((SELECT main_q4_pct FROM analysis), 0) || '%",' ||
+          '"慢输入阶段 slice: ' || COALESCE((SELECT slow_input_slices FROM analysis), 0) || '",' ||
           '"Binder 最大耗时: ' || COALESCE(ROUND((SELECT binder_max_ms FROM analysis), 1), 0) || 'ms"' ||
         ']' as evidence,
         -- 优化建议
@@ -3236,6 +3798,8 @@ steps:
             '优化 Binder 调用，考虑异步化或缓存'
           WHEN (SELECT main_q4_pct FROM analysis) > 30 THEN
             '检查主线程阻塞原因 (IO/锁/Binder)'
+          WHEN (SELECT slow_input_slices FROM analysis) > 0 THEN
+            '避免在 dispatchTouchEvent/onTouchEvent/onScrollChanged 中执行耗时同步逻辑，必要时拆分到后台或下一帧'
           WHEN (SELECT render_q4_pct FROM analysis) > 50 THEN
             '优化绘制流程，减少主线程耗时操作'
           WHEN (SELECT main_q2_pct FROM analysis) > 50 THEN
