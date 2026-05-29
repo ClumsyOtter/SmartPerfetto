@@ -19,6 +19,7 @@ export type CapturePresetId =
   | 'game'
   | 'memory'
   | 'cpu'
+  | 'power'
   | 'overview'
   | 'full';
 

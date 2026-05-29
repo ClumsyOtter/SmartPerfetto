@@ -31,11 +31,14 @@ triggers:
 
 prerequisites:
   modules:
+    - android.power_rails
     - wattson.aggregation
     - android.battery
     - android.kernel_wakelocks
-    - android.dvfs
-    - android.gpu.work_period
+    - android.wakeups
+    - android.screen_state
+    - android.network_packets
+    - linux.cpu.idle
 
 inputs:
   - name: package
@@ -56,13 +59,113 @@ inputs:
     description: "分析结束时间戳(ns)"
 
 steps:
+  - id: hardware_rails
+    type: skill
+    name: "Power Rails 实测能耗"
+    skill: power_rails_energy_breakdown
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: summary
+    save_as: hardware_rails
+    optional: true
+
   - id: wattson_rails
     type: skill
-    name: "Wattson Rail 能耗归因"
+    name: "Wattson 子系统能耗估算"
     skill: wattson_rails_power_breakdown
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
     display:
       level: summary
     save_as: wattson_rails
+    optional: true
+
+  - id: battery_drain_rate
+    type: skill
+    name: "掉电速率摘要"
+    skill: battery_drain_rate_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: summary
+    save_as: battery_drain_rate
+    optional: true
+
+  - id: suspend_wakeup
+    type: skill
+    name: "Suspend / Wakeup 链路"
+    skill: suspend_wakeup_analysis
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: summary
+    save_as: suspend_wakeup
+    optional: true
+
+  - id: wakeup_frequency
+    type: skill
+    name: "唤醒频率摘要"
+    skill: wakeup_frequency_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: summary
+    save_as: wakeup_frequency
+    optional: true
+
+  - id: wakelocks
+    type: skill
+    name: "Kernel Wakelock 汇总"
+    skill: android_kernel_wakelock_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: wakelocks
+    optional: true
+
+  - id: screen_off_cpu
+    type: skill
+    name: "熄屏后台 CPU 归因"
+    skill: screen_off_background_cpu_attribution
+    params:
+      package: "${package}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: screen_off_cpu
+    optional: true
+
+  - id: modem_network
+    type: skill
+    name: "Modem / 网络相关性"
+    skill: modem_network_correlation_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: modem_network
+    optional: true
+
+  - id: cpu_freq_residency
+    type: skill
+    name: "CPU 高频驻留"
+    skill: cpu_freq_residency_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: cpu_freq_residency
     optional: true
 
   - id: wattson_threads
@@ -70,7 +173,8 @@ steps:
     name: "Wattson 线程能耗归因"
     skill: wattson_thread_power_attribution
     params:
-      package: "${package|${process_name|}}"
+      package: "${package}"
+      process_name: "${process_name}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:
@@ -88,18 +192,6 @@ steps:
     display:
       level: detail
     save_as: battery_charge
-    optional: true
-
-  - id: wakelocks
-    type: skill
-    name: "Kernel Wakelock 汇总"
-    skill: android_kernel_wakelock_summary
-    params:
-      start_ts: "${start_ts}"
-      end_ts: "${end_ts}"
-    display:
-      level: detail
-    save_as: wakelocks
     optional: true
 
   - id: dvfs
@@ -125,18 +217,6 @@ steps:
     display:
       level: detail
     save_as: gpu_work_period
-    optional: true
-
-  - id: suspend_wakeup
-    type: skill
-    name: "Suspend / Wakeup 链路"
-    skill: suspend_wakeup_analysis
-    params:
-      start_ts: "${start_ts}"
-      end_ts: "${end_ts}"
-    display:
-      level: detail
-    save_as: suspend_wakeup
     optional: true
 
 output:

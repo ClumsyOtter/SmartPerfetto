@@ -42,6 +42,14 @@ describe('generateTraceConfig', () => {
     expect(c.fragments.find(f => f.dataSource === 'linux.process_stats')).toBeDefined();
   });
 
+  it('emits Android power and network packet sources for power intent', () => {
+    const c = generateTraceConfig({intent: 'power'});
+    const sources = c.fragments.map(f => f.dataSource);
+    expect(sources).toContain('android.power');
+    expect(sources).toContain('android.network_packets');
+    expect(sources).toContain('linux.ftrace');
+  });
+
   it('preserves custom slice declarations on the contract', () => {
     const c = generateTraceConfig({
       intent: 'scrolling',

@@ -34,8 +34,11 @@ prerequisites:
     - android.battery
     - android.battery.doze
     - android.kernel_wakelocks
+    - android.wakeups
+    - android.screen_state
     - android.job_scheduler
     - android.network_packets
+    - linux.cpu.idle
 
 inputs:
   - name: package
@@ -56,6 +59,18 @@ inputs:
     description: "分析结束时间戳(ns)"
 
 steps:
+  - id: battery_drain_rate
+    type: skill
+    name: "掉电速率摘要"
+    skill: battery_drain_rate_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: summary
+    save_as: battery_drain_rate
+    optional: true
+
   - id: battery_charge
     type: skill
     name: "电池采样"
@@ -92,6 +107,31 @@ steps:
     save_as: wakelock_summary
     optional: true
 
+  - id: wakeup_frequency
+    type: skill
+    name: "唤醒频率摘要"
+    skill: wakeup_frequency_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: summary
+    save_as: wakeup_frequency
+    optional: true
+
+  - id: screen_off_cpu
+    type: skill
+    name: "熄屏后台 CPU"
+    skill: screen_off_background_cpu_attribution
+    params:
+      package: "${package}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: screen_off_cpu
+    optional: true
+
   - id: suspend_wakeup
     type: skill
     name: "Suspend/Wakeup 链路"
@@ -122,12 +162,24 @@ steps:
     name: "网络活动"
     skill: network_analysis
     params:
-      package: "${package|${process_name|}}"
+      package: "${package}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:
       level: detail
     save_as: network_activity
+    optional: true
+
+  - id: modem_network
+    type: skill
+    name: "Modem / 蜂窝网络相关性"
+    skill: modem_network_correlation_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: modem_network
     optional: true
 
 output:

@@ -73,6 +73,15 @@ const MEMORY_EVENTS = [
   'vmscan/mm_vmscan_kswapd_wake',
 ];
 
+const POWER_EVENTS = [
+  'power/suspend_resume',
+  'power/wakeup_source_activate',
+  'power/wakeup_source_deactivate',
+  'power/gpu_frequency',
+  'thermal/thermal_temperature',
+  'thermal/cdev_update',
+];
+
 export const CAPTURE_PRESETS: CapturePresetDefinition[] = [
   {
     id: 'startup',
@@ -139,6 +148,17 @@ export const CAPTURE_PRESETS: CapturePresetDefinition[] = [
     ftraceEvents: [...COMMON_FTRACE_EVENTS, ...BINDER_EVENTS],
     dataSources: COMMON_DATA_SOURCES,
     description: 'Scheduler, CPU frequency/idle, process stats, and lightweight app context.',
+  },
+  {
+    id: 'power',
+    label: 'Android power/battery',
+    intent: 'power',
+    defaultDurationSeconds: 60,
+    bufferSizeKb: 131072,
+    atraceCategories: ['am', 'pm', 'power', 'network', 'binder_driver'],
+    ftraceEvents: [...COMMON_FTRACE_EVENTS, ...POWER_EVENTS],
+    dataSources: [...COMMON_DATA_SOURCES, 'android.power', 'android.network_packets'],
+    description: 'Battery drain, power rails, suspend/wakeup, wakelock, CPU idle/frequency, and modem correlation.',
   },
   {
     id: 'overview',
@@ -374,6 +394,38 @@ export function extractDurationMs(textproto: string): number | undefined {
 
 function renderDataSource(source: string): string {
   switch (source) {
+    case 'android.network_packets':
+      return [
+        'data_sources {',
+        '  config {',
+        '    name: "android.network_packets"',
+        '    target_buffer: 1',
+        '    android_network_packets_config {',
+        '      poll_ms: 250',
+        '    }',
+        '  }',
+        '}',
+      ].join('\n');
+    case 'android.power':
+      return [
+        'data_sources {',
+        '  config {',
+        '    name: "android.power"',
+        '    target_buffer: 1',
+        '    android_power_config {',
+        '      battery_poll_ms: 1000',
+        '      battery_counters: BATTERY_COUNTER_CHARGE',
+        '      battery_counters: BATTERY_COUNTER_CAPACITY_PERCENT',
+        '      battery_counters: BATTERY_COUNTER_CURRENT',
+        '      battery_counters: BATTERY_COUNTER_CURRENT_AVG',
+        '      battery_counters: BATTERY_COUNTER_VOLTAGE',
+        '      collect_power_rails: true',
+        '      collect_energy_estimation_breakdown: true',
+        '      collect_entity_state_residency: true',
+        '    }',
+        '  }',
+        '}',
+      ].join('\n');
     case 'linux.process_stats':
       return [
         'data_sources {',

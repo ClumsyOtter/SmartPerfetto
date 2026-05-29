@@ -36,7 +36,7 @@ function makeTraceProcessorMock(tables: Record<string, number>) {
 describe('probeTraceCompleteness', () => {
   it('loads power prerequisite modules before probing M2.0 capabilities', async () => {
     const tps = makeTraceProcessorMock({
-      wattson_rails_aggregation: 3,
+      android_power_rails_counters: 3,
       android_battery_charge: 3,
       cpu_idle_counters: 3,
       android_gpu_work_period_track: 3,
@@ -49,7 +49,7 @@ describe('probeTraceCompleteness', () => {
       .filter((sql: string) => sql.startsWith('INCLUDE PERFETTO MODULE'));
 
     expect(includeSql).toEqual(expect.arrayContaining([
-      'INCLUDE PERFETTO MODULE wattson.aggregation;',
+      'INCLUDE PERFETTO MODULE android.power_rails;',
       'INCLUDE PERFETTO MODULE android.battery;',
       'INCLUDE PERFETTO MODULE linux.cpu.idle;',
       'INCLUDE PERFETTO MODULE android.gpu.work_period;',

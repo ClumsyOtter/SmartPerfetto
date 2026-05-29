@@ -45,6 +45,25 @@ describe('capture config rendering', () => {
     }
   });
 
+  it('renders the power preset with android.power configuration', () => {
+    const config = renderAndroidTraceConfig({
+      target: 'android',
+      preset: 'power',
+      app: '*',
+      durationSeconds: 60,
+    });
+
+    expect(config).toContain('SmartPerfetto capture preset: power');
+    expect(config).toContain('android_power_config');
+    expect(config).toContain('battery_poll_ms: 1000');
+    expect(config).toContain('collect_power_rails: true');
+    expect(config).toContain('android.network_packets');
+    expect(config).toContain('android_network_packets_config');
+    expect(config).toContain('poll_ms: 250');
+    expect(config).toContain('ftrace_events: "power/suspend_resume"');
+    expect(config).toContain('ftrace_events: "power/wakeup_source_activate"');
+  });
+
   it('extracts duration from pass-through config files without rewriting them', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-config-test-'));
     const configPath = path.join(dir, 'perfetto.config');

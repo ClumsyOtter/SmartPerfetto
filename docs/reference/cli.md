@@ -202,9 +202,11 @@ Perfetto 的 Android/Linux system tracing 路线：Android Q/API 29 及以上优
 smp capture presets
 smp capture config --preset startup --app com.example.app --duration 10 --out startup.pbtxt
 smp capture config --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.pbtxt
+smp capture config --preset power --app com.example.app --duration 60 --out power.pbtxt
 
 smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
 smp capture android --preset scrolling --app com.example.app --duration 15 --serial <adbSerial> --out scroll.perfetto-trace
+smp capture android --preset power --app com.example.app --duration 60 --out power.perfetto-trace
 smp capture android --config startup.pbtxt --out launch.perfetto-trace
 smp capture android --config template.pbtxt --duration 10 --categories my_custom_tag --out custom.perfetto-trace
 smp capture android --preset overview --app com.example.app --duration 10 --kill-stale --out retry.perfetto-trace
@@ -212,7 +214,9 @@ smp capture android --preset game --app com.example.game --duration 20 --out gam
 ```
 
 内置预设包括：`startup`、`scrolling`、`anr`、`game`、`memory`、`cpu`、
-`overview`、`full`。需要系统级 atrace category 而不是 app-scoped atrace tag
+`power`、`overview`、`full`。`power` 会开启 `android.power` 的 battery
+counters、power rails、suspend/wakeup 相关 ftrace 和 `android.network_packets`。
+需要系统级 atrace category 而不是 app-scoped atrace tag
 时，可以显式传 `--app '*'`。`--categories` 可以把额外 atrace tag 注入到生成
 配置或已有 `ftrace_config` 中。生成配置会按 duration 自动放大主 buffer，规则约为
 8 MB/s，并限制在 64 MB 到 512 MB 之间。`--config <pbtxt>` 保留旧

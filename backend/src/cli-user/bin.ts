@@ -549,7 +549,7 @@ function main(): void {
   captureCmd
     .command('android')
     .description('capture an Android Perfetto trace from a connected adb device')
-    .option('--preset <preset>', 'capture preset: startup, scrolling, anr, game, memory, cpu, overview, full', parseCapturePreset)
+    .option('--preset <preset>', 'capture preset: startup, scrolling, anr, game, memory, cpu, power, overview, full', parseCapturePreset)
     .option('--config <pbtxt>', 'existing Perfetto textproto config file')
     .option('--app <package>', 'target Android package name or *')
     .requiredOption('--out <file>', 'output trace file path')
@@ -710,7 +710,7 @@ function parseAnalysisMode(mode: string | undefined): CliAnalysisMode | undefine
 
 function parseCapturePreset(preset: string): CapturePresetId {
   if (isCapturePresetId(preset)) return preset;
-  throw new Error(`Invalid capture preset: ${preset}. Expected startup, scrolling, anr, game, memory, cpu, overview, or full.`);
+  throw new Error(`Invalid capture preset: ${preset}. Expected startup, scrolling, anr, game, memory, cpu, power, overview, or full.`);
 }
 
 function parseCodebaseKind(kind: string | undefined): 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk' {

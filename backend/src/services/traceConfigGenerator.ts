@@ -31,6 +31,7 @@ export type TraceIntent =
   | 'anr'
   | 'memory'
   | 'gpu'
+  | 'power'
   | 'network'
   | 'generic';
 
@@ -94,6 +95,12 @@ const NETWORK_FRAGMENTS: PerfettoConfigFragment[] = [
   {dataSource: 'android.network_packets', reason: 'tcp/udp packet timing for net waits'},
 ];
 
+const POWER_FRAGMENTS: PerfettoConfigFragment[] = [
+  {dataSource: 'android.power', reason: 'battery counters, power rails, and energy residency'},
+  {dataSource: 'android.network_packets', reason: 'modem/network drain correlation'},
+  {dataSource: 'linux.ftrace', reason: 'sched + power ftrace events for suspend/wakeup and CPU freq/idle'},
+];
+
 function pickFragmentsForIntent(intent: TraceIntent): PerfettoConfigFragment[] {
   switch (intent) {
     case 'scrolling':
@@ -108,6 +115,8 @@ function pickFragmentsForIntent(intent: TraceIntent): PerfettoConfigFragment[] {
       return [...FOUNDATION_FRAGMENTS, ...GPU_FRAGMENTS];
     case 'network':
       return [...FOUNDATION_FRAGMENTS, ...NETWORK_FRAGMENTS];
+    case 'power':
+      return [...FOUNDATION_FRAGMENTS, ...POWER_FRAGMENTS];
     case 'generic':
     default:
       return FOUNDATION_FRAGMENTS;

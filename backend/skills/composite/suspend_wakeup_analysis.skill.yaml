@@ -235,6 +235,9 @@ steps:
           format: "{{value}}%"
         - key: total_wakeups
           label: 总唤醒次数
+        - key: wakeups_per_min
+          label: 唤醒频率
+          format: "{{value}}/min"
     display:
       level: key
       layer: overview
@@ -250,6 +253,10 @@ steps:
           label: "总唤醒次数"
           type: number
           format: compact
+        - name: wakeups_per_min
+          label: "唤醒/分钟"
+          type: number
+          format: compact
         - name: abort_count
           label: "Suspend 中止次数"
           type: number
@@ -261,6 +268,11 @@ steps:
         - name: abort_pct
           label: "中止率 (%)"
           type: percentage
+        - name: max_backoff_ms
+          label: "最大 Backoff(ms)"
+          type: duration
+          unit: ms
+          format: duration_ms
     sql: |
       WITH suspend_stats AS (
         SELECT
@@ -275,7 +287,8 @@ steps:
         SELECT
           COUNT(*) as total_wakeups,
           SUM(CASE WHEN type != 'normal' THEN 1 ELSE 0 END) as abort_count,
-          SUM(CASE WHEN suspend_quality = 'bad' THEN 1 ELSE 0 END) as bad_quality_count
+          SUM(CASE WHEN suspend_quality = 'bad' THEN 1 ELSE 0 END) as bad_quality_count,
+          MAX(backoff_millis) as max_backoff_ms
         FROM android_wakeups
         WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
@@ -284,9 +297,11 @@ steps:
         ROUND(ss.suspended_time * 100.0 / NULLIF(ss.total_time, 0), 2) as suspend_pct,
         ROUND(ss.awake_time * 100.0 / NULLIF(ss.total_time, 0), 2) as awake_pct,
         ws.total_wakeups,
+        ROUND(ws.total_wakeups * 60e9 / NULLIF(ss.total_time, 0), 2) as wakeups_per_min,
         ws.abort_count,
         ws.bad_quality_count,
-        ROUND(ws.abort_count * 100.0 / NULLIF(ws.total_wakeups, 0), 2) as abort_pct
+        ROUND(ws.abort_count * 100.0 / NULLIF(ws.total_wakeups, 0), 2) as abort_pct,
+        ws.max_backoff_ms
       FROM suspend_stats ss, wakeup_stats ws
     save_as: suspend_quality
     condition: suspend_check.data[0]?.status === 'available'

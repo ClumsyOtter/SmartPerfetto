@@ -297,6 +297,7 @@ smp report <sessionId> --open
 smp capture presets
 smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
 smp capture android --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.perfetto-trace
+smp capture android --preset power --app com.example.app --duration 60 --out power.perfetto-trace
 smp capture android --config ~/tools/perfetto_shell/perfetto.config --out ~/tools/perfetto_shell/trace/dut-game-launch.ptrace --analyze --query "Analyze app launch"
 
 # Or run the interactive SmartPerfetto REPL.

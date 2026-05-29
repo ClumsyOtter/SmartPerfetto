@@ -5,7 +5,7 @@
 # =============================================================================
 # Wattson 线程级功耗归因（B 级 atomic）
 # =============================================================================
-# 使用 wattson.aggregation 的 wattson_threads_aggregation 表，按线程归因 CPU
+# 使用 wattson.aggregation 的 wattson_threads_aggregation! macro，按线程归因 CPU
 # 能耗（mWs）。是排查"谁在偷电"的入口。
 #
 # 数据前置：trace 必须开启 ftrace.sched + power_rails + cpu_freq_idle 才能让
@@ -29,10 +29,22 @@ prerequisites:
     - wattson.aggregation
 
 inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标包名或进程名前缀 GLOB（可选）"
   - name: process_name
     type: string
     required: false
     description: "目标进程名 GLOB（可选）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
   - name: top_n
     type: number
     required: false
@@ -54,21 +66,41 @@ steps:
         - name: thread_name
           label: "线程"
           type: string
-        - name: total_cpu_uws
-          label: "总能耗(uWs)"
+        - name: total_cpu_mws
+          label: "总能耗(mWs)"
+          type: number
+          format: compact
+        - name: energy_mwh
+          label: "能耗(mWh)"
           type: number
           format: compact
         - name: avg_cpu_mw
           label: "平均功率(mW)"
           type: number
           format: compact
+        - name: source_level
+          label: "数据来源"
+          type: string
     sql: |
+      WITH window AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS ts,
+          MAX(COALESCE(${end_ts}, trace_end()) - COALESCE(${start_ts}, trace_start()), 0) AS dur,
+          0 AS period_id
+      )
       SELECT
         process_name,
         thread_name,
-        ROUND(estimate_value_total) AS total_cpu_uws,
-        ROUND(estimate_value_avg, 2) AS avg_cpu_mw
-      FROM wattson_threads_aggregation
-      WHERE (process_name GLOB '${process_name}*' OR '${process_name}' = '')
-      ORDER BY estimate_value_total DESC
+        ROUND(SUM(total_mws), 2) AS total_cpu_mws,
+        ROUND(SUM(total_mws) / 3600.0, 6) AS energy_mwh,
+        ROUND(SUM(total_mws) * 1e9 / NULLIF(SUM(period_dur), 0), 2) AS avg_cpu_mw,
+        'wattson_estimate' AS source_level
+      FROM wattson_threads_aggregation!(window)
+      WHERE (
+        ('${process_name}' != '' AND process_name GLOB '${process_name}*')
+        OR ('${package}' != '' AND process_name GLOB '${package}*')
+        OR ('${process_name}' = '' AND '${package}' = '')
+      )
+      GROUP BY process_name, thread_name
+      ORDER BY total_cpu_mws DESC
       LIMIT ${top_n|30}

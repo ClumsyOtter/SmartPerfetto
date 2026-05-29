@@ -191,15 +191,15 @@ const CAPABILITY_REGISTRY: CapabilityDef[] = [
   },
 
   // ── Wattson power-modeling prerequisites (added 2026-05 per docs/skills-audit-2026-05.md M2.0) ──
-  // Wattson stdlib and the new power skills require specific capture sources. Most production
-  // traces don't enable them, so the prompt must surface gaps before Claude trusts empty tables.
+  // Power skills require specific capture sources. Most production traces don't enable them,
+  // so the prompt must surface gaps before Claude trusts empty tables.
   // These entries explicitly INCLUDE their stdlib modules before probing; otherwise sqlite_master
   // reports the tables as missing even when the trace data would support them.
   {
     id: 'power_rails',
-    displayName: '功耗 Rails 估算（Wattson 前置）',
-    primaryTable: 'wattson_rails_aggregation',
-    requiredModules: ['wattson.aggregation'],
+    displayName: '功耗 Rails 实测（ODPM / PowerStats）',
+    primaryTable: 'android_power_rails_counters',
+    requiredModules: ['android.power_rails'],
     captureHint: '需要 android.power collect_power_rails，且设备硬件支持 power rails',
     priority: 'optional',
   },

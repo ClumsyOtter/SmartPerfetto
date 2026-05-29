@@ -211,9 +211,11 @@ on Android Q/API 29 and newer, and use a packaged or explicitly supplied
 smp capture presets
 smp capture config --preset startup --app com.example.app --duration 10 --out startup.pbtxt
 smp capture config --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.pbtxt
+smp capture config --preset power --app com.example.app --duration 60 --out power.pbtxt
 
 smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
 smp capture android --preset scrolling --app com.example.app --duration 15 --serial <adbSerial> --out scroll.perfetto-trace
+smp capture android --preset power --app com.example.app --duration 60 --out power.perfetto-trace
 smp capture android --config startup.pbtxt --out launch.perfetto-trace
 smp capture android --config template.pbtxt --duration 10 --categories my_custom_tag --out custom.perfetto-trace
 smp capture android --preset overview --app com.example.app --duration 10 --kill-stale --out retry.perfetto-trace
@@ -221,7 +223,9 @@ smp capture android --preset game --app com.example.game --duration 20 --out gam
 ```
 
 Available presets: `startup`, `scrolling`, `anr`, `game`, `memory`, `cpu`,
-`overview`, and `full`. Use `--app '*'` when you intentionally want system-wide
+`power`, `overview`, and `full`. `power` enables `android.power` battery
+counters, power rails, suspend/wakeup ftrace, and `android.network_packets`.
+Use `--app '*'` when you intentionally want system-wide
 atrace categories instead of app-scoped atrace tags. `--categories` injects
 additional atrace tags into generated configs or an existing `ftrace_config`.
 Generated configs scale the primary buffer with duration, roughly 8 MB/s clamped

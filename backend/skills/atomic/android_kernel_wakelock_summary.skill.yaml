@@ -24,7 +24,15 @@ prerequisites:
   modules:
     - android.kernel_wakelocks
 
-inputs: []
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
 
 steps:
   - id: wakelock_summary
@@ -46,12 +54,46 @@ steps:
           label: "次数"
           type: number
           format: compact
+        - name: held_ratio_pct
+          label: "唤醒期占比(%)"
+          type: percentage
+        - name: vitals_hint
+          label: "Vitals 参考"
+          type: string
     sql: |
+      WITH clipped AS (
+        SELECT
+          name,
+          type,
+          CASE
+            WHEN dur > 0 THEN held_dur * (
+              MIN(ts + dur, COALESCE(${end_ts}, trace_end())) -
+              MAX(ts, COALESCE(${start_ts}, trace_start()))
+            ) / dur
+            ELSE held_dur
+          END AS clipped_held_dur,
+          CASE
+            WHEN dur > 0 THEN awake_dur * (
+              MIN(ts + dur, COALESCE(${end_ts}, trace_end())) -
+              MAX(ts, COALESCE(${start_ts}, trace_start()))
+            ) / dur
+            ELSE awake_dur
+          END AS clipped_awake_dur
+        FROM android_kernel_wakelocks
+        WHERE ts < COALESCE(${end_ts}, trace_end())
+          AND ts + dur > COALESCE(${start_ts}, trace_start())
+      )
       SELECT
         name,
-        ROUND(SUM(time_held) / 1e9, 1) AS total_held_sec,
-        COUNT(*) AS count
-      FROM android_kernel_wakelocks
+        ROUND(SUM(clipped_held_dur) / 1e9, 1) AS total_held_sec,
+        COUNT(*) AS count,
+        ROUND(SUM(clipped_held_dur) * 100.0 / NULLIF(SUM(clipped_awake_dur), 0), 2) AS held_ratio_pct,
+        CASE
+          WHEN SUM(clipped_held_dur) >= 7200000000000 THEN 'excessive_if_24h_window'
+          WHEN SUM(clipped_held_dur) >= 3600000000000 THEN 'stuck_candidate'
+          ELSE 'below_vitals_reference'
+        END AS vitals_hint
+      FROM clipped
       GROUP BY name
       ORDER BY total_held_sec DESC
       LIMIT 30
