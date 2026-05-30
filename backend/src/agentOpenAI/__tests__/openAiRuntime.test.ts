@@ -655,6 +655,9 @@ describe('OpenAIRuntime plan completion guard', () => {
     expect(zhPrompt).toContain('场景契约要求的结构');
     expect(zhPrompt).toContain('完整性优先');
     expect(zhPrompt).toContain('先输出 Final Report Contract 要求的必需结构');
+    expect(zhPrompt).toContain('证据类型');
+    expect(zhPrompt).toContain('版本/政策敏感');
+    expect(zhPrompt).toContain('缺失数据只能写成限制');
     expect(zhPrompt).not.toContain('2500-3500');
     expect(zhPrompt).not.toContain('最多 1200');
 
@@ -664,6 +667,9 @@ describe('OpenAIRuntime plan completion guard', () => {
     expect(enPrompt).toContain('structures required by the scene contract');
     expect(enPrompt).toContain('Prioritize completeness');
     expect(enPrompt).toContain('before long trees');
+    expect(enPrompt).toContain('evidence type');
+    expect(enPrompt).toContain('version/policy-sensitive');
+    expect(enPrompt).toContain('Missing data is a limitation');
     expect(enPrompt).not.toContain('1,200-1,800');
     expect(enPrompt).not.toContain('at most 700');
   });

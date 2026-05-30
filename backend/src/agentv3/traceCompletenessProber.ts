@@ -128,6 +128,16 @@ const CAPABILITY_REGISTRY: CapabilityDef[] = [
     priority: 'optional',
   },
 
+  // ── Network ──
+  {
+    id: 'network_packets',
+    displayName: '网络包/流量分析',
+    primaryTable: 'android_network_packets',
+    requiredModules: ['android.network_packets'],
+    captureHint: '需要 android.network_packets 数据源；该能力只证明包收发/接口/协议/流量，不能直接证明 DNS/TCP/TLS/TTFB 阶段耗时',
+    priority: 'optional',
+  },
+
   // ── GPU ──
   {
     id: 'gpu',

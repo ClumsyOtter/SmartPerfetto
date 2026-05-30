@@ -27,6 +27,16 @@ function makeTraceProcessorMock(tables: Record<string, number>) {
       };
     }
 
+    const tableCountMatch = sql.match(/SELECT '([^']+)' AS tbl, COUNT\(\*\) AS cnt FROM/);
+    if (tableCountMatch) {
+      const tableName = tableCountMatch[1];
+      return {
+        columns: ['tbl', 'cnt'],
+        rows: [[tableName, tables[tableName] ?? 0]],
+        durationMs: 1,
+      };
+    }
+
     throw new Error(`Unexpected SQL in trace completeness test: ${sql}`);
   });
 
@@ -75,13 +85,32 @@ describe('probeTraceCompleteness', () => {
     expect(missingById.get('gpu_work_period')).toContain('android.gpu.work_period');
   });
 
-  it('keeps all M2.0 power capability ids registered', () => {
+  it('registers network packet capability with packet-stage boundary guidance', async () => {
+    const tps = makeTraceProcessorMock({
+      android_network_packets: 12,
+    });
+
+    const result = await probeTraceCompleteness(tps, 'trace-1');
+
+    const includeSql = tps.query.mock.calls
+      .map((call: unknown[]) => call[1])
+      .filter((sql: string) => sql.startsWith('INCLUDE PERFETTO MODULE'));
+
+    expect(includeSql).toContain('INCLUDE PERFETTO MODULE android.network_packets;');
+    expect(result.available.map(cap => cap.id)).toContain('network_packets');
+
+    const registryEntry = CAPABILITY_REGISTRY.find(cap => cap.id === 'network_packets');
+    expect(registryEntry?.captureHint).toContain('不能直接证明 DNS/TCP/TLS/TTFB');
+  });
+
+  it('keeps key evidence-boundary capability ids registered', () => {
     const ids = CAPABILITY_REGISTRY.map(cap => cap.id);
     expect(ids).toEqual(expect.arrayContaining([
       'power_rails',
       'battery_counters',
       'cpu_freq_idle',
       'gpu_work_period',
+      'network_packets',
     ]));
   });
 });

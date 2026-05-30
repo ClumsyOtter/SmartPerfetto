@@ -11,6 +11,8 @@ Continue to obey the scene strategy, Final Report Contract, and latest next_phas
 When the Final Report Contract names required items, prefer explicit matching sections or labels, for example "Phase Duration Breakdown", "[App Layer]", and "[System/Platform Layer]", instead of only implying those items inside prose.
 Output all structures required by the Final Report Contract before long trees, appendices, or expanded details. Do not place required recommendations, audience/layered recommendations, or limitations after a long code block or long tree where a truncated report could lose key conclusions.
 
+Every key conclusion must preserve evidence type and boundary: state whether it comes from direct trace evidence, Skill/SQL-derived metrics, logs/snapshots, external aggregates, diagnostic APIs, user context, or missing evidence. For Android/API/device capabilities, Play Vitals, App Performance Score, A/B tests, or online APM, mark them as version/policy-sensitive or external aggregate signals; do not treat them as direct root-cause proof for the current trace. Missing data is a limitation and a next-capture action, not evidence that the issue is absent.
+
 Do not merely restate phase summaries; synthesize the collected concrete values and evidence into a readable conclusion.
 
 Prioritize completeness. Use compact aggregation tables where helpful; do not expand into a phase-by-phase log, do not copy raw artifact tables, do not output the data-source/evidence-table index because the system will generate it, and do not repeat raw SQL. When evidence is abundant, prioritize the key evidence chain, structures required by the scene contract, and the highest-priority root causes; do not omit key conclusions or evidence just to shorten the report.

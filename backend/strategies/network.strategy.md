@@ -5,8 +5,7 @@
 scene: network
 priority: 6
 effort: medium
-required_capabilities:
-  - cpu_scheduling
+required_capabilities: []
 optional_capabilities:
   - network_packets
   - power_rails
@@ -54,6 +53,8 @@ plan_template:
 
 网络场景先判断 trace 是否真的采集了 `android.network_packets`。如果没有该数据源，只能给采集建议，不能把空结果解释为"没有网络问题"。
 
+`network_analysis` 的 packet-level 证据只能说明包收发、接口、协议、socket tag、远程端口、活跃周期和流量规模。它不能直接证明 DNS/TCP/TLS/TTFB/服务端处理这些 request-stage 根因；只有同时存在 OkHttp/Cronet/自研网络库阶段埋点、业务 trace/request id、接入层日志或系统网络状态快照时，才允许按请求阶段归因。
+
 **Phase 1 — 网络流量/协议/接口总览：**
 
 ```
@@ -61,6 +62,11 @@ invoke_skill("network_analysis", { package: "<包名>" })
 ```
 
 重点看接口分布、方向、协议、socket tag、活跃周期。如果用户关心具体时间段，必须传入 `start_ts` / `end_ts`。
+
+输出时把证据类型写清楚：
+1. `trace_direct`: packet/activity/traffic 证据，可用于流量、频繁活跃、功耗相关性。
+2. `missing_evidence`: 没有 request-stage telemetry 时，DNS/连接/TLS/TTFB 只能列为待补证方向。
+3. `external_context`: 若用户提供 APM/接入层指标，只能作为上下文，必须和当前 trace 窗口对齐后再提升置信度。
 
 **Phase 2 — 网络耗电/唤醒链路：**
 

@@ -54,6 +54,12 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(getPhaseHints('anr').length).toBeGreaterThan(0);
   });
 
+  it('keeps network packet data optional so missing-data guidance can still run', () => {
+    const network = getRegisteredScenes().find(scene => scene.scene === 'network');
+    expect(network?.requiredCapabilities).not.toContain('network_packets');
+    expect(network?.optionalCapabilities).toContain('network_packets');
+  });
+
   it('loads declarative final report contracts from strategy frontmatter', () => {
     const contract = getFinalReportContract('scrolling');
     expect(contract?.requiredSections.map(section => section.id)).toEqual(expect.arrayContaining([
@@ -99,6 +105,22 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(content).toContain('evidence_ref_id=<data:* 或 ev_* 证据 ID>');
     expect(content).toContain('source_tool_call_id=<工具调用 ID，如可见>');
     expect(content).toContain('row_index=<0-based 行号，如可见>');
+  });
+
+  it('loads the evidence provenance knowledge topic and global evidence contract', () => {
+    const outputFormat = loadPromptTemplate('prompt-output-format');
+    expect(outputFormat).toContain('证据来源、置信度与版本边界');
+    expect(outputFormat).toContain('trace_direct');
+    expect(outputFormat).toContain('missing_evidence');
+
+    const methodology = loadPromptTemplate('prompt-methodology');
+    expect(methodology).toContain('lookup_knowledge("evidence-provenance")');
+    expect(methodology).toContain('packet-level 网络 trace');
+
+    const knowledge = loadPromptTemplate('knowledge-evidence-provenance');
+    expect(knowledge).toContain('## 证据来源与置信度边界');
+    expect(knowledge).toContain('external_aggregate');
+    expect(knowledge).toContain('版本敏感能力');
   });
 
   it('keeps the quick prompt wired for machine-parseable claim provenance', () => {

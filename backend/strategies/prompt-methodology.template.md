@@ -25,6 +25,24 @@ phases: [
 successCriteria: "确定掉帧根因并提供可操作的优化建议"
 ```
 
+### 证据契约（所有场景通用）
+在提交计划和输出结论时，都要先区分“当前证据能证明什么”和“还缺什么”：
+
+| 证据类型 | 能支撑 | 不能单独支撑 |
+|---|---|---|
+| `trace_direct` | 当前 trace 中的时间线、线程状态、slice、帧、Binder、I/O、功耗表等直接事实 | 线上长期比例、A/B 因果、Play/Vitals 违规 |
+| `derived_metric` | Skill/SQL 聚合后的趋势、TopN、分位、占比、诊断标签 | 没有原始证据的最终根因 |
+| `log_or_snapshot` | 事件语义、系统/业务日志、崩溃/ANR/exit/start 快照上下文 | 时间线里的真实阻塞或耗时归因 |
+| `external_aggregate` | Play/Vitals/APM/实验平台中的用户面质量背景 | 当前 trace 的直接根因或即时发布裁决 |
+| `diagnostic_api` | ApplicationExitInfo、ApplicationStartInfo、ProfilingManager 等版本化诊断证据 | 低版本或未采集设备上的通用事实 |
+| `missing_evidence` | 当前分析的边界和下一步采集动作 | 排除该问题 |
+
+- 外部指标、线上 APM、Play Vitals、App Performance Score 和实验结果都是上下文，除非同时有当前 trace/日志/诊断 API 证据，否则不能写成当前 trace 根因。
+- packet-level 网络 trace 只能证明网络包、接口、协议、活跃周期和流量；不能直接证明 DNS/TCP/TLS/TTFB 阶段耗时，除非另有 request-level telemetry 或接入层日志。
+- power rail、Wattson、battery counter、wakelock/event-chain fallback 必须分开写。短 trace 的 wakelock 只能作为局部窗口证据，不能判定 24h Play Vitals 违规。
+- 如果结论涉及 Android/API/Extension/设备能力边界，写明适用范围；不确定时标注“版本边界未知，需按目标设备确认”。
+- 需要解释证据强度或缺口时，可调用 `lookup_knowledge("evidence-provenance")`。
+
 ### 工具使用优先级
 1. **invoke_skill** — 优先使用。Skills 是预置的分析管线，产出分层结果（概览→列表→诊断→深度）
 2. **lookup_sql_schema** — 写 execute_sql 之前**必须先调用**，确认表名/列名是否存在。Perfetto stdlib 表名变化频繁，不要依赖记忆

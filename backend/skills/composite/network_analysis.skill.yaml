@@ -129,6 +129,47 @@ steps:
     save_as: network_slice_check
     condition: network_check.data[0]?.status === 'unavailable'
 
+  - id: evidence_scope
+    type: atomic
+    name: "证据范围说明"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: evidence_class
+          label: 证据类型
+        - key: supported_claims
+          label: 可支持结论
+        - key: unsupported_claims
+          label: 不可直接证明
+      insights:
+        - template: "{{supported_claims}}；{{unsupported_claims}}"
+    display:
+      level: summary
+      layer: overview
+      title: "网络证据范围"
+      columns:
+        - name: evidence_class
+          label: "证据类型"
+          type: string
+        - name: supported_claims
+          label: "可支持结论"
+          type: string
+        - name: unsupported_claims
+          label: "不可直接证明"
+          type: string
+        - name: required_complement
+          label: "补证方向"
+          type: string
+    sql: |
+      SELECT
+        'trace_direct:packet_activity' AS evidence_class,
+        'android_network_packets 可支持包收发、接口、协议、socket tag、远程端口、活跃周期和流量规模判断' AS supported_claims,
+        '不能直接证明 DNS/TCP/TLS/TTFB/服务端处理阶段耗时或请求级根因' AS unsupported_claims,
+        '需要 OkHttp/Cronet/自研网络库阶段埋点、request_id/trace_id、接入层日志或系统网络状态快照补证' AS required_complement
+    save_as: evidence_scope
+    condition: network_check.data[0]?.status === 'available'
+
   # ========== L1: 网络流量概览 ==========
   - id: network_overview
     type: atomic
@@ -717,11 +758,11 @@ steps:
       # 大量 DNS 查询
       - condition: "port_analysis.data.find(p => p.service === 'DNS')?.event_count > 100"
         severity: warning
-        diagnosis: "NETWORK_LATENCY - DNS 查询频繁，可能导致网络延迟"
-        confidence: medium
+        diagnosis: "NETWORK_DNS_PACKET_ACTIVITY - 远程端口 53 包活动频繁；当前 packet trace 不能直接证明 DNS 阶段耗时或请求延迟"
+        confidence: low
         suggestions:
-          - "检查是否有重复 DNS 查询"
-          - "考虑使用 DNS 缓存或预解析"
+          - "结合 OkHttp/Cronet DNS 阶段埋点或接入层 request_id 证据确认是否存在 DNS 延迟"
+          - "若确认重复解析，再检查 DNS 缓存、预解析和连接复用策略"
 
       # 正常
       - condition: "network_overview.data[0]?.total_mb <= ${heavy_traffic_warning_mb|10}"

@@ -115,6 +115,50 @@ describe('conclusionSceneTemplates', () => {
     expect(hints.sceneName).toContain('内存');
   });
 
+  test('startup template preserves TTID/TTFD and external-signal boundaries', () => {
+    const hints = buildConclusionScenePromptHints({
+      intent: createIntent({ aspects: ['startup'], primaryGoal: '分析启动慢' }),
+      findings: [],
+      deepReasonLabel: '为什么慢',
+    });
+
+    const requirements = hints.outputRequirementLines.join('\n');
+    expect(requirements).toContain('TTID');
+    expect(requirements).toContain('TTFD');
+    expect(requirements).toContain('业务 ready');
+    expect(requirements).toContain('Vitals/APM/Score');
+  });
+
+  test('network template distinguishes packet evidence from request-stage evidence', () => {
+    const hints = buildConclusionScenePromptHints({
+      intent: createIntent({ aspects: ['network'], primaryGoal: '分析网络请求慢，是否 DNS 或 TLS 慢' }),
+      findings: [],
+      deepReasonLabel: '为什么慢',
+    });
+
+    const promptText = [
+      ...hints.focusLines,
+      ...hints.outputRequirementLines,
+      hints.nextStepLine,
+    ].join('\n');
+    expect(hints.sceneId).toBe('network');
+    expect(promptText).toContain('packet-level');
+    expect(promptText).toContain('request-stage');
+    expect(promptText).toContain('不得直接归因为 DNS/连接/TLS/首包慢');
+  });
+
+  test('generic template requires evidence type and version boundary', () => {
+    const hints = buildConclusionScenePromptHints({
+      intent: createIntent({ primaryGoal: '帮我看一下整体表现', aspects: ['overview'] }),
+      findings: [createFinding({ title: '指标波动', description: '无明确场景关键词' })],
+      deepReasonLabel: '为什么慢',
+    });
+
+    expect(hints.sceneId).toBe('generic');
+    expect(hints.outputRequirementLines.join('\n')).toContain('证据类型');
+    expect(hints.outputRequirementLines.join('\n')).toContain('Android/API/设备边界');
+  });
+
   test('uses anr template when query contains ANR keywords', () => {
     const hints = buildConclusionScenePromptHints({
       intent: createIntent({ aspects: ['anr'], primaryGoal: '为什么会 ANR，主线程卡死在哪里？' }),
