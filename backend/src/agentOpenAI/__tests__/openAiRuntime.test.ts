@@ -700,6 +700,33 @@ describe('OpenAIRuntime plan completion guard', () => {
     })).toBe(true);
   });
 
+  it('requests final-report continuation when the network request-stage contract is incomplete', () => {
+    const runtime = new OpenAIRuntime({} as any) as any;
+    const planStatus = {
+      complete: true,
+      hasPlan: true,
+      pendingPhases: [],
+    };
+
+    expect(runtime.shouldRequestFinalReportAfterPlanComplete({
+      quickMode: false,
+      planStatus,
+      conclusion: [
+        '# 网络分析报告',
+        '',
+        '## 综合结论',
+        '',
+        'OkHttp 请求慢主要是 DNS/TLS/TTFB 慢，建议优化缓存和服务端。',
+      ].join('\n'),
+      fallbackConclusion: undefined,
+      completedByPlanIdle: false,
+      timedOut: false,
+      finalReportContinuations: 0,
+      query: '分析 OkHttp EventListener DNS TLS TTFB 是否慢',
+      sceneType: 'network',
+    })).toBe(true);
+  });
+
   it('uses a full-report continuation prompt that preserves scene-specific sections', () => {
     const runtime = new OpenAIRuntime({} as any) as any;
 

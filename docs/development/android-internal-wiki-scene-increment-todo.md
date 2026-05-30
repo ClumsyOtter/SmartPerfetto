@@ -335,7 +335,7 @@ Each TODO item can be marked done only when all applicable gates pass:
 
 ### Batch 6 - Request-Stage Network And Online Diagnostics
 
-- [ ] TODO-007: Request-stage network evidence contract
+- [x] TODO-007: Request-stage network evidence contract
   - Target files:
     - `backend/strategies/network.strategy.md`
     - Optional new Skill only if request-stage telemetry has a real input
@@ -350,6 +350,33 @@ Each TODO item can be marked done only when all applicable gates pass:
     - Do not infer request stages from `android_network_packets` alone.
   - Verification:
     - Strategy/template tests first; Skill work only with deterministic inputs.
+  - Completed in Batch 6:
+    - Verified version-sensitive Android network behavior against current
+      official docs on 2026-05-30 before encoding it: Cronet/HttpEngine stack
+      boundaries, `NetworkCallback` / `NetworkCapabilities` state semantics,
+      Android 16/17 local-network permission behavior, and Android 17 ECH
+      capability boundaries.
+    - Added pure `network` scene routing for concrete request-stage and
+      stack-policy terms: DNS/TLS/TTFB, HTTPDNS, OkHttp EventListener, Cronet,
+      HttpEngine, HTTP/3, QUIC, ECH, Certificate Transparency,
+      `NetworkCallback`, `NetworkCapabilities`, and local-network permission.
+      Generic startup/ANR/interaction/media routing remains protected by
+      focused regression tests.
+    - Added conditional `network` final-report contracts split into request
+      stage evidence boundaries and network stack/version policy boundaries.
+      Generic packet-traffic reports do not have to include request-stage or
+      policy sections.
+    - Added `knowledge-network-evidence.template.md` so
+      `lookup_knowledge("network-evidence")` has a concrete asset for packet vs
+      request telemetry, logs/snapshots, APM, NetworkCallback, ECH/CT, and local
+      network permission boundaries.
+    - Updated `network_analysis` evidence scope without adding a fake
+      request-stage Skill: the Skill still reports deterministic packet
+      evidence, while explicitly naming request-stage/policy evidence it cannot
+      prove.
+    - Added focused tests for loader contracts, phase hints, knowledge loading,
+      real classifier routing, final-result contract gating, OpenAI final-report
+      continuation behavior, and Skill evidence boundary text.
 
 ### Batch 7 - Observability And Diagnostic APIs
 
@@ -370,15 +397,18 @@ Each TODO item can be marked done only when all applicable gates pass:
 
 ## Current Next Step
 
-Batch 5 is implemented and passed the landing gates:
+Batch 6 is implemented and passed independent review plus repository-level
+landing gates:
 
 - Focused Jest passed for strategy loading, real registry routing, final-result
-  contract behavior, and OpenAI final-report continuation behavior.
-- `validate:strategies`, backend build, scene trace regression, and
-  `git diff --check` passed.
-- Read-only post-diff review passed after the routing fix that removed bare
-  background-execution keywords from `power`.
-- Repository-level `npm run verify:pr` passed, including `validate:skills`,
-  `validate:strategies`, typecheck/build, core tests, and trace regression.
+  contract behavior, OpenAI final-report continuation behavior, and Skill
+  evidence-boundary text.
+- `validate:strategies`, `validate:skills`, backend build, scene trace
+  regression, `npm run verify:pr`, and `git diff --check` passed.
+- Manual simplification review kept the scope to pure `network` scene
+  contracts, added a concrete `network-evidence` knowledge topic for phase
+  hints, and avoided creating a fake request-stage Skill. The `/simplify`
+  command was not available in this shell (`simplify not found`), so this was a
+  manual simplification pass.
 
-Next: commit/push Batch 5, then continue with Batch 6.
+Next: commit/push Batch 6, then continue with Batch 7.

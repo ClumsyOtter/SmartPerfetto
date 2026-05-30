@@ -57,6 +57,16 @@ describe('classifyScene with real strategy frontmatter', () => {
     expect(classifyScene('Android vitals partial wakelock excessive 24h 怎么确认')).toBe('power');
   });
 
+  it('routes pure network request-stage and stack-policy questions to network', () => {
+    expect(classifyScene('网络慢怎么分析')).toBe('network');
+    expect(classifyScene('请求慢怎么分析')).toBe('network');
+    expect(classifyScene('OkHttp EventListener DNS TLS TTFB 怎么归因')).toBe('network');
+    expect(classifyScene('HTTPDNS cache TTL 导致请求慢怎么验证')).toBe('network');
+    expect(classifyScene('Cronet HttpEngine HTTP/3 QUIC 0-RTT 网络慢')).toBe('network');
+    expect(classifyScene('NetworkCallback validated metered bandwidth 状态怎么看')).toBe('network');
+    expect(classifyScene('Android 17 ECH Certificate Transparency local network permission 请求失败')).toBe('network');
+  });
+
   it('keeps explicit frame-drop phrasing on scrolling without broad frame keyword matches', () => {
     expect(classifyScene('analyze frame drops in this trace')).toBe('scrolling');
     expect(classifyScene('frame drop in this trace')).toBe('scrolling');
@@ -76,5 +86,12 @@ describe('classifyScene with real strategy frontmatter', () => {
     expect(classifyScene('InputDispatcher ACK timeout with FGS running')).toBe('interaction');
     expect(classifyScene('WorkManager network traffic is high')).toBe('network');
     expect(classifyScene('network traffic is high')).toBe('network');
+  });
+
+  it('does not let network request-stage routing steal stronger scenes', () => {
+    expect(classifyScene('启动阶段 OkHttp DNS TLS TTFB 慢')).toBe('startup');
+    expect(classifyScene('ANR main thread waits on Cronet TLS recv')).toBe('anr');
+    expect(classifyScene('点击响应慢 OkHttp response body decode')).toBe('interaction');
+    expect(classifyScene('MediaCodec video decoder HTTP/3 QUIC buffering')).toBe('media');
   });
 });

@@ -119,6 +119,24 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
       'BufferQueue|BLAST|queueBuffer|dequeueBuffer',
     ]));
 
+    const networkContract = getFinalReportContract('network');
+    expect(networkContract?.requiredSections.map(section => section.id)).toEqual(expect.arrayContaining([
+      'request_stage_evidence_boundary',
+      'network_stack_policy_boundary',
+    ]));
+    expect(networkContract?.requiredSections.find(section =>
+      section.id === 'request_stage_evidence_boundary',
+    )?.triggerPatterns).toEqual(expect.arrayContaining([
+      '(网络|network).*(慢|延迟|latency|slow|请求慢|request.*slow)|(请求|request).*(慢|耗时|延迟|latency|slow)',
+      'DNS|TTFB|HTTPDNS|OkHttp|Cronet|HttpEngine|EventListener|request[- ]stage|首包|首字节|secureConnect|responseHeadersStart',
+      'TLS|handshake|\\bconnect(?:Start|End)?\\b|request body|response body|body transfer|decode|server log|access[- ]layer|APM',
+    ]));
+    expect(networkContract?.requiredSections.find(section =>
+      section.id === 'network_stack_policy_boundary',
+    )?.triggerPatterns).toEqual(expect.arrayContaining([
+      'NetworkCallback|NetworkCapabilities|validated internet|metered|estimated bandwidth|bandwidth estimate|local network permission|ACCESS_LOCAL_NETWORK|satellite|constrained network',
+    ]));
+
     const powerContract = getFinalReportContract('power');
     expect(powerContract?.requiredSections.map(section => section.id)).toEqual(expect.arrayContaining([
       'job_work_fgs_governance_boundary',
@@ -198,6 +216,23 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(scrollingHints.find(hint => hint.id === 'display_pipeline_boundary')?.criticalTools).toContain('present_fence_timing');
   });
 
+  it('loads network phase_hints for request-stage and stack-policy boundaries', () => {
+    const hints = getPhaseHints('network');
+    expect(hints.map(hint => hint.id)).toEqual(expect.arrayContaining([
+      'network_packets',
+      'request_stage_boundary',
+      'network_state_policy_boundary',
+    ]));
+    expect(hints.find(hint => hint.id === 'request_stage_boundary')?.criticalTools).toEqual(expect.arrayContaining([
+      'network_analysis',
+      'lookup_knowledge',
+    ]));
+    expect(hints.find(hint => hint.id === 'network_state_policy_boundary')?.criticalTools).toEqual(expect.arrayContaining([
+      'network_analysis',
+      'lookup_knowledge',
+    ]));
+  });
+
   it('loads power phase_hints for background execution and alarm wakeup boundaries', () => {
     const hints = getPhaseHints('power');
     expect(hints.map(hint => hint.id)).toEqual(expect.arrayContaining([
@@ -237,6 +272,11 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(knowledge).toContain('## 证据来源与置信度边界');
     expect(knowledge).toContain('external_aggregate');
     expect(knowledge).toContain('版本敏感能力');
+
+    const networkKnowledge = loadPromptTemplate('knowledge-network-evidence');
+    expect(networkKnowledge).toContain('Network Evidence Boundaries');
+    expect(networkKnowledge).toContain('request_telemetry');
+    expect(networkKnowledge).toContain('local-network permission');
   });
 
   it('keeps the quick prompt wired for machine-parseable claim provenance', () => {

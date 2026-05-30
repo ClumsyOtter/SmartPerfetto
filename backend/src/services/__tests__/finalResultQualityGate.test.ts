@@ -725,6 +725,229 @@ describe('final result quality gate', () => {
     })).toBeUndefined();
   });
 
+  it('flags network reports that omit request-stage evidence boundaries', () => {
+    const shortNetworkReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      '请求慢主要是 DNS/TLS/TTFB 慢，建议优化服务端和缓存。',
+      '',
+      '## 关键证据',
+      '',
+      '- network_analysis 显示网络包较多。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: shortNetworkReport,
+        findings: [{
+          severity: 'warning',
+          title: '请求阶段候选',
+          description: 'network_analysis packet activity overlaps slow request window',
+          evidence: ['network_analysis active_window=620ms packet_count=420'],
+        } as any],
+      }),
+      query: '分析 OkHttp EventListener DNS TLS TTFB 是否慢',
+      sceneType: 'network',
+    });
+
+    expect(issue?.code).toBe('scene_contract_incomplete');
+    expect(issue?.message).toContain('请求阶段证据边界');
+    expect(issue?.message).not.toContain('网络栈/版本策略边界');
+  });
+
+  it('flags generic slow-network reports that omit packet-vs-request boundaries', () => {
+    const shortNetworkReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      '网络慢，建议优化服务端。',
+      '',
+      '## 关键证据',
+      '',
+      '- network_analysis 显示 packet activity 存在。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: shortNetworkReport,
+        findings: [{
+          severity: 'warning',
+          title: '网络慢候选',
+          description: 'packet activity overlaps user-reported slow network window',
+          evidence: ['network_analysis active_window=900ms packet_count=840'],
+        } as any],
+      }),
+      query: '分析网络慢',
+      sceneType: 'network',
+    });
+
+    expect(issue?.code).toBe('scene_contract_incomplete');
+    expect(issue?.message).toContain('请求阶段证据边界');
+  });
+
+  it('rejects hollow network request-stage boundary mentions', () => {
+    const hollowReport = [
+      '# 网络分析报告',
+      '',
+      '## 请求阶段证据边界',
+      '',
+      '这里缺少 DNS/TLS/TTFB 的证据边界。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: hollowReport,
+        findings: [{
+          severity: 'warning',
+          title: '空洞边界报告',
+          description: 'Report mentions the boundary without evidence classes',
+          evidence: ['network_analysis total_mb=1.2'],
+        } as any],
+      }),
+      query: '分析 OkHttp EventListener DNS TLS TTFB 是否慢',
+      sceneType: 'network',
+    });
+
+    expect(issue?.code).toBe('scene_contract_incomplete');
+    expect(issue?.message).toContain('请求阶段证据边界');
+  });
+
+  it('accepts network request-stage reports without requiring stack-policy sections', () => {
+    const richNetworkReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      '当前只能把 TTFB 写成中置信候选，不能从 packet-level trace 单独升级为 DNS/TLS 根因。',
+      '',
+      '## 请求阶段证据边界',
+      '',
+      '- packet-level / trace_direct:packet_activity 只证明接口、协议、远端端口、活跃时间窗和流量规模。',
+      '- OkHttp EventListener request-level telemetry 与 request_id=req-42、trace_id=net-42 在 1200-1800ms 时间窗对齐。',
+      '- 阶段拆分覆盖 DNS、connect、TLS、TTFB、request body、response body、decode、HTTPDNS cache 和 retry。',
+      '- 接入层日志与 APM 只作为 external context；缺失 server log 时 confidence 保持中等，不能直接归因为服务端。',
+      '',
+      '## 采集建议',
+      '',
+      '- 后续补充 Cronet/HttpEngine event 或服务端 trace id 后再提高置信度。',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({ conclusion: richNetworkReport }),
+      query: '分析 OkHttp EventListener DNS TLS TTFB 是否慢',
+      sceneType: 'network',
+    })).toBeUndefined();
+  });
+
+  it('flags network stack-policy reports that omit version and config boundaries', () => {
+    const shortStackReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      'Android 17 ECH 和 local network permission 导致请求失败。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: shortStackReport,
+        findings: [{
+          severity: 'warning',
+          title: '网络策略候选',
+          description: 'User reports ECH failure but trace only has packet activity',
+          evidence: ['network_analysis remote_port=443 packet_count=18'],
+        } as any],
+      }),
+      query: '分析 Android 17 ECH Certificate Transparency local network permission dumpsys connectivity 失败',
+      sceneType: 'network',
+    });
+
+    expect(issue?.code).toBe('scene_contract_incomplete');
+    expect(issue?.message).toContain('网络栈/版本策略边界');
+    expect(issue?.message).not.toContain('请求阶段证据边界');
+  });
+
+  it('accepts network stack-policy reports without requiring request-stage sections', () => {
+    const richStackReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      '本次只能把 ECH / Certificate Transparency / local network permission 写成版本配置候选，不能从 packet 直接定因。',
+      '',
+      '## 网络栈/版本策略边界',
+      '',
+      '- client stack 为 Cronet/HttpEngine，涉及 HTTP/3、QUIC、ECH、Certificate Transparency、local network permission 和 ACCESS_LOCAL_NETWORK。',
+      '- Android 17、API 37、targetSdk 37、Extension、server support、permission policy 与 Network Security Config 都是版本/配置能力边界。',
+      '- trace_direct packet 只证明连接尝试和流量窗口；缺失 config、log、dumpsys connectivity 和 APM 时 confidence 为低到中等，不能写成确定根因。',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({ conclusion: richStackReport }),
+      query: '分析 Android 17 ECH Certificate Transparency local network permission dumpsys connectivity 失败',
+      sceneType: 'network',
+    })).toBeUndefined();
+  });
+
+  it('does not require request-stage or stack-policy sections for generic traffic reports', () => {
+    const genericNetworkReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      'network_analysis 显示 wlan0 received=12MB，TCP 流量集中在 443 端口。',
+      '',
+      '## 关键证据',
+      '',
+      '- android_network_packets 可用，packet_count=4200，active window=35s。',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({
+        conclusion: genericNetworkReport,
+        findings: [{
+          severity: 'info',
+          title: '网络流量',
+          description: 'packet activity summary exists',
+          evidence: ['android_network_packets packet_count=4200 total_mb=12'],
+        } as any],
+      }),
+      query: '分析 network traffic is high',
+      sceneType: 'network',
+    })).toBeUndefined();
+  });
+
+  it('does not require stack-policy sections for generic bandwidth traffic reports', () => {
+    const genericBandwidthReport = [
+      '# 网络分析报告',
+      '',
+      '## 综合结论',
+      '',
+      'network_analysis 显示 bandwidth usage 偏高，主要来自 wlan0 下行流量。',
+      '',
+      '## 关键证据',
+      '',
+      '- android_network_packets 可用，packet_count=5200，total_mb=26，active window=42s。',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({
+        conclusion: genericBandwidthReport,
+        findings: [{
+          severity: 'info',
+          title: '网络带宽',
+          description: 'packet bandwidth usage summary exists',
+          evidence: ['android_network_packets packet_count=5200 total_mb=26'],
+        } as any],
+      }),
+      query: 'analyze network bandwidth usage high traffic',
+      sceneType: 'network',
+    })).toBeUndefined();
+  });
+
   it('flags power reports that omit Job/Work/FGS governance boundaries for job quota questions', () => {
     const shortPowerReport = [
       '# 功耗分析报告',

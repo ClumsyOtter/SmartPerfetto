@@ -18,7 +18,10 @@ describe('Skill evidence boundary contracts', () => {
 
     expect(content).toContain('id: evidence_scope');
     expect(content).toContain('trace_direct:packet_activity');
-    expect(content).toContain('不能直接证明 DNS/TCP/TLS/TTFB/服务端处理阶段耗时或请求级根因');
+    expect(content).toContain('不能直接证明 DNS/TCP/TLS/TTFB/请求体/响应体/解码/服务端处理阶段耗时');
+    expect(content).toContain('HTTPDNS 缓存/TTL');
+    expect(content).toContain('ECH/CT/local-network permission/NetworkCallback');
+    expect(content).toContain('OkHttp/Cronet/HttpEngine/自研网络库阶段埋点');
     expect(content).toContain('NETWORK_DNS_PACKET_ACTIVITY');
     expect(content).toContain('当前 packet trace 不能直接证明 DNS 阶段耗时或请求延迟');
     expect(content).not.toContain('DNS 查询频繁，可能导致网络延迟');

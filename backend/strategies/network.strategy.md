@@ -23,9 +23,53 @@ keywords:
   - 5g
   - tcp
   - udp
+  - dns
+  - tls
+  - ttfb
+  - httpdns
+  - okhttp
+  - cronet
+  - httpengine
+  - http/3
+  - quic
+  - ech
+  - networkcallback
+  - networkcapabilities
+  - local network permission
 compound_patterns:
   - "网络.*(流量|耗电|唤醒|请求|包)"
   - "network.*(traffic|power|wakeup|packet)"
+  - "(网络|network).*(慢|延迟|latency|slow|请求慢|request.*slow)"
+  - "(请求|request).*(慢|耗时|延迟|latency|slow)"
+  - "(OkHttp|Cronet|HttpEngine|HTTPDNS|NetworkCallback|NetworkCapabilities).*(DNS|TLS|TTFB|request|请求|cache|缓存|validated|metered|bandwidth|带宽)"
+  - "(DNS|TLS|TTFB|HTTPDNS|ECH|HTTP/3|HTTP3|QUIC).*(网络|请求|耗时|失败|latency|slow|failure)"
+  - "(local network permission|ACCESS_LOCAL_NETWORK|Certificate Transparency|Encrypted Client Hello).*(Android|targetSdk|网络|请求|失败|permission|policy)"
+
+final_report_contract:
+  required_sections:
+    - id: request_stage_evidence_boundary
+      label: 请求阶段证据边界
+      description: '当问题涉及 DNS/connect/TLS/TTFB/body/decode/HTTPDNS/OkHttp/Cronet/APM/接入层日志时，区分 packet trace、request telemetry、日志/APM、时间窗/request_id 对齐和缺失证据。'
+      trigger_patterns:
+        - '(网络|network).*(慢|延迟|latency|slow|请求慢|request.*slow)|(请求|request).*(慢|耗时|延迟|latency|slow)'
+        - 'DNS|TTFB|HTTPDNS|OkHttp|Cronet|HttpEngine|EventListener|request[- ]stage|首包|首字节|secureConnect|responseHeadersStart'
+        - 'TLS|handshake|\bconnect(?:Start|End)?\b|request body|response body|body transfer|decode|server log|access[- ]layer|APM'
+      pattern_groups:
+        - ['请求阶段证据边界', 'request[- ]stage evidence', 'DNS/TCP/TLS/TTFB', '阶段证据']
+        - ['packet[- ]level', 'trace_direct:packet_activity', 'request[- ]level', 'request telemetry', 'OkHttp', 'Cronet', 'HttpEngine', 'EventListener', 'APM', '接入层', '日志']
+        - ['DNS', 'connect', 'TLS', 'TTFB', 'first byte', 'request body', 'response body', 'decode', 'HTTPDNS', 'cache', 'retry', '首包', '首字节']
+        - ['request_id', 'trace_id', '时间窗', 'window', 'align', '对齐', 'missing', '缺失', '置信', 'confidence', '不能', '不可', 'not prove']
+    - id: network_stack_policy_boundary
+      label: 网络栈/版本策略边界
+      description: '当问题涉及 Cronet/HttpEngine/HTTP3/QUIC/ECH/CT/NetworkCallback/local-network permission/validated/metered/satellite/constrained network 时，区分网络栈、API/targetSdk/Extension、设备/服务端支持、配置/权限和 trace packet 证据。'
+      trigger_patterns:
+        - 'Cronet|HttpEngine|HTTP/3|HTTP3|QUIC|0[- ]RTT|ECH|Encrypted Client Hello|Certificate Transparency|\bCT\b'
+        - 'NetworkCallback|NetworkCapabilities|validated internet|metered|estimated bandwidth|bandwidth estimate|local network permission|ACCESS_LOCAL_NETWORK|satellite|constrained network'
+      pattern_groups:
+        - ['网络栈/版本策略边界', 'stack policy boundary', '版本策略', 'network stack']
+        - ['Cronet', 'HttpEngine', 'HTTP/3', 'HTTP3', 'QUIC', 'NetworkCallback', 'NetworkCapabilities', 'ECH', 'Encrypted Client Hello', 'Certificate Transparency', 'local network permission', 'ACCESS_LOCAL_NETWORK']
+        - ['Android\s*1[67]', 'API\s*3[4-7]', 'targetSdk', 'Extension', 'SDK', '版本', '配置', 'server support', 'permission', 'policy', '能力']
+        - ['trace_direct', 'packet', 'config', 'log', 'dumpsys', 'APM', 'missing', '缺失', '置信', 'confidence', '不能', '不可']
 
 phase_hints:
   - id: network_packets
@@ -37,6 +81,16 @@ phase_hints:
     keywords: ['battery', 'power', 'wakeup', '耗电', '唤醒', '掉电']
     constraints: '网络耗电问题需要把 network_analysis 与 battery_drain_attribution / power_consumption_overview 组合，区分网络事件链和 rail 级功耗归因。'
     critical_tools: ['network_analysis', 'battery_drain_attribution', 'power_consumption_overview']
+    critical: false
+  - id: request_stage_boundary
+    keywords: ['DNS', 'TLS', 'TTFB', 'HTTPDNS', 'OkHttp', 'Cronet', 'HttpEngine', 'EventListener', 'APM', 'request-stage', '首包', '首字节']
+    constraints: 'request-stage 归因必须先说明 packet-level trace 只能证明包/接口/协议/活跃窗口；只有存在 OkHttp/Cronet/HttpEngine 事件、request_id、app trace slice、接入层日志或 APM 且与当前时间窗对齐时，才能拆 DNS/connect/TLS/TTFB/body/decode/cache/retry。缺失时输出采集建议。'
+    critical_tools: ['network_analysis', 'lookup_knowledge']
+    critical: false
+  - id: network_state_policy_boundary
+    keywords: ['ECH', 'Encrypted Client Hello', 'Certificate Transparency', 'HTTP/3', 'QUIC', 'NetworkCallback', 'NetworkCapabilities', 'validated', 'metered', 'local network permission', 'ACCESS_LOCAL_NETWORK', 'satellite', 'constrained network']
+    constraints: '网络栈/政策问题必须把当前 trace packet 证据、client stack/config、Android/API/targetSdk/Extension、NetworkCallback/NetworkCapabilities、dumpsys/connectivity、服务端支持和外部错误日志分开；版本或配置未知时不得提升为确定根因。'
+    critical_tools: ['network_analysis', 'lookup_knowledge']
     critical: false
 
 plan_template:
@@ -67,6 +121,32 @@ invoke_skill("network_analysis", { package: "<包名>" })
 1. `trace_direct`: packet/activity/traffic 证据，可用于流量、频繁活跃、功耗相关性。
 2. `missing_evidence`: 没有 request-stage telemetry 时，DNS/连接/TLS/TTFB 只能列为待补证方向。
 3. `external_context`: 若用户提供 APM/接入层指标，只能作为上下文，必须和当前 trace 窗口对齐后再提升置信度。
+
+**Phase 1.5 — 请求阶段证据边界（按需）：**
+
+当用户问“网络慢”“请求慢”“DNS/TLS/TTFB 慢”“HTTPDNS 缓存/TTL”“OkHttp/Cronet/HttpEngine 阶段耗时”时，先把证据分层：
+
+1. `packet_trace`: `network_analysis` 只能证明包收发、接口、协议、远端端口、socket tag、活跃窗口和流量规模。
+2. `request_telemetry`: OkHttp `EventListener`、Cronet/HttpEngine 事件、app trace slice、request_id/trace_id 才能拆 DNS/connect/TLS/request body/TTFB/response body/decode/cache/retry。
+3. `log_or_snapshot`: 接入层日志、客户端错误码、`NetworkCallback` 状态、`dumpsys connectivity` 可提供语义和网络状态，但必须和当前 trace 时间窗对齐。
+4. `external_aggregate`: APM、服务端指标、线上弱网统计只能作为背景，不能替代当前 trace 证据。
+
+缺少 request-level telemetry 时，结论必须写成 `missing_evidence`：当前只能证明网络活动/流量候选，不能直接把根因定为 DNS、TLS、首包、服务端处理或解码慢。需要机制背景时调用：
+
+```
+lookup_knowledge("network-evidence")
+```
+
+**Phase 1.6 — 网络栈/版本策略边界（按需）：**
+
+当问题涉及 ECH、Certificate Transparency、HTTP/3/QUIC、0-RTT、Cronet、HttpEngine、`NetworkCallback`、validated/metered/bandwidth、satellite/constrained network 或 local network permission 时，必须拆开：
+
+1. `client_stack`: OkHttp、Cronet、HttpEngine、自研 socket 栈，不同栈的 DNS/TLS/QUIC/HTTP3 能力和事件命名不同。
+2. `platform_policy`: Android/API/targetSdk/Extension、权限、Network Security Config、证书/CT/ECH 配置、服务端支持。
+3. `network_state`: `NetworkCapabilities` 的 validated internet、metered、transport、bandwidth estimate 是网络状态，不是请求阶段耗时本身。
+4. `trace_scope`: packet trace 只能看到流量和活跃窗口；没有 app/config/log 证据时，不能把 ECH、CT、local-network permission 或 HTTP3/QUIC 配置写成确定根因。
+
+截至 2026-05-30 核对的官方边界：HttpEngine 是 Android 版本化网络 API，通常由 Cronet 提供实现；Android 16 local-network protection 是 opt-in，Android 17 targetSdk 37+ 才强制本地网络权限；Android 17 ECH 需要目标 SDK、网络库集成和服务端支持共同满足。目标设备版本、targetSdk、网络栈和服务端能力未知时，一律标为版本/配置缺失。
 
 **Phase 2 — 网络耗电/唤醒链路：**
 
