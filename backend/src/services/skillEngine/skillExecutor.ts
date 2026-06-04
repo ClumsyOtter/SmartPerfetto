@@ -1473,14 +1473,17 @@ export class SkillExecutor {
     const available: string[] = [];
     for (const module of modules) {
       try {
-        const includeResult = await this.traceProcessor.query(traceId, `INCLUDE PERFETTO MODULE ${module};`);
+        const includeResult = await this.traceProcessor.query(traceId, `INCLUDE PERFETTO MODULE ${module};`, {
+          priority: 'p2',
+          suppressErrorLog: true,
+        });
         if ((includeResult as any)?.error) {
-          console.warn(`[SkillExecutor] Module not available: ${module}`);
+          logger.debug('SkillExecutor', `Prerequisite module not available: ${module}`);
           continue;
         }
         available.push(module);
       } catch {
-        console.warn(`[SkillExecutor] Module not available: ${module}`);
+        logger.debug('SkillExecutor', `Prerequisite module not available: ${module}`);
       }
     }
     return available;

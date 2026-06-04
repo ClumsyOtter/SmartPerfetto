@@ -23,6 +23,7 @@ export type TraceProcessorQueryPriority = 'p0' | 'p1' | 'p2';
 export interface TraceProcessorQueryOptions {
   priority?: TraceProcessorQueryPriority;
   timeoutMs?: number;
+  suppressErrorLog?: boolean;
 }
 
 export interface TraceProcessorSqlWorkerOptions {

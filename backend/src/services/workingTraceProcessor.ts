@@ -782,8 +782,10 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         'TraceProcessor',
         `Query exceeded ${traceProcessorConfig.queryTimeoutMs}ms; aborting request for processor ${this.id}`,
       );
-    } else if (result.error) {
+    } else if (result.error && !options.suppressErrorLog) {
       logger.warn('TraceProcessor', `Query error: ${result.error}`);
+    } else if (result.error) {
+      logger.debug('TraceProcessor', `Suppressed query error: ${result.error}`);
     } else {
       logger.debug('TraceProcessor', `Query returned ${result.rows.length} rows in ${result.durationMs}ms`);
     }

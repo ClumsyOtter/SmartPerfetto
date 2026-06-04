@@ -172,6 +172,109 @@ steps:
       level: hidden
     optional: true
 
+  # ========== 可选证据源：RSS / Heap Graph / Bitmap / Native / LMK ==========
+  - id: memory_growth_summary
+    type: skill
+    name: "RSS/Swap 增长检测"
+    skill: memory_growth_detector
+    params:
+      package: "${package}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: memory_growth_summary
+    display:
+      level: summary
+      layer: overview
+      title: "RSS/Swap 增长趋势"
+    optional: true
+
+  - id: rss_swap_peaks
+    type: skill
+    name: "RSS/Swap 峰值"
+    skill: linux_process_rss_swap_timeline
+    params:
+      package: "${package}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: rss_swap_peaks
+    display:
+      level: summary
+      layer: overview
+      title: "进程 RSS/Swap 峰值"
+    optional: true
+
+  - id: heap_graph_summary
+    type: skill
+    name: "Heap Graph 总览"
+    skill: android_heap_graph_summary
+    params:
+      process_name: "${package}"
+      max_rows: 30
+    save_as: heap_graph_summary
+    display:
+      level: key
+      layer: list
+      title: "Heap Graph 总览"
+    optional: true
+
+  - id: heap_graph_leak_candidates
+    type: skill
+    name: "Heap Graph 泄漏候选"
+    skill: android_heap_graph_leak_candidates
+    params:
+      process_name: "${package}"
+      max_candidates: 20
+      max_reference_edges: 50
+    save_as: heap_graph_leak_candidates
+    display:
+      level: key
+      layer: list
+      title: "Heap Graph 泄漏候选"
+    optional: true
+
+  - id: bitmap_memory
+    type: skill
+    name: "Bitmap 内存"
+    skill: android_bitmap_memory_per_process
+    params:
+      package: "${package}"
+    save_as: bitmap_memory
+    display:
+      level: detail
+      layer: list
+      title: "Bitmap 内存"
+    optional: true
+
+  - id: native_heap_hotspots
+    type: skill
+    name: "全 Trace Native Heap 热点"
+    skill: native_heap_breakdown
+    params:
+      min_size_mb: 1
+      min_alloc_mb: 20
+      max_rows: 100
+    save_as: native_heap_hotspots
+    display:
+      level: detail
+      layer: list
+      title: "全 Trace Native Heap 保留/Churn 热点"
+    optional: true
+
+  - id: lmk_events
+    type: skill
+    name: "LMK 事件"
+    skill: lmk_kill_attribution
+    params:
+      process_name: "${package}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: lmk_events
+    display:
+      level: detail
+      layer: list
+      title: "LMK 事件"
+    optional: true
+
   # ========== GC 总体概览 ==========
   - id: gc_overview
     type: atomic

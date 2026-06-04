@@ -70,10 +70,26 @@ steps:
       ORDER BY bitmap_memory DESC
       LIMIT 30
 
+  - id: heap_bitmap_availability
+    type: atomic
+    name: "Heap Graph Bitmap 数据可用性"
+    display: false
+    sql: |
+      SELECT
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'heap_graph_bitmaps'
+          ) THEN 1
+          ELSE 0
+        END AS has_heap_graph_bitmaps
+    save_as: heap_bitmap_availability
+
   - id: heap_bitmap_metadata
     type: atomic
     name: "Heap Graph Bitmap 元数据"
     optional: true
+    condition: "heap_bitmap_availability.data[0]?.has_heap_graph_bitmaps == 1"
     display:
       level: detail
       layer: list
@@ -150,6 +166,7 @@ steps:
     type: atomic
     name: "跨进程 Bitmap 来源归因"
     optional: true
+    condition: "heap_bitmap_availability.data[0]?.has_heap_graph_bitmaps == 1"
     display:
       level: detail
       layer: list

@@ -75,7 +75,10 @@ steps:
         SELECT
           COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
           COALESCE(${start_ts}, 0) AS start_ts,
-          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM memory_rss_and_swap_per_process)) AS end_ts
+          COALESCE(${end_ts}, (
+            SELECT COALESCE(MAX(ts + CASE WHEN dur > 0 THEN dur ELSE 1 END), 0)
+            FROM memory_rss_and_swap_per_process
+          )) AS end_ts
       )
       SELECT
         process_name,

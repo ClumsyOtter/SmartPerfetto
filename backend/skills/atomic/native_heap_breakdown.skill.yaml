@@ -31,6 +31,14 @@ inputs:
     type: number
     required: false
     description: "最小累计未释放大小(MB)，默认 1"
+  - name: min_alloc_mb
+    type: number
+    required: false
+    description: "最小累计分配大小(MB)，默认 0；用于捕获已释放但分配量很高的 churn 热点"
+  - name: max_rows
+    type: number
+    required: false
+    description: "返回行数上限，默认 100"
 
 steps:
   - id: native_heap_hotspots
@@ -56,12 +64,24 @@ steps:
         - name: cumulative_alloc_mb
           label: "累计分配(MB)"
           type: number
+        - name: unreleased_to_alloc_pct
+          label: "未释放/累计分配(%)"
+          type: percentage
+        - name: churn_ratio
+          label: "Churn 倍数"
+          type: number
+        - name: native_signal
+          label: "Native 信号"
+          type: string
         - name: source_file
           label: "源码"
           type: string
     sql: |
       WITH input AS (
-        SELECT COALESCE(${min_size_mb}, 1) AS min_size_mb
+        SELECT
+          COALESCE(${min_size_mb|1}, 1) AS min_size_mb,
+          COALESCE(${min_alloc_mb|0}, 0) AS min_alloc_mb,
+          MIN(MAX(COALESCE(${max_rows|100}, 100), 1), 500) AS max_rows
       )
       SELECT
         name,
@@ -69,12 +89,36 @@ steps:
         ROUND(cumulative_size / 1024.0 / 1024.0, 2) AS cumulative_size_mb,
         ROUND(self_size / 1024.0 / 1024.0, 2) AS self_size_mb,
         ROUND(cumulative_alloc_size / 1024.0 / 1024.0, 2) AS cumulative_alloc_mb,
+        ROUND(100.0 * cumulative_size / NULLIF(cumulative_alloc_size, 0), 2) AS unreleased_to_alloc_pct,
+        ROUND(1.0 * cumulative_alloc_size / NULLIF(cumulative_size, 0), 2) AS churn_ratio,
+        CASE
+          WHEN cumulative_size >= input.min_size_mb * 1024.0 * 1024.0
+            AND cumulative_alloc_size >= cumulative_size * 5
+            THEN 'retention_with_churn'
+          WHEN cumulative_size >= input.min_size_mb * 1024.0 * 1024.0
+            THEN 'unreleased_native_retention'
+          WHEN input.min_alloc_mb > 0
+            AND cumulative_alloc_size >= input.min_alloc_mb * 1024.0 * 1024.0
+            THEN 'allocation_churn'
+          ELSE 'inspect_if_relevant'
+        END AS native_signal,
         source_file
       FROM android_heap_profile_summary_tree, input
       WHERE cumulative_size >= input.min_size_mb * 1024.0 * 1024.0
-      ORDER BY cumulative_size DESC
-      LIMIT 100
+        OR (
+          input.min_alloc_mb > 0
+          AND cumulative_alloc_size >= input.min_alloc_mb * 1024.0 * 1024.0
+        )
+      ORDER BY cumulative_size DESC, cumulative_alloc_size DESC
+      LIMIT (SELECT max_rows FROM input)
     save_as: native_heap_hotspots
 
 output:
   format: structured
+  fields:
+    - name: cumulative_size_mb
+      description: "heapprofd summary tree 中当前仍未释放的累计 native allocation；只能覆盖 profiler 启动后的 native malloc/free 族分配。"
+    - name: cumulative_alloc_mb
+      description: "heapprofd 观测窗口内累计分配量；高累计分配但低未释放通常代表 allocation churn，而不是已证明泄漏。"
+    - name: native_signal
+      description: "按未释放保留与累计分配 churn 粗分的诊断信号，需结合 RSS/Swap、heap graph 和采集窗口解释。"
