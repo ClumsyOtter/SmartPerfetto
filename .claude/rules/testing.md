@@ -133,22 +133,32 @@ npx tsx src/scripts/verifyAgentSseScrolling.ts \
   --keep-session
 ```
 
-OpenAI runtime startup final-report gate:
+Deepseek-backed OpenAI runtime startup final-report gate:
 
 ```bash
 cd backend
-npm run verify:e2e:openai-startup
+OPENAI_API_KEY=... npm run verify:e2e:deepseek-startup
 ```
+
+Agent SSE E2E runs that exercise the OpenAI runtime should use Deepseek by
+default, not GLM. The canonical scripts pin:
+
+- `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk`
+- `OPENAI_BASE_URL=https://api.deepseek.com/v1`
+- `OPENAI_AGENTS_PROTOCOL=chat_completions`
+- `OPENAI_MODEL=deepseek-v4-pro`
+- `OPENAI_LIGHT_MODEL=deepseek-v4-flash`
+- `OPENAI_MAX_OUTPUT_TOKENS=8192`
+
+Keep API keys out of committed files. Pass `OPENAI_API_KEY` through the shell
+environment or a local untracked env file only. `npm run verify:e2e:openai-startup`
+is a compatibility alias for the Deepseek startup gate.
 
 Scrolling:
 
 ```bash
 cd backend
-npx tsx src/scripts/verifyAgentSseScrolling.ts \
-  --trace ../test-traces/scroll-demo-customer-scroll.pftrace \
-  --query "分析滑动性能" \
-  --output test-output/e2e-scrolling.json \
-  --keep-session
+OPENAI_API_KEY=... npm run verify:e2e:deepseek-scrolling
 ```
 
 Flutter TextureView and SurfaceView must be verified separately because their
