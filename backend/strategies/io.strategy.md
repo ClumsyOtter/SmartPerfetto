@@ -93,7 +93,9 @@ plan_template:
 
 I/O 场景的第一原则：先分证据类型，再命名根因。`D-state`、`fsync`、`page fault`、block layer 延迟、主线程文件 I/O、SQLite/Room、SharedPreferences/QueuedWork、ContentProvider/MediaProvider 是不同证据路径。
 
-不要把单一 `D-state` 或 `fsync` 直接写成“SQLite 根因”。只有看到 SQLite/Room/SQLiteOpenHelper、connection wait、WAL/checkpoint、CursorWindow、Room migration/open、provider-side DB work、或相关 Java/native stack/slice/Binder evidence 时，才能命名为数据库或 Provider 根因。
+不要把单一 `D-state` 或 `fsync` 直接写成“SQLite 根因”。`D-state` 只是不可中断等待；只有 `io_wait=1` 或 IO/page-cache `blocked_function` 才能升级为 I/O 候选，最终仍需 SQLite/Room/SQLiteOpenHelper、connection wait、WAL/checkpoint、CursorWindow、Room migration/open、provider-side DB work、或相关 Java/native stack/slice/Binder evidence 才能命名为数据库或 Provider 根因。
+
+报告 `D-state`、`io_wait` 或 `blocked_function` 时，调用 `lookup_knowledge("thread-state-blocked-reason")` 解释 kernel wchan 单帧、证据强度和下一步补证。
 
 #### I/O 场景关键 Stdlib 表
 

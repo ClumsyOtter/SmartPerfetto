@@ -1519,25 +1519,43 @@ ORDER BY s.ts ASC;
     try {
       const utidFilter = mainThreadUtid > 0 ? `ts.utid = ${mainThreadUtid}` : '';
 
-      const blockingSql = `
-        SELECT
-          ts.state,
-          ts.blocked_function,
-          ts.dur / 1e6 as dur_ms,
-          (ts.ts - ${startupStart}) / 1e6 as relative_ts_ms,
-          CASE
-            WHEN ts.blocked_function GLOB '*binder*' THEN 'binder'
-            WHEN ts.blocked_function GLOB '*futex*' OR ts.blocked_function GLOB '*mutex*' THEN 'lock_contention'
-            WHEN ts.blocked_function GLOB '*epoll*' OR ts.blocked_function GLOB '*poll*' THEN 'io_wait'
-            WHEN ts.blocked_function GLOB '*sleep*' THEN 'sleep'
-            WHEN ts.blocked_function GLOB '*SurfaceFlinger*' OR ts.blocked_function GLOB '*dequeue*' THEN 'surfaceflinger'
-            WHEN ts.blocked_function GLOB '*GC*' OR ts.blocked_function GLOB '*art::gc*' THEN 'gc'
-            ELSE 'other'
-          END as block_type
+	      const blockingSql = `
+	        SELECT
+	          ts.state,
+	          ts.blocked_function,
+	          ts.io_wait,
+	          ts.dur / 1e6 as dur_ms,
+	          (ts.ts - ${startupStart}) / 1e6 as relative_ts_ms,
+	          CASE
+	            WHEN ts.blocked_function GLOB '*binder*' THEN 'binder'
+	            WHEN ts.blocked_function GLOB '*futex*' OR ts.blocked_function GLOB '*mutex*' THEN 'lock_contention'
+	            WHEN ts.state IN ('D', 'DK') AND COALESCE(ts.io_wait, 0) = 1 THEN 'io_wait'
+	            WHEN ts.state IN ('D', 'DK') AND (
+	              ts.blocked_function GLOB '*filemap*'
+	              OR ts.blocked_function GLOB '*page_fault*'
+	              OR ts.blocked_function GLOB '*wait_on_page*'
+	              OR ts.blocked_function GLOB '*folio_wait*'
+	              OR ts.blocked_function GLOB '*io_schedule*'
+	              OR ts.blocked_function GLOB '*submit_bio*'
+	              OR ts.blocked_function GLOB '*blk_*'
+	              OR ts.blocked_function GLOB '*ext4*'
+	              OR ts.blocked_function GLOB '*f2fs*'
+	              OR ts.blocked_function GLOB '*erofs*'
+	              OR ts.blocked_function GLOB '*ufshcd*'
+	              OR ts.blocked_function GLOB '*mmc_*'
+	              OR ts.blocked_function GLOB '*dm_*'
+	            ) THEN 'io_or_page_cache_candidate'
+	            WHEN ts.state IN ('D', 'DK') THEN 'uninterruptible_wait'
+	            WHEN ts.blocked_function GLOB '*epoll*' OR ts.blocked_function GLOB '*poll*' THEN 'poll_idle_or_ambiguous'
+	            WHEN ts.blocked_function GLOB '*sleep*' THEN 'sleep'
+	            WHEN ts.blocked_function GLOB '*SurfaceFlinger*' OR ts.blocked_function GLOB '*dequeue*' THEN 'surfaceflinger'
+	            WHEN ts.blocked_function GLOB '*GC*' OR ts.blocked_function GLOB '*art::gc*' THEN 'gc'
+	            ELSE 'other'
+	          END as block_type
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         JOIN process p ON t.upid = p.upid
-        WHERE ts.state IN ('S', 'D', 'I')
+	        WHERE ts.state IN ('S', 'D', 'DK', 'I')
           AND ts.dur > 1000000
           ${utidFilter ? `AND ${utidFilter}` : `AND t.name = 'main' AND p.name GLOB '${packageName}*'`}
           AND ts.ts >= ${startupStart} AND ts.ts <= ${startupEnd}

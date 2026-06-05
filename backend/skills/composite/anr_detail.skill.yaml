@@ -894,6 +894,7 @@ steps:
       main_states AS (
         SELECT
           ts.state,
+          COALESCE(ts.io_wait, 0) AS io_wait,
           LOWER(COALESCE(ts.blocked_function, '')) AS blocked_function,
           MIN(CASE WHEN ts.dur < 0 THEN aw.end_ts ELSE ts.ts + ts.dur END, aw.end_ts) - MAX(ts.ts, aw.start_ts) AS clipped_ns
         FROM thread_state ts
@@ -913,23 +914,42 @@ steps:
                    OR blocked_function GLOB '*monitor*' OR blocked_function GLOB '*rwsem*'
                    OR blocked_function GLOB '*rwlock*')), 0) AS lock_wait_ns,
           COALESCE((SELECT SUM(clipped_ns) FROM main_states
-            WHERE blocked_function GLOB '*io_schedule*'
-              OR blocked_function GLOB '*filemap_fault*'
-              OR blocked_function GLOB '*do_page_fault*'
-              OR blocked_function GLOB '*fsync*'
-              OR blocked_function GLOB '*blk*'
-              OR blocked_function GLOB '*ext4*'
-              OR blocked_function GLOB '*f2fs*'), 0) AS disk_wait_ns,
-          COALESCE((SELECT SUM(clipped_ns) FROM main_states
-            WHERE state = 'D'
-              AND NOT (
-                blocked_function GLOB '*io_schedule*'
-                OR blocked_function GLOB '*filemap_fault*'
+            WHERE state IN ('D', 'DK')
+              AND (
+                io_wait = 1
+                OR blocked_function GLOB '*io_schedule*'
+                OR blocked_function GLOB '*filemap*'
                 OR blocked_function GLOB '*do_page_fault*'
+                OR blocked_function GLOB '*wait_on_page*'
+                OR blocked_function GLOB '*folio_wait*'
                 OR blocked_function GLOB '*fsync*'
+                OR blocked_function GLOB '*submit_bio*'
                 OR blocked_function GLOB '*blk*'
                 OR blocked_function GLOB '*ext4*'
                 OR blocked_function GLOB '*f2fs*'
+                OR blocked_function GLOB '*erofs*'
+                OR blocked_function GLOB '*ufshcd*'
+                OR blocked_function GLOB '*mmc_*'
+                OR blocked_function GLOB '*dm_*'
+              )), 0) AS disk_wait_ns,
+          COALESCE((SELECT SUM(clipped_ns) FROM main_states
+            WHERE state IN ('D', 'DK')
+              AND NOT (
+                io_wait = 1
+                OR blocked_function GLOB '*io_schedule*'
+                OR blocked_function GLOB '*filemap*'
+                OR blocked_function GLOB '*do_page_fault*'
+                OR blocked_function GLOB '*wait_on_page*'
+                OR blocked_function GLOB '*folio_wait*'
+                OR blocked_function GLOB '*fsync*'
+                OR blocked_function GLOB '*submit_bio*'
+                OR blocked_function GLOB '*blk*'
+                OR blocked_function GLOB '*ext4*'
+                OR blocked_function GLOB '*f2fs*'
+                OR blocked_function GLOB '*erofs*'
+                OR blocked_function GLOB '*ufshcd*'
+                OR blocked_function GLOB '*mmc_*'
+                OR blocked_function GLOB '*dm_*'
               )), 0) AS uninterruptible_wait_ns,
           COALESCE((SELECT SUM(clipped_ns) FROM main_states
             WHERE state IN ('S', 'D', 'I')
@@ -961,7 +981,7 @@ steps:
           '需要 monitor_contention/owner thread/锁链证据；普通 futex wait 只能说明候选锁等待'
         FROM metrics WHERE lock_wait_ns > 0
         UNION ALL
-        SELECT 'disk_or_page_fault_io', disk_wait_ns, 'thread_state.io_blocked_function',
+        SELECT 'disk_or_page_fault_io', disk_wait_ns, 'thread_state.io_wait_or_blocked_function',
           CASE WHEN disk_wait_ns > 500000000 THEN 'high' ELSE 'medium' END,
           'needs_io_system_context',
           '需要 iowait、blk/mmc、文件/DB slice 或系统 IO 压力交叉验证'

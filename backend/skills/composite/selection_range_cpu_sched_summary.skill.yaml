@@ -109,7 +109,7 @@ steps:
           format: duration_ms
           unit: ms
         - name: q4a_io_blocked_ms
-          label: "Q4a IO 阻塞"
+          label: "Q4a 不可中断等待"
           type: duration
           format: duration_ms
           unit: ms

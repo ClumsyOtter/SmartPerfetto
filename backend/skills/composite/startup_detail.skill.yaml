@@ -415,7 +415,7 @@ steps:
           format: duration_ms
           unit: ms
         - name: q4a_io_blocked_ms
-          label: "Q4a IO阻塞(ms)"
+          label: "Q4a不可中断等待(ms)"
           type: duration
           format: duration_ms
           unit: ms
@@ -934,6 +934,13 @@ steps:
           label: "次数"
           type: number
           format: compact
+        - name: io_wait
+          label: "io_wait"
+          type: number
+          format: compact
+        - name: evidence_strength
+          label: "证据强度"
+          type: string
         - name: blocked_functions
           label: "阻塞函数"
           type: string
@@ -1157,11 +1164,11 @@ steps:
           - "CPU 资源争抢严重，检查后台线程负载"
           - "减少启动期间的并发线程数"
 
-      # Q4a IO 阻塞占比过高（D/DK 状态 = 磁盘/IO 等待）
-      - condition: "quadrant.data[0]?.q4a_pct > 15 && ((main_file_io.data[0]?.percent || 0) > 2 || (thread_states?.data?.find(r => r.state === 'D')?.percent || 0) > 5)"
+      # Q4a 不可中断等待占比过高；只有 io_wait 或 IO/page-cache blocked_function 才升级为 IO 候选
+      - condition: "quadrant.data[0]?.q4a_pct > 15 && ((main_file_io.data[0]?.percent || 0) > 2 || thread_states?.data?.find(r => (r.evidence_strength === 'direct_io_wait' || r.evidence_strength === 'inferred_io_or_page_cache') && ((r.percent || 0) > 5)))"
         severity: warning
-        diagnosis: "主线程 IO 阻塞(D 状态) 占比 ${quadrant.data[0].q4a_pct}%，存在磁盘/IO 等待瓶颈"
-        confidence: high
+        diagnosis: "主线程不可中断等待占比 ${quadrant.data[0].q4a_pct}%，并出现文件 I/O 或 io_wait/page-cache blocked_function 证据，属于 IO/page-cache 等待候选"
+        confidence: medium
         suggestions:
           - "将数据库/文件读写操作移至后台线程"
           - "使用异步 IO 或延迟加载策略"
@@ -1176,7 +1183,7 @@ steps:
           - "检查主线程同步 Binder 调用，改为异步"
           - "减少启动期间的锁竞争"
 
-      # 主线程文件 IO 偏高（需与 IO 阻塞相互印证）
+      # 主线程文件 IO 偏高（需与不可中断等待或 io_wait/blocked_function 证据相互印证）
       - condition: "(main_file_io.data[0]?.total_ms > 50 || main_file_io.data[0]?.percent > 5) && ((quadrant.data[0]?.q4a_pct || 0) > 10 || (quadrant.data[0]?.q4b_pct || 0) > 20)"
         severity: warning
         diagnosis: "主线程文件 IO '${main_file_io.data[0].io_slice}' 耗时 ${main_file_io.data[0].total_ms}ms（占比 ${main_file_io.data[0].percent}%）"
@@ -1239,11 +1246,11 @@ steps:
           - "检查主线程是否存在锁竞争（synchronized/ReentrantLock）"
           - "减少启动期间的线程同步操作"
 
-      # Q4a 占比高 + D 状态（IO 阻塞）明显
-      - condition: "(quadrant.data[0]?.q4a_pct || 0) > 10 && thread_states?.data?.find(r => r.state === 'D')?.percent > 5"
+      # Q4a 占比高 + D 状态，需要 io_wait 或 IO/page-cache blocked_function 才判为 IO 候选
+      - condition: "(quadrant.data[0]?.q4a_pct || 0) > 10 && thread_states?.data?.find(r => (r.evidence_strength === 'direct_io_wait' || r.evidence_strength === 'inferred_io_or_page_cache') && ((r.percent || 0) > 5))"
         severity: warning
-        diagnosis: "主线程 D(Disk Sleep) 状态占比 ${thread_states.data.find(r => r.state === 'D').percent}%（${thread_states.data.find(r => r.state === 'D').total_dur_ms}ms），存在 IO 阻塞"
-        confidence: high
+        diagnosis: "主线程 D/不可中断等待中出现 IO/page-cache 证据（${thread_states.data.find(r => r.evidence_strength === 'direct_io_wait' || r.evidence_strength === 'inferred_io_or_page_cache').total_dur_ms}ms），需要结合文件/DB slice 或 block I/O 进一步定因"
+        confidence: medium
         suggestions:
           - "将数据库/文件操作移至后台线程"
           - "使用异步 IO 或延迟加载"

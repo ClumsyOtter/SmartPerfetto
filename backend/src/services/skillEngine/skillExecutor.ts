@@ -2184,13 +2184,13 @@ export class SkillExecutor {
       {
         column: 'quadrant_json',
         key: '四象限分布',
-        title: '滑动区间四象限分布 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a IO阻塞/Q4b 休眠)',
+        title: '滑动区间四象限分布 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a不可中断等待/Q4b休眠)',
         transform: (items) => items.map((q: any) => ({
           线程: q.thread,
           'Q1 大核%': q.q1_big_pct + '%',
           'Q2 小核%': q.q2_little_pct + '%',
           'Q3 调度%': q.q3_runnable_pct + '%',
-          'Q4a IO%': q.q4a_io_pct + '%',
+          'Q4a 不可中断等待%': q.q4a_io_pct + '%',
           'Q4b 休眠%': q.q4b_sleep_pct + '%',
           '总时间': q.total_ms + 'ms',
         })),
@@ -2240,7 +2240,7 @@ export class SkillExecutor {
       if (row[f] != null) { mainData[f.replace('main_', '').replace('_pct', '%')] = row[f] + '%'; hasMainData = true; }
     }
     if (hasMainData) {
-      sections['主线程四象限'] = { title: '主线程四象限 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a IO阻塞/Q4b 锁等待)', data: [mainData] };
+      sections['主线程四象限'] = { title: '主线程四象限 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a不可中断等待/Q4b锁等待)', data: [mainData] };
     }
 
     // Section: RenderThread quadrant (scalar fields)
@@ -2251,7 +2251,7 @@ export class SkillExecutor {
       if (row[f] != null) { renderData[f.replace('render_', 'RT_').replace('_pct', '%')] = row[f] + '%'; hasRenderData = true; }
     }
     if (hasRenderData) {
-      sections['渲染线程四象限'] = { title: '渲染线程四象限 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a IO阻塞/Q4b 锁等待)', data: [renderData] };
+      sections['渲染线程四象限'] = { title: '渲染线程四象限 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a不可中断等待/Q4b锁等待)', data: [renderData] };
     }
 
     // Section: CPU frequency fallback (scalar, when cpu_freq_clusters_json is absent)

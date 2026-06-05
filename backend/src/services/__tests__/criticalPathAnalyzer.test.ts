@@ -223,7 +223,7 @@ describe('critical path analyzer', () => {
     expect(analysis.recommendations[0]).toContain('callstack');
   });
 
-  it('returns "no critical path stack" when stack query yields zero rows for a non-Running task', async () => {
+  it('returns no critical path chain when stack query yields zero rows for a non-Running task', async () => {
     const service = patternMockedService([
       {
         match: /FROM thread_state AS target\s+LEFT JOIN thread USING\(utid\)/i,
@@ -241,7 +241,7 @@ describe('critical path analyzer', () => {
     const analysis = await analyzeCriticalPath(service, 'trace-1', {threadStateId: 103});
 
     expect(analysis.available).toBe(false);
-    expect(analysis.anomalies[0].title).toBe('没有取到 critical path stack');
+    expect(analysis.anomalies[0].title).toBe('没有取到 critical path 等待链');
   });
 
   it('annotates IRQ-context waker as kind="irq" with no upstream chain', async () => {

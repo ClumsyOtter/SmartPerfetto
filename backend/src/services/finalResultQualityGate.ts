@@ -11,7 +11,8 @@ export type FinalResultQualityIssueCode =
   | 'process_narration_conclusion'
   | 'missing_final_report_heading'
   | 'sparse_unverified_conclusion'
-  | 'scene_contract_incomplete';
+  | 'scene_contract_incomplete'
+  | 'kernel_blocking_claim_boundary';
 
 export interface FinalResultQualityIssue {
   code: FinalResultQualityIssueCode;
@@ -278,6 +279,61 @@ function hasEvidenceBackedArtifacts(result: AgentRuntimeAnalysisResult): boolean
   );
 }
 
+function assessKernelBlockingClaimBoundary(conclusion: string): FinalResultQualityIssue | undefined {
+  const text = normalizeTextForQualityCheck(conclusion);
+  const lower = text.toLowerCase();
+
+  const mentionsUninterruptibleState = /(?:\bD-state\b|D\s*状态|D\/DK|不可中断睡眠|uninterruptible\s+sleep)/i.test(text);
+  const claimsDStateAsIoRootCause =
+    /(?:\bD-state\b|D\s*状态|D\/DK|不可中断睡眠|uninterruptible\s+sleep).{0,80}(?:io|i\/o|磁盘|存储|disk|storage).{0,80}(?:根因|证明|导致|阻塞|等待|瓶颈|卡顿|慢)/i.test(text) ||
+    /(?:io|i\/o|磁盘|存储|disk|storage).{0,80}(?:根因|证明|导致|阻塞|等待|瓶颈|卡顿|慢).{0,80}(?:\bD-state\b|D\s*状态|D\/DK|不可中断睡眠|uninterruptible\s+sleep)/i.test(text);
+	  const hasDStateIoEvidence =
+	    /io_wait\s*(?:=|为|是)?\s*1/i.test(text) ||
+	    /(?:filemap|io_schedule|wait_on_page|folio_wait|submit_bio|blk_|ext4|f2fs|erofs|ufshcd|mmc_|dm_|fsync)/i.test(text) ||
+	    /(?:sqlite|file\s*i\/?o|文件\s*i\/?o|数据库|sharedpreferences).{0,40}(?:slice|trace|stack|调用栈|证据|耗时|ms)/i.test(text);
+  const qualifiesDStateBoundary =
+    /(?:候选|不能|不可|不等于|无法|证据不足|ambiguous|candidate|not enough)/i.test(text);
+  if (mentionsUninterruptibleState && claimsDStateAsIoRootCause && !hasDStateIoEvidence && !qualifiesDStateBoundary) {
+    return {
+      code: 'kernel_blocking_claim_boundary',
+      message: `${FINAL_RESULT_QUALITY_GATE_MESSAGE} D/DK 只能说明不可中断等待；没有 io_wait=1、IO/page-cache blocked_function 或 app-level 文件/数据库证据时，不能直接写成磁盘 IO 根因。`,
+    };
+  }
+
+  const mentionsPollWait = /(?:epoll|poll|do_epoll_wait|ep_poll|__pollwait)/i.test(text);
+  const claimsPollAsIo =
+    /(?:io|i\/o|磁盘|存储|文件\s*i\/?o|io_wait|io wait|disk|storage).{0,50}(?:根因|导致|阻塞|等待|瓶颈|卡顿|慢)/i.test(text) ||
+    /(?:根因|导致|阻塞|等待|瓶颈|卡顿|慢).{0,50}(?:io|i\/o|磁盘|存储|文件\s*i\/?o|io_wait|io wait|disk|storage)/i.test(text);
+  const qualifiesPollBoundary =
+    /(?:不是|并非|不能|不可|不应|无法|ambiguous|idle|空闲|等待事件|poll_idle|可疑|候选|不等于).{0,70}(?:io|i\/o|磁盘|存储|disk|storage|root cause|根因)/i.test(text) ||
+    /(?:io|i\/o|磁盘|存储|disk|storage).{0,70}(?:证据不足|不能直接|不等于|候选|ambiguous|idle|空闲)/i.test(text);
+  if (mentionsPollWait && claimsPollAsIo && !qualifiesPollBoundary) {
+    return {
+      code: 'kernel_blocking_claim_boundary',
+      message: `${FINAL_RESULT_QUALITY_GATE_MESSAGE} epoll/poll 类 blocked_function 通常表示等待事件或空闲，不能直接写成 IO 根因；需要 io_wait=1、IO/page-cache 函数族或 app-level 文件/数据库证据补强。`,
+    };
+  }
+
+  const mentionsBlockedFunction =
+    lower.includes('blocked_function') ||
+    lower.includes('sched_blocked_reason') ||
+    /\bwchan\b/i.test(text);
+  const claimsBlockedFunctionAsFullStack =
+    /(?:blocked_function|sched_blocked_reason|wchan).{0,120}(?:完整|full).{0,40}(?:调用栈|内核栈|堆栈|call\s*stack|callstack|stack)/i.test(text) ||
+    /(?:完整|full).{0,40}(?:调用栈|内核栈|堆栈|call\s*stack|callstack|stack).{0,120}(?:blocked_function|sched_blocked_reason|wchan)/i.test(text);
+  const qualifiesSingleFrameBoundary =
+    /(?:不是|并非|不能|无法|not|single[- ]frame|单帧|wchan).{0,100}(?:完整|full|stack|调用栈|内核栈|堆栈|callstack)/i.test(text) ||
+    /(?:完整|full|stack|调用栈|内核栈|堆栈|callstack).{0,100}(?:不是|并非|不能|无法|not|single[- ]frame|单帧|wchan)/i.test(text);
+  if (mentionsBlockedFunction && claimsBlockedFunctionAsFullStack && !qualifiesSingleFrameBoundary) {
+    return {
+      code: 'kernel_blocking_claim_boundary',
+      message: `${FINAL_RESULT_QUALITY_GATE_MESSAGE} blocked_function 来自 sched_blocked_reason 的 kernel wchan 单帧，不是完整内核调用栈；完整 off-CPU 栈需要 linux.perf / sched_switch 事件采样。`,
+    };
+  }
+
+  return undefined;
+}
+
 export function assessFinalResultQuality(input: {
   result: AgentRuntimeAnalysisResult;
   query?: string;
@@ -331,6 +387,11 @@ export function assessFinalResultQuality(input: {
       code: 'sparse_unverified_conclusion',
       message: FINAL_RESULT_QUALITY_GATE_MESSAGE,
     };
+  }
+
+  if (looksLikeAnalysisQuery(query)) {
+    const kernelBlockingIssue = assessKernelBlockingClaimBoundary(conclusion);
+    if (kernelBlockingIssue) return kernelBlockingIssue;
   }
 
   if (looksLikeAnalysisQuery(query)) {

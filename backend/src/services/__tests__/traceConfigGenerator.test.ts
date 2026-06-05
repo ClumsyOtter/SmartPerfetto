@@ -16,8 +16,16 @@ describe('generateTraceConfig', () => {
     expect(sources).not.toContain('android.frametimeline');
     expect(sources).not.toContain('android.input');
     expect(sources).not.toContain('android.surfaceflinger.frame');
+    expect(c.fragments.find(f => f.dataSource === 'linux.ftrace')?.options?.sched_blocked_reason).toBe('true');
     expect(c.selfDescription?.intent).toBe('scrolling');
     expect(c.selfDescription?.cuj).toBe('scroll_feed');
+  });
+
+  it('emits sched_blocked_reason for startup blocked-function evidence', () => {
+    const c = generateTraceConfig({intent: 'startup'});
+    const ftrace = c.fragments.find(f => f.dataSource === 'linux.ftrace');
+    expect(ftrace?.options?.sched_switch).toBe('true');
+    expect(ftrace?.options?.sched_blocked_reason).toBe('true');
   });
 
   it('emits ftrace binder events + input for ANR (Codex round 4 regression)', () => {
@@ -27,6 +35,7 @@ describe('generateTraceConfig', () => {
     expect(sources).not.toContain('android.binder');
     const ftrace = c.fragments.find(f => f.dataSource === 'linux.ftrace');
     expect(ftrace?.options?.binder_transaction).toBe('true');
+    expect(ftrace?.options?.sched_blocked_reason).toBe('true');
     expect(sources).toContain('android.input.inputevent');
   });
 

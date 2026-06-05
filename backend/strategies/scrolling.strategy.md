@@ -134,7 +134,7 @@ plan_template:
 
 **Android 版本注意**：
 - FrameTimeline 数据需要 Android 12+ (API 31)
-- blocked_functions 需要内核 CONFIG_SCHEDSTATS=y（高通量产内核常关闭）
+- blocked_functions 需要 trace 包含 `sched/sched_blocked_reason`，并且设备 tracepoint / 符号化可用；缺失时不要只归因 CONFIG_SCHEDSTATS
 - monitor_contention 需要 Android 13+ (API 33)
 - input events 需要 Android 14+ (API 34)
 - Android 14+ token 不再严格连续递增，token_gap 检测可能需调整
@@ -247,7 +247,7 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | **多帧 `reason_code = gc_pressure_cascade`** | 查询 `android_garbage_collection_events` 全程分布 | GC 频率趋势？是否有内存泄漏迹象？哪种 GC 类型为主？ |
 | **多帧 `reason_code = render_thread_heavy`** | 对最严重帧调用 `invoke_skill("jank_frame_detail")` 查看 RT top slices | uploadBitmap？shader 初始化？syncFrameState？drawFrame 内部哪个阶段慢？ |
 | **多帧 `reason_code = gpu_fence_wait` 或 `shader_compile`** | 调用 `invoke_skill("gpu_analysis")`；若证据指向 BufferQueue/Fence，再补 `fence_wait_decomposition` / `present_fence_timing` / `vsync_config` | GPU 频率被限？shader 复杂度？GPU 负载过高？还是 acquire/present/release fence 或刷新率预算导致？ |
-| **多帧 `reason_code = binder_sync_blocking` / `binder_timeout` / `lock_binder_wait` / `blocking_io` / `main_thread_file_io`** | 对最严重帧调用 `invoke_skill("frame_blocking_calls", {process_name, start_ts, end_ts})` | 帧窗口里真正重叠的是 Binder、GC、锁竞争、futex 还是文件 IO？重叠多久？ |
+| **多帧 `reason_code = binder_sync_blocking` / `binder_timeout` / `lock_binder_wait` / `io_page_cache_wait` / `uninterruptible_wait` / `main_thread_file_io`** | 对最严重帧调用 `invoke_skill("frame_blocking_calls", {process_name, start_ts, end_ts})` | 帧窗口里真正重叠的是 Binder、GC、锁竞争、futex、文件 IO，还是仅有 D/DK 不可中断等待候选？重叠多久？ |
 | **多帧 `reason_code = input_handling_slow`** | 先读取 `input_events_json` / `input_slices_json`，再对最严重帧调用 `frame_blocking_calls` 或 `jank_frame_detail` | 是 `deliverInputEvent` / `dispatchTouchEvent` / `onTouchEvent` 本身慢，还是 input 回调里同步 Binder/IO/锁/RecyclerView inflate/bind？ |
 | **VRR 设备（VSync 周期 ≠ 16.67ms）** | 注意 1.5x VSync 阈值需基于实际 VSync 周期 | 如 120Hz = 8.33ms, 1.5x = 12.5ms |
 
@@ -288,7 +288,7 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | 条件 | 深钻动作 | 目标 |
 |------|---------|------|
 | **任何 reason_code + Q4>20%** | `invoke_skill("blocking_chain_analysis", {start_ts, end_ts, process_name})` | 阻塞链：谁阻塞了主线程？是锁？Binder？IO？唤醒者是谁？ |
-| **帧内 Binder/IO/futex/锁信号**（`reason_code` 为 `binder_sync_blocking` / `binder_timeout` / `lock_binder_wait` / `blocking_io` / `main_thread_file_io`，或 `top_slice_name` 包含 `Binder` / `SharedPreferences` / `sqlite` / `fsync` / `futex` / `monitor` / `Lock`） | `invoke_skill("frame_blocking_calls", {start_ts, end_ts, process_name})` | 将掉帧帧和阻塞调用做时间重叠，确认真实影响帧窗口的调用类型、重叠时长和频次 |
+| **帧内 Binder/IO/futex/锁信号**（`reason_code` 为 `binder_sync_blocking` / `binder_timeout` / `lock_binder_wait` / `io_page_cache_wait` / `uninterruptible_wait` / `main_thread_file_io`，或 `top_slice_name` 包含 `Binder` / `SharedPreferences` / `sqlite` / `fsync` / `futex` / `monitor` / `Lock`） | `invoke_skill("frame_blocking_calls", {start_ts, end_ts, process_name})` | 将掉帧帧和阻塞调用做时间重叠，确认真实影响帧窗口的调用类型、重叠时长和频次；`uninterruptible_wait` 需要 io_wait/blocked_function 或 app-level IO 证据才能升格为 IO |
 | **input_handling_slow** | 读取 `input_stage`、`input_slice_ms`、`input_handling_ms`、`input_events_json`；若 input slice 内有 Binder/IO/锁，再调用 `frame_blocking_calls` | 确认 input-bound 的直接机制：App input callback 慢、事件批处理过多、还是 input 内同步阻塞 |
 | **binder_overlap >5ms** | `invoke_skill("binder_root_cause", {start_ts, end_ts, process_name})` | 服务端还是客户端慢？具体原因（GC？锁？IO？内存回收？）|
 | **gc_overlap >3ms 或 gc_pressure_cascade** | 查询 `android_garbage_collection_events` WHERE gc_ts 在帧窗口内 | 哪种 GC？回收了多少？GC 运行耗时？是否有内存泄漏趋势？|

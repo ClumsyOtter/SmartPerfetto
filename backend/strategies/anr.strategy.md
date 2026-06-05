@@ -166,9 +166,9 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
 | S (Sleeping) | `do_epoll_wait` / `ep_poll` | **Looper 空闲/等待事件** | 正常空闲等待（非阻塞，排除性证据） |
 | S (Sleeping) | `pipe_wait` / `pipe_read` | **管道等待** | 等待子线程/进程通信 |
 | S (Sleeping) | `SyS_nanosleep` / `hrtimer_nanosleep` | **主动 sleep** | Thread.sleep() 在主线程 |
-| D (Uninterruptible sleep) | `io_schedule` / `blkdev_issue_flush` | **磁盘 IO** | 大文件读写、SQLite 操作 |
-| D (Uninterruptible sleep) | `SyS_fsync` / `do_fsync` | **fsync 刷盘** | SQLite WAL checkpoint、SharedPreferences commit |
-| D (Uninterruptible sleep) | `filemap_fault` / `do_page_fault` | **页缺失** | 内存映射文件首次访问 |
+| D (Uninterruptible sleep) + `io_wait=1` | `io_schedule` / `blkdev_issue_flush` | **IO wait 直接证据** | 大文件读写、SQLite 操作、存储队列等待 |
+| D (Uninterruptible sleep) | `SyS_fsync` / `do_fsync` | **fsync 候选** | SQLite WAL checkpoint、SharedPreferences commit；需结合 DB/SP/file slice |
+| D (Uninterruptible sleep) | `filemap_read` / `filemap_fault` / `do_page_fault` | **页缓存/页缺失候选** | 内存映射文件首次访问；需结合 page fault、block I/O 或内存压力 |
 | D (Uninterruptible sleep) | 无明确 IO/page-fault blocked_function | **不可中断等待候选** | 低置信系统/内核等待信号，必须继续找 slice、blocked_function 或 block IO 证据 |
 
 同时读取 `direct_blocker_candidates`（from `direct_blocker_classification`）：
@@ -215,6 +215,7 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
 - **内存压力** (`memory_pressure`)：ANR 窗口内有 LMK → 可能是 GC 压力或进程被回收重启
 - **不可中断等待基线** (`io_load`)：多进程 D-state 高只能说明系统/内核等待压力；只有结合 block IO、blocked_function 或文件/SQLite slice 证据，才能升级为系统级 IO 瓶颈
 - **锁等待** (`lock_waits`)：futex/mutex P95 偏高只作为包名级候选信号；最终定因必须结合逐 ANR `direct_blocker_candidates`、当前进程主线程 `lock_contention` 或锁链证据
+- **blocked_function 机制解释**：报告 D-state、`io_wait` 或 kernel blocked_function 时，调用 `lookup_knowledge("thread-state-blocked-reason")`；说明它是 kernel wchan 单帧，不是完整调用栈。
 
 **Phase 4 — 综合输出：**
 
@@ -252,7 +253,7 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
    - 区分系统侧 vs 应用侧建议
    - 系统冻屏：建议检查 system_server watchdog、thermal、内存压力
    - 应用锁等待：建议减少 synchronized 范围、使用异步 Binder
-   - 应用 IO 阻塞：建议将 IO 移到后台线程
+   - 应用 IO/page-cache 候选：先补齐 io_wait/blocked_function 与文件/数据库/Provider 证据，再建议将同步 IO 移到后台线程
    - CPU 饥饿：建议检查后台进程、调整线程优先级
 
 ⚠️ **禁止的做法：**

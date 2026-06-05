@@ -102,7 +102,7 @@ steps:
         - condition: "state === 'S' && pct > 50"
           template: "主线程 {{pct}}% 时间处于 Sleep 状态，可能在等待锁或 Binder"
         - condition: "state === 'D' && pct > 20"
-          template: "主线程 {{pct}}% 时间处于不可中断睡眠 (D)，可能存在 IO 阻塞"
+          template: "主线程 {{pct}}% 时间处于不可中断睡眠 (D)，需结合 io_wait/blocked_function 判断是否为 IO"
         - condition: "state === 'R' && pct > 80"
           template: "主线程 {{pct}}% 时间处于 Runnable/Running，CPU 争抢或繁忙"
     sql: |
@@ -153,7 +153,7 @@ steps:
           WHEN 'R' THEN 'Runnable (可运行)'
           WHEN 'R+' THEN 'Runnable (Preempted)'
           WHEN 'S' THEN 'Sleeping (睡眠/等待)'
-          WHEN 'D' THEN 'Uninterruptible Sleep (不可中断睡眠/IO)'
+          WHEN 'D' THEN 'Uninterruptible Sleep (不可中断睡眠)'
           WHEN 'T' THEN 'Stopped (已停止)'
           WHEN 'X' THEN 'Dead (已退出)'
           ELSE sd.state

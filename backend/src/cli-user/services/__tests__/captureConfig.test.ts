@@ -28,6 +28,7 @@ describe('capture config rendering', () => {
 
       expect(config).toContain(`SmartPerfetto capture preset: ${preset.id}`);
       expect(config).toContain('name: "linux.ftrace"');
+      expect(config).toContain('ftrace_events: "sched/sched_blocked_reason"');
       expect(config).toContain('duration_ms:');
       expect(config).toContain('atrace_apps: "com.example.app"');
     }

@@ -130,13 +130,13 @@ ORDER BY s.ts ASC
 | Running | CPU 上执行 | 越高越好 |
 | Runnable (R/R+) | 等待 CPU 调度 | <10% |
 | Sleeping (S) | 主动睡眠 | 越低越好 |
-| Disk Sleep (D) | 等待 IO | 应该 <5% |
+| Uninterruptible Sleep (D/DK) | 不可中断等待；IO 归因需 `io_wait=1` 或 IO/page-cache `blocked_function` | 应该 <5% |
 
 **理想分布**:
 - Running: >80%
 - Runnable: <10%
 - Sleeping: <10%
-- Disk Sleep: <5%
+- Uninterruptible Sleep: <5%，超过阈值时先查 `io_wait` / `blocked_function`
 
 **SQL 查询**:
 ```sql

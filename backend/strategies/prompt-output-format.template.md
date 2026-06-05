@@ -71,6 +71,7 @@
 | CPU 频率/调度 | `cpu-scheduler` | 在频率/小核发现后 |
 | 热节流 | `thermal-throttling` | 在 thermal 发现后 |
 | 锁竞争 | `lock-contention` | 在锁等待发现后 |
+| D-state / io_wait / blocked_function | `thread-state-blocked-reason` | 在 blocked_function、不可中断等待或 IO wait 相关发现后 |
 | 帧渲染管线 | `rendering-pipeline` | 首次解释帧延迟时 |
 
 背景知识必须**与当前 trace 数据关联**，不能是纯理论解释。格式：

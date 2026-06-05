@@ -218,18 +218,18 @@ function buildHypotheses(input: HypothesisInput): CriticalPathHypothesis[] {
     });
   }
 
-  // H3: D-state IO wait dominates — disk/storage path.
+  // H3: io_wait or IO/page-cache blocked_function candidate.
   const longIo = allIo.find((io) => io.durMs >= 4);
   if (longIo && task.upid !== null) {
     hypotheses.push({
       id: 'h-io-wait',
       statement:
-        `Task spends ≥ ${longIo.durMs} ms in D-state IO wait; verify by listing all D-state slices ` +
-        `with io_wait=1 in the task window for the owning process.`,
+        `Task spends >= ${longIo.durMs} ms in an io_wait or IO/page-cache blocked_function candidate; ` +
+        `blocked_function is a single-frame kernel wchan, so verify with D/DK slices plus file/page-fault/block-I/O evidence.`,
       strength: longIo.ioWait ? 'strong' : 'speculative',
       verificationSql:
-        `SELECT ts, dur, blocked_function, io_wait FROM thread_state ` +
-        `WHERE utid = ${task.utid} AND state = 'D' ` +
+        `SELECT ts, dur, state, blocked_function, io_wait FROM thread_state ` +
+        `WHERE utid = ${task.utid} AND state IN ('D', 'DK') ` +
         `AND ts <= ${task.endTs} AND ts + dur >= ${task.startTs} ` +
         `ORDER BY dur DESC LIMIT 10;`,
       notes: longIo.ioWait ? ['io_wait flag confirmed'] : ['inferred from blocked_function pattern'],

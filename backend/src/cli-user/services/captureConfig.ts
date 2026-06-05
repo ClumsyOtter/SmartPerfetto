@@ -34,6 +34,7 @@ const COMMON_DATA_SOURCES = [
 
 const COMMON_FTRACE_EVENTS = [
   'sched/sched_switch',
+  'sched/sched_blocked_reason',
   'sched/sched_waking',
   'sched/sched_wakeup',
   'sched/sched_wakeup_new',

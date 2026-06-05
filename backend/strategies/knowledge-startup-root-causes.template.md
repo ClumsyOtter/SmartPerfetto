@@ -50,16 +50,16 @@
 
 ### A2. 主线程磁盘 I/O
 
-**机制**：主线程执行 `read()/write()/fsync()` 等系统调用时进入 D 状态（Uninterruptible Sleep），等待磁盘完成操作。低内存时 page cache 不命中导致实际磁盘读取，延迟从微秒级飙升到毫秒级。
+**机制**：主线程执行 `read()/write()/fsync()` 等系统调用时可能进入 D 状态（Uninterruptible Sleep），等待 page-cache、文件系统或块设备路径完成。是否属于 I/O wait 要看 `io_wait=1` 或 IO/page-cache `blocked_function`；低内存时 page cache 不命中会把延迟从微秒级放大到毫秒级。
 
 **现象特征**：
-- 四象限 Q4 中 D 状态占比高
-- `blocked_function` 含 `io_schedule`、`do_page_fault`、`filemap_fault`、`ext4_*`、`f2fs_*`
+- 四象限 Q4 中 D 状态占比高，且 `io_wait=1` 或 `blocked_function` 命中 IO/page-cache 函数族
+- `blocked_function` 含 `io_schedule`、`do_page_fault`、`filemap_fault`、`filemap_read`、`wait_on_page_bit`、`ext4_*`、`f2fs_*`
 - `startup_main_thread_file_io_in_range` 结果中有大量文件操作
 
 **Perfetto 检测**：
-- Table: `thread_state` WHERE state='D'
-- blocked_function 模式: `do_page_fault`, `filemap_fault`, `io_schedule`, `wait_on_page_bit`, `ext4_*`, `f2fs_*`, `__blockdev_direct_IO`
+- Table: `thread_state` WHERE state IN ('D','DK') AND (`io_wait=1` OR IO/page-cache `blocked_function`)
+- blocked_function 模式: `do_page_fault`, `filemap_fault`, `filemap_read`, `io_schedule`, `wait_on_page_bit`, `folio_wait_bit`, `ext4_*`, `f2fs_*`, `__blockdev_direct_IO`
 - Counter: `mem.mm.maj_flt`(major page fault)
 
 **阈值**：
@@ -220,14 +220,14 @@
 **机制**：Room/SQLite 首次访问时创建数据库文件、执行 schema creation（CREATE TABLE + INDEX）、执行 pending migration。即使在后台线程，如果 `Application.onCreate` 中同步等待数据库就绪，仍会阻塞启动。
 
 **现象特征**：
-- D 状态 + blocked_function 含 `sqlite*`、`ext4_*`、`f2fs_*`
+- D/DK 状态 + `io_wait=1` 或 IO/page-cache `blocked_function`，并有 SQLite/Room/Provider/SharedPreferences 业务证据
 - bindApplication 阶段有文件系统操作
 - 可能伴随锁竞争（多线程竞争同一数据库连接）
 
 **Perfetto 检测**：
-- Thread state: D 状态，blocked_function 含 `do_page_fault`、`io_schedule`（数据库文件 IO）
+- Thread state: D/DK 状态，`io_wait=1` 或 blocked_function 含 `do_page_fault`、`filemap_read`、`io_schedule`（只能支持数据库文件 IO 候选）
 - Slice: 自定义 atrace（Room 不自动插桩）
-- 结合 A2(磁盘IO) 的 blocked_function 分析，关注 `SyS_fsync`/`do_fsync`（WAL checkpoint）
+- 结合 A2(磁盘IO) 的 blocked_function 分析，关注 `SyS_fsync`/`do_fsync`（WAL checkpoint 候选）；命名为数据库根因前必须补 SQLite/Room/Provider stack 或 slice
 
 **阈值**：
 | 指标 | Good | Warning | Critical |
@@ -413,7 +413,7 @@
 
 **现象特征**：
 - `BitmapFactory`、`ResourcesManager#getResources` slice 耗时长
-- Running 状态（CPU密集解码）或 D 状态（资源文件IO）
+- Running 状态（CPU 密集解码）或 D 状态（资源文件 IO/page-cache 候选，需结合 `io_wait` / blocked_function 判断）
 
 **Perfetto 检测**：
 - Slice: `BitmapFactory`, `ResourcesManager#getResources`, `decode*`
@@ -433,7 +433,7 @@
 
 **注意**：以下场景也归入 A15：
 - **大图首帧加载**（Bitmap decode 在首帧渲染路径中）：表现为 inflate 阶段的 BitmapFactory slice，但根因不是布局复杂度(A4)而是资源体积
-- **动态特性交付/Split APK 资源准备**（Dynamic Feature Delivery、split install 的资源/代码解包）：首次运行时的一次性成本，表现为 D 状态 + 文件系统操作，与 A5(DEX加载) 和 A2(磁盘IO) 交叉
+- **动态特性交付/Split APK 资源准备**（Dynamic Feature Delivery、split install 的资源/代码解包）：首次运行时的一次性成本，可能表现为 D 状态 + 文件系统操作候选；是否属于 IO wait 需结合 `io_wait` / blocked_function，与 A5(DEX 加载) 和 A2(磁盘 IO) 交叉
 
 ---
 
@@ -639,12 +639,12 @@
 **机制**：多因素叠加：① 存储硬件速度（eMMC vs UFS 差 5-10x）② 文件系统开销（ext4 vs f2fs，后者在 SQLite 上快 130-250%）③ dm-verity（每个读取块 hash 验证增加 CPU 开销）④ Metadata encryption 增加路径长度 ⑤ 多进程并发 IO 抢占带宽。
 
 **现象特征**：
-- D 状态高 + blocked_function 含 IO 系统相关
+- D/DK 状态高 + `io_wait=1` 或 blocked_function 含 IO/page-cache 系统相关
 - `io_schedule`、`blk_queue_bio`、`submit_bio_wait` 模式
-- B3(内存压力) 排除后仍有高 D 状态
+- B3(内存压力) 解释或排除后仍有高 D/DK + IO/page-cache 证据
 
 **Perfetto 检测**：
-- Thread state: D + blocked_function 含 `io_schedule`, `blk_*`, `ext4_*`, `f2fs_*`, `dm_*`
+- Thread state: D/DK + `io_wait=1` 或 blocked_function 含 `io_schedule`, `blk_*`, `ext4_*`, `f2fs_*`, `dm_*`
 
 **阈值**：
 | 指标 | Good | Warning | Critical |
@@ -914,16 +914,18 @@ GROUP BY p.name ORDER BY cpu_ms DESC LIMIT 10
 
 ### D2. blocked_function → 根因速查
 
+`blocked_function` 是 `sched/sched_blocked_reason` 提供的 kernel wchan 单帧，不是完整栈。解释 D-state、`io_wait` 或下列函数族时，优先调用 `lookup_knowledge("thread-state-blocked-reason")` 获取证据强度和下一步补证规则。
+
 | blocked_function 模式 | 根因类别 | 说明 |
 |----------------------|---------|------|
 | `futex_wait*` | A7(锁)/A9(SP) | Java synchronized / ReentrantLock / SP awaitLoadedLocked |
 | `__mutex_lock*`, `pthread_mutex_lock*` | A7(锁) | Native mutex |
 | `binder_wait_for_work`, `binder_thread_read` | B6(Binder) | Binder IPC 等待 |
-| `do_page_fault`, `filemap_fault` | A2(IO)/A5(DEX)/A14(.so)/B3(内存压力) | Page fault → 文件读取 |
-| `io_schedule` | A2(IO)/A8(数据库)/B5(IO竞争) | I/O 调度等待 |
+| `do_page_fault`, `filemap_fault`, `filemap_read` | A2(IO)/A5(DEX)/A14(.so)/B3(内存压力) | Page fault / page-cache read → 可能等待文件页 |
+| `io_schedule` | A2(IO)/A8(数据库)/B5(IO竞争) | I/O 调度等待候选；命名为数据库/Provider 根因需业务证据 |
 | `wait_on_page_bit` | A2(IO)/B3(内存压力) | 等待 page 读取完成 |
-| `ext4_*`, `f2fs_*` | A2(IO)/A8(数据库) | 文件系统操作 |
-| `SyS_fsync`, `do_fsync` | A8(数据库)/A9(SP) | fsync 刷盘 |
+| `ext4_*`, `f2fs_*` | A2(IO)/A8(数据库) | 文件系统操作候选 |
+| `SyS_fsync`, `do_fsync` | A8(数据库)/A9(SP) | fsync 刷盘候选，需 SQLite/SP/Provider 证据补强 |
 | `hrtimer_nanosleep`, `clock_nanosleep` | A17(显式sleep) | Thread.sleep() |
 | `epoll_wait` | 通常非问题 | Looper 空闲等待事件 |
 | `art::gc::*`, `SuspendAll` | A6(GC) | GC 暂停 |

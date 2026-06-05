@@ -251,7 +251,7 @@ function classifyModulesFromText(texts: string[]): string[] {
 
   add('Binder / IPC', /\bbinder\b|hwbinder|ipc(threadstate|transaction)|transact/);
   add('锁 / Futex', /futex|mutex|monitor|lock|rwsem|sem_wait|condition/);
-  add('IO / 文件系统', /io_wait|i\/o|fsync|read|write|ext4|f2fs|block|mmc|ufs|sqlite|wal|journal/);
+  add('IO / 页缓存 / 文件系统候选', /io_wait|i\/o|fsync|filemap|page_fault|wait_on_page|read|write|ext4|f2fs|erofs|block|blk_|mmc|ufs|sqlite|wal|journal/);
   add('调度 / CPU 竞争', /runnable|preempt|__schedule|schedule_timeout|cpu:\s*\d+|sched/);
   add('图形渲染 / Surface', /renderthread|surfaceflinger|blast|bufferqueue|queuebuffer|dequeuebuffer|doframe|drawframe|traversal|hwui|skia|egl|vulkan|opengl/);
   add('输入链路', /inputdispatcher|inputreader|motionevent|touch|gesture/);
@@ -512,14 +512,14 @@ function buildAnomalies(
   }
 
   const ioSegment = segments.find(
-    (segment) => segment.ioWait || segment.modules.includes('IO / 文件系统')
+    (segment) => segment.ioWait || segment.modules.includes('IO / 页缓存 / 文件系统候选')
   );
   if (ioSegment) {
     anomalies.push({
       severity: 'warning',
-      title: '等待链涉及 IO 或文件系统',
+      title: '等待链涉及 IO/page-cache 候选',
       detail:
-        'critical path 中出现 IO wait、文件系统或存储相关信号，需要确认是否有同步读写、fsync、SQLite/WAL 或 block 层等待。',
+        'critical path 中出现 io_wait 或 kernel blocked_function 的 IO/page-cache 函数族；blocked_function 是单帧 wchan，需要结合同步读写、fsync、SQLite/WAL、page fault 或 block 层证据确认。',
       evidence: [ioSegment.blockedFunction, ...ioSegment.slices, `${ioSegment.durationMs.toFixed(2)} ms`].filter(
         (item): item is string => typeof item === 'string' && item.length > 0
       ),
@@ -574,7 +574,7 @@ function buildAnomalies(
       severity: 'info',
       title: '未发现明显异常',
       detail:
-        '从 critical path stack 看，没有出现长外部等待、IO wait、Binder 长等待或明显 CPU 竞争信号。',
+        '从 critical path 结果看，没有出现长外部等待、IO wait、Binder 长等待或明显 CPU 竞争信号。',
       evidence: [`选中 task=${totalMs.toFixed(2)} ms`, `外部 critical path=${blockingMs.toFixed(2)} ms`],
     });
   }
@@ -665,10 +665,10 @@ function buildEmptyAnalysis(
   const anomalies = [
     {
       severity: 'info' as const,
-      title: isRunning ? 'Running 状态：无等待链可分析' : '没有取到 critical path stack',
+      title: isRunning ? 'Running 状态：无等待链可分析' : '没有取到 critical path 等待链',
       detail: isRunning
         ? '选中 task 的 thread_state 是 Running —— 没有等待链可分析。建议查 callstack samples、slice 树或同时段 CPU 占用。'
-        : 'Perfetto 没有返回 selected task 范围内的 critical path stack。常见原因是 trace 缺少 sched_wakeup / thread_state 数据，或选中区间没有可追踪的等待链。',
+        : 'Perfetto 没有返回 selected task 范围内的 critical path 等待链。常见原因是 trace 缺少 sched_wakeup / thread_state 数据，或选中区间没有可追踪的等待链。',
       evidence: [`task=${task.durationMs.toFixed(2)} ms`, `utid=${task.utid}`],
     },
   ];
@@ -1077,7 +1077,7 @@ export async function analyzeCriticalPath(
     maxSegments * 20
   );
   if (stack.truncated) {
-    warnings.push(`critical path stack 结果较大，已按前 ${maxSegments} 个链路段截断展示。`);
+    warnings.push(`critical path 结果较大，已按前 ${maxSegments} 个链路段截断展示。`);
   }
 
   const segments = mergeAdjacentSegments(buildSegments(stack.rows, task)).slice(0, maxSegments);

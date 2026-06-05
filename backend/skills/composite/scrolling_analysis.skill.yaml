@@ -1948,7 +1948,7 @@ steps:
           format: percentage
           hidden: true
         - name: main_q4a_pct
-          label: "Q4a IO阻塞%"
+          label: "Q4a 不可中断等待%"
           type: percentage
           format: percentage
           hidden: true
@@ -1973,7 +1973,7 @@ steps:
           format: percentage
           hidden: true
         - name: render_q4a_pct
-          label: "RT Q4a IO阻塞%"
+          label: "RT Q4a 不可中断等待%"
           type: percentage
           format: percentage
           hidden: true
@@ -3065,9 +3065,9 @@ steps:
             -- P8: 主线程文件 IO — SharedPreferences/SQLite/fsync 等具体 IO slice
             WHEN file_io_overlap_ms > 1.0
               THEN 'main_thread_file_io'
-            -- P8.5: IO 阻塞（D/DK 状态，无具体 IO slice 匹配）
+            -- P8.5: 不可中断等待（D/DK 状态；IO 归因需 io_wait/blocked_function）
             WHEN main_q4a_pct > 20
-              THEN 'blocking_io'
+              THEN 'uninterruptible_wait'
             -- P9: Binder 超时 — 帧窗口内 Binder 累计 >500ms
             WHEN binder_overlap_ms > 500
               THEN 'binder_timeout'
@@ -3117,7 +3117,7 @@ steps:
           WHEN reason_code = 'freq_ramp_slow' THEN '升频慢: ' || ramp_to_high_ms || 'ms 才达高频'
           WHEN reason_code = 'scheduling_delay' THEN '调度等待: Q3=' || main_q3_pct || '%'
           WHEN reason_code = 'cpu_saturation' THEN 'CPU全核饱和: 主线程 Q3=' || main_q3_pct || '%, RT Q3=' || render_q3_pct || '%（双线程同时调度等待）'
-          WHEN reason_code = 'blocking_io' THEN 'IO阻塞: Q4a(D/DK)=' || main_q4a_pct || '%'
+          WHEN reason_code = 'uninterruptible_wait' THEN '不可中断等待: Q4a(D/DK)=' || main_q4a_pct || '%；IO 归因需 io_wait/blocked_function'
           WHEN reason_code = 'main_thread_file_io' THEN '主线程文件IO: 帧内 IO overlap ' || file_io_overlap_ms || 'ms (SharedPreferences/SQLite/fsync)'
           WHEN reason_code = 'lock_binder_wait' THEN '锁/Binder等待: Q4b(S/I)=' || main_q4b_pct || '%'
           WHEN reason_code = 'binder_timeout' THEN 'Binder超时: 帧内 Binder 累计 ' || binder_overlap_ms || 'ms (>500ms)'

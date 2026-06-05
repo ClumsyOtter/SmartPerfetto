@@ -5515,8 +5515,8 @@ export class HTMLReportGenerator {
     if (/线程状态|thread-state|state distribution/.test(identity) || (has('state') && has('state_dur_ms'))) {
       return localize(
         outputLanguage,
-        '拆分热点 slice 的 Running/S/D/R 状态，用来区分 CPU 计算、主动等待、IO 等待和调度等待。',
-        'Breaks hot slices into Running/S/D/R states to distinguish CPU work, voluntary wait, IO wait, and scheduling wait.',
+        '拆分热点 slice 的 Running/S/D/R 状态，用来区分 CPU 计算、可中断等待、不可中断等待候选和调度等待；是否为 IO 需结合 io_wait/blocked_function。',
+        'Breaks hot slices into Running/S/D/R states to distinguish CPU work, interruptible wait, uninterruptible-wait candidates, and scheduling wait; IO attribution requires io_wait/blocked_function evidence.',
       );
     }
     if (/主线程耗时操作|main_thread_slices/.test(identity)) {
@@ -5557,8 +5557,8 @@ export class HTMLReportGenerator {
     if (/启动期间主线程状态|main_thread_state_during_startup/.test(identity)) {
       return localize(
         outputLanguage,
-        '汇总启动窗口主线程 Running、Sleep、D、Runnable 占比，用来区分 CPU 忙、主动等待、IO 等待和调度等待。',
-        'Summarizes main-thread Running, Sleep, D, and Runnable time to separate CPU work, voluntary wait, IO wait, and scheduling wait.',
+        '汇总启动窗口主线程 Running、Sleep、D、Runnable 占比，用来区分 CPU 忙、可中断等待、不可中断等待候选和调度等待；是否为 IO 需结合 io_wait/blocked_function。',
+        'Summarizes main-thread Running, Sleep, D, and Runnable time to separate CPU work, interruptible wait, uninterruptible-wait candidates, and scheduling wait; IO attribution requires io_wait/blocked_function evidence.',
       );
     }
     if (/启动期间类加载|class_loading/.test(identity)) {
@@ -5627,8 +5627,8 @@ export class HTMLReportGenerator {
     if (/四大象限|quadrant_analysis/.test(identity)) {
       return localize(
         outputLanguage,
-        '把主线程耗时拆成大核运行、小核运行、Runnable、IO 阻塞和 Sleep，用来定位根因所属象限。',
-        'Breaks main-thread time into big-core running, little-core running, Runnable, IO blocked, and Sleep to locate the root-cause quadrant.',
+        '把主线程耗时拆成大核运行、小核运行、Runnable、不可中断等待和 Sleep，用来定位根因所属象限；IO 归因需结合 io_wait/blocked_function。',
+        'Breaks main-thread time into big-core running, little-core running, Runnable, uninterruptible wait, and Sleep to locate the root-cause quadrant; IO attribution requires io_wait/blocked_function evidence.',
       );
     }
     if (/主线程摆核时序|cpu_placement_timeline/.test(identity)) {

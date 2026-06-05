@@ -257,7 +257,7 @@ steps:
                OR s.name GLOB '*art::Monitor*')
           AND s.ts >= si.ts AND s.ts < si.ts + si.dur
       ),
-      -- Check: Main thread IO (D state)
+      -- Check: Main thread D/DK with direct io_wait or IO/page-cache blocked_function evidence.
       io_check AS (
         SELECT
           ROUND(COALESCE(SUM(
@@ -267,6 +267,23 @@ steps:
         FROM thread_state ts
         JOIN main_thread mt ON ts.utid = mt.utid
         WHERE ts.state IN ('D', 'DK')
+          AND (
+            COALESCE(ts.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%sync%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+          )
           AND ts.ts < (SELECT ts + dur FROM startup_info)
           AND ts.ts + ts.dur > (SELECT ts FROM startup_info)
       ),
@@ -339,11 +356,11 @@ steps:
       FROM lock_check WHERE lock_count > 0
 
       UNION ALL
-      SELECT 'SR05', '主线程 IO 阻塞',
+      SELECT 'SR05', '主线程 IO/page-cache 等待候选',
         CASE WHEN main_thread_d_state_ms > 100 THEN 'critical'
              WHEN main_thread_d_state_ms > 30 THEN 'warning' ELSE 'info' END,
-        '主线程 D(Disk Sleep) 状态 ' || main_thread_d_state_ms || ' ms',
-        '将文件/数据库操作移至后台线程'
+        '主线程 D/DK 且 io_wait 或 IO/page-cache blocked_function ' || main_thread_d_state_ms || ' ms',
+        '结合文件/数据库/SharedPreferences/Provider slice 或 stack 证据确认业务根因后再优化'
       FROM io_check WHERE main_thread_d_state_ms > 5
 
       UNION ALL
@@ -675,14 +692,14 @@ steps:
           AND p2.pid > 1000  -- 排除系统低 PID 进程
       ) WHERE other_start_count > 1
 
-      -- SR20: 数据库 IO (根因 A8)
-      -- 检测 fsync 相关 D 状态（SQLite WAL checkpoint / SP commit）
+      -- SR20: fsync/数据库 IO 候选 (根因 A8)
+      -- fsync 只能证明同步刷盘候选；SQLite/Room/SP/Provider 根因还需要业务层证据。
       UNION ALL
-      SELECT 'SR20', '主线程 fsync/数据库 IO 阻塞',
+      SELECT 'SR20', '主线程 fsync/数据库 IO 候选',
         CASE WHEN fsync_ms > 50 THEN 'critical'
              WHEN fsync_ms > 10 THEN 'warning' ELSE 'info' END,
-        '主线程 fsync 相关 D 状态 ' || fsync_ms || ' ms (' || fsync_count || ' 次)',
-        '数据库初始化必须异步; 检查 Room migration 或 SP commit 是否在主线程'
+        '主线程 fsync 相关 D/DK 候选 ' || fsync_ms || ' ms (' || fsync_count || ' 次)',
+        '补查 SQLite/Room、SharedPreferences/QueuedWork 或 Provider stack/slice，再判断是否需要异步化'
       FROM (
         SELECT
           COUNT(*) as fsync_count,

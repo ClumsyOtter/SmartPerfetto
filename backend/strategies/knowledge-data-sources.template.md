@@ -85,7 +85,7 @@ data_sources {
 - atrace category: `ss` — System Server（`system_server` 侧开销）
 - atrace category: `binder_driver` — Binder 调用延迟
 - ftrace event: `sched/sched_switch` — 启动期间线程调度
-- ftrace event: `sched/sched_blocked_reason` — 阻塞函数诊断（需内核 CONFIG_SCHEDSTATS）
+- ftrace event: `sched/sched_blocked_reason` — `thread_state.io_wait` 与 kernel single-frame `blocked_function` 诊断
 - ftrace event: `filemap/mm_filemap_add_to_page_cache` — Page Cache miss 检测
 
 ### Perfetto 配置片段
@@ -282,7 +282,7 @@ data_sources {
 - ftrace event: `sched/sched_wakeup` — 线程唤醒
 
 **增强源:**
-- ftrace event: `sched/sched_blocked_reason` — 阻塞原因（需 CONFIG_SCHEDSTATS）
+- ftrace event: `sched/sched_blocked_reason` — `thread_state.io_wait` 与 kernel single-frame `blocked_function` 诊断
 - ftrace event: `power/cpu_frequency` — CPU 频率变化
 - ftrace event: `power/cpu_idle` — CPU idle 状态
 
@@ -309,7 +309,8 @@ data_sources {
 ### 常见缺失原因
 - 这些是最基础的 ftrace 事件，大多数 Perfetto 配置默认包含
 - 如果 `sched_slice` 为空，可能是 Trace 文件格式不兼容或 trace_processor 解析失败
-- `sched_blocked_reason` 需要内核编译开启 CONFIG_SCHEDSTATS（非所有设备支持）
+- `sched_blocked_reason` 需要 trace config 显式采集该 ftrace event，且设备暴露该 tracepoint / kernel symbolization 可用；如果仍缺失，报告为 blocked_function 数据不可用，不要只归因 CONFIG_SCHEDSTATS
+- 如果需要阻塞瞬间的完整 kernel/userspace off-CPU stack，另配 `linux.perf` 基于 `sched_switch` / `sched_waking` 的事件采样，并过滤目标线程，避免全系统 every-switch 采样过载
 
 ---
 

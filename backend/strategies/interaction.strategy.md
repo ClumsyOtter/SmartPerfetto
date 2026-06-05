@@ -173,9 +173,11 @@ invoke_skill("click_response_detail", {
 | S (Sleeping) | `futex_wait_queue` / `futex_wait` | 锁等待（synchronized/ReentrantLock） |
 | S (Sleeping) | `binder_wait_for_work` / `binder_ioctl` | 同步 Binder 阻塞 |
 | S (Sleeping) | `SyS_nanosleep` / `hrtimer_nanosleep` | 主动 sleep() 调用 |
-| D (Disk Sleep) | `io_schedule` / `blkdev_issue_flush` | 磁盘 IO 阻塞 |
-| D (Disk Sleep) | `SyS_fsync` / `do_fsync` | fsync 刷盘（SQLite/SharedPreferences） |
-| D (Disk Sleep) | `filemap_fault` / `do_page_fault` | 页缺失 |
+| D (Uninterruptible sleep) + `io_wait=1` | `io_schedule` / `blkdev_issue_flush` | IO wait 直接证据 |
+| D (Uninterruptible sleep) | `SyS_fsync` / `do_fsync` | fsync 候选（SQLite/SharedPreferences 需 slice 补证） |
+| D (Uninterruptible sleep) | `filemap_read` / `filemap_fault` / `do_page_fault` | 页缓存/页缺失候选 |
+
+遇到 D-state、`io_wait` 或 blocked_function 时调用 `lookup_knowledge("thread-state-blocked-reason")`，说明 blocked_function 是 kernel wchan 单帧而不是完整调用栈。
 
 ### 第四步：多手势类型识别（次要 — 仅在用户明确提及时分析）
 

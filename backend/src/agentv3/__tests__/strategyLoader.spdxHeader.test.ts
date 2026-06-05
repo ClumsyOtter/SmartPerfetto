@@ -307,6 +307,7 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(outputFormat).toContain('证据来源、置信度与版本边界');
     expect(outputFormat).toContain('trace_direct');
     expect(outputFormat).toContain('missing_evidence');
+    expect(outputFormat).toContain('thread-state-blocked-reason');
 
     const methodology = loadPromptTemplate('prompt-methodology');
     expect(methodology).toContain('lookup_knowledge("evidence-provenance")');
@@ -328,6 +329,11 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(observabilityKnowledge).toContain('ProfilingManager');
     expect(observabilityKnowledge).toContain('Play Vitals');
     expect(observabilityKnowledge).toContain('App Performance Score');
+
+    const blockedReasonKnowledge = loadPromptTemplate('knowledge-thread-state-blocked-reason');
+    expect(blockedReasonKnowledge).toContain('sched/sched_blocked_reason');
+    expect(blockedReasonKnowledge).toContain('single frame');
+    expect(blockedReasonKnowledge).toContain('filemap_read');
   });
 
   it('keeps the quick prompt wired for machine-parseable claim provenance', () => {

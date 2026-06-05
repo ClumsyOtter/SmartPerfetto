@@ -6,13 +6,13 @@
 # IO Pressure Analysis v3.0 (System Analysis Skill)
 # =============================================================================
 # 核心原则：
-# 1. L0 数据检测 → 确认 IO 阻塞数据可用
+# 1. L0 数据检测 → 确认 IO/page-cache 候选数据可用
 # 2. L1 概览 → IO Wait 总量、影响线程数、严重度
 # 3. L2 详情 → 进程/线程/函数分布、时间线
 # 4. L3 诊断 → SQL 根因分类
 #
 # 核心表：
-# - thread_state: 线程状态，blocked_function 包含 IO 相关阻塞信息
+# - thread_state: 线程状态，io_wait 或 blocked_function 支持 IO/page-cache 候选识别
 # - sched_slice: 调度信息
 #
 # 分析维度：
@@ -103,7 +103,23 @@ steps:
       SELECT
         CASE WHEN EXISTS (
           SELECT 1 FROM thread_state ts
-          WHERE ts.state IN ('D', 'DK', 'x')
+          WHERE ts.state IN ('D', 'DK')
+            AND (
+              COALESCE(ts.io_wait, 0) = 1
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+            )
             AND ts.dur > ${min_duration_ms|1} * 1e6
             AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
             AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
@@ -111,7 +127,23 @@ steps:
         ) THEN 1 ELSE 0 END as has_data,
         CASE WHEN EXISTS (
           SELECT 1 FROM thread_state ts
-          WHERE ts.state IN ('D', 'DK', 'x')
+          WHERE ts.state IN ('D', 'DK')
+            AND (
+              COALESCE(ts.io_wait, 0) = 1
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+              OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+            )
             AND ts.dur > ${long_io_threshold_ms|10} * 1e6
             AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
             AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
@@ -121,7 +153,7 @@ steps:
           SELECT 1 FROM thread_state ts
           WHERE ts.blocked_function IS NOT NULL
             AND ts.blocked_function != ''
-            AND ts.state IN ('D', 'DK', 'x')
+            AND ts.state IN ('D', 'DK')
             AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
             AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
           LIMIT 1
@@ -195,9 +227,25 @@ steps:
     sql: |
       WITH io_wait_states AS (
         SELECT
-          ts.utid, ts.ts, ts.dur, ts.state, ts.blocked_function
+          ts.utid, ts.ts, ts.dur, ts.state, ts.blocked_function, ts.io_wait
         FROM thread_state ts
-        WHERE ts.state IN ('D', 'DK', 'x')
+        WHERE ts.state IN ('D', 'DK')
+          AND (
+            COALESCE(ts.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+          )
           AND ts.dur > ${min_duration_ms|1} * 1e6
           AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
           AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
@@ -276,7 +324,23 @@ steps:
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         JOIN process p ON t.upid = p.upid
-        WHERE ts.state IN ('D', 'DK', 'x')
+        WHERE ts.state IN ('D', 'DK')
+          AND (
+            COALESCE(ts.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+          )
           AND ts.dur > ${min_duration_ms|1} * 1e6
           AND ('${package}' = '' OR p.name GLOB '${package}*')
           AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
@@ -318,12 +382,10 @@ steps:
       insights:
         - condition: "blocked_function.includes('f2fs') || blocked_function.includes('ext4')"
           template: "文件系统阻塞: {{blocked_function}} 累计 {{total_block_ms}}ms"
-        - condition: "blocked_function.includes('binder')"
-          template: "Binder IPC 阻塞: {{blocked_function}} 累计 {{total_block_ms}}ms"
     display:
       level: detail
       layer: list
-      title: "IO 阻塞函数排行"
+      title: "IO/page-cache 候选函数排行"
       columns:
         - name: blocked_function
           label: "阻塞函数"
@@ -358,14 +420,29 @@ steps:
         ROUND(MAX(dur) / 1e6, 2) as max_block_ms,
         CASE
           WHEN blocked_function LIKE '%f2fs%' OR blocked_function LIKE '%ext4%' THEN 'filesystem'
-          WHEN blocked_function LIKE '%binder%' THEN 'binder_ipc'
           WHEN blocked_function LIKE '%read%' OR blocked_function LIKE '%write%' THEN 'read_write'
           WHEN blocked_function LIKE '%sync%' OR blocked_function LIKE '%fsync%' THEN 'sync'
           WHEN blocked_function LIKE '%io%' OR blocked_function LIKE '%blk%' THEN 'block_io'
           ELSE 'other'
         END as category
       FROM thread_state
-      WHERE state IN ('D', 'DK', 'x')
+      WHERE state IN ('D', 'DK')
+        AND (
+          COALESCE(io_wait, 0) = 1
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%filemap%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%page_fault%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%wait_on_page%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%folio_wait%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%io_schedule%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%submit_bio%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%blk_%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%ext4%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%f2fs%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%erofs%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%ufshcd%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%mmc_%'
+          OR LOWER(COALESCE(blocked_function, '')) LIKE '%dm_%'
+        )
         AND dur > ${min_duration_ms|1} * 1e6
         AND blocked_function IS NOT NULL
         AND blocked_function != ''
@@ -423,7 +500,23 @@ steps:
       FROM thread_state ts
       JOIN thread t ON ts.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE ts.state IN ('D', 'DK', 'x')
+      WHERE ts.state IN ('D', 'DK')
+        AND (
+          COALESCE(ts.io_wait, 0) = 1
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+        )
         AND ts.dur > ${min_duration_ms|1} * 1e6
         AND ('${package}' = '' OR p.name GLOB '${package}*')
         AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
@@ -444,7 +537,7 @@ steps:
     display:
       level: detail
       layer: deep
-      title: "长时间 IO 阻塞事件"
+      title: "长时间 IO/page-cache 候选事件"
       columns:
         - name: ts
           label: "时间戳"
@@ -475,7 +568,23 @@ steps:
       FROM thread_state ts
       JOIN thread t ON ts.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE ts.state IN ('D', 'DK', 'x')
+      WHERE ts.state IN ('D', 'DK')
+        AND (
+          COALESCE(ts.io_wait, 0) = 1
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+        )
         AND ts.dur > ${long_io_threshold_ms|10} * 1e6
         AND ('${package}' = '' OR p.name GLOB '${package}*')
         AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
@@ -540,9 +649,26 @@ steps:
       WITH io_wait_states AS (
         SELECT
           ts.utid, ts.ts, ts.dur, ts.state,
-          ts.blocked_function
+          ts.blocked_function,
+          ts.io_wait
         FROM thread_state ts
-        WHERE ts.state IN ('D', 'DK', 'x')
+        WHERE ts.state IN ('D', 'DK')
+          AND (
+            COALESCE(ts.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+          )
           AND ts.dur > ${min_duration_ms|1} * 1e6
           AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
           AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
@@ -551,7 +677,6 @@ steps:
         SELECT
           CASE
             WHEN blocked_function LIKE '%f2fs%' OR blocked_function LIKE '%ext4%' THEN 'filesystem'
-            WHEN blocked_function LIKE '%binder%' THEN 'binder_ipc'
             WHEN blocked_function LIKE '%read%' OR blocked_function LIKE '%write%' THEN 'read_write'
             WHEN blocked_function LIKE '%sync%' OR blocked_function LIKE '%fsync%' THEN 'sync'
             WHEN blocked_function LIKE '%blk%' OR blocked_function LIKE '%mmc%' OR blocked_function LIKE '%ufs%' THEN 'block_device'
@@ -585,7 +710,6 @@ steps:
         END as severity,
         CASE
           WHEN (SELECT category FROM dominant) = 'filesystem' THEN 'IO_FS_BOUND'
-          WHEN (SELECT category FROM dominant) = 'binder_ipc' THEN 'IO_BINDER_BOUND'
           WHEN (SELECT category FROM dominant) = 'sync' THEN 'IO_SYNC_BOUND'
           WHEN (SELECT category FROM dominant) = 'block_device' THEN 'IO_DEVICE_BOUND'
           WHEN (SELECT category FROM dominant) = 'read_write' THEN 'IO_RW_BOUND'
@@ -594,8 +718,6 @@ steps:
         CASE
           WHEN (SELECT category FROM dominant) = 'filesystem'
             THEN '文件系统操作是主要 IO 瓶颈 (' || (SELECT pct FROM dominant) || '%)，建议优化文件读写或使用异步 IO'
-          WHEN (SELECT category FROM dominant) = 'binder_ipc'
-            THEN 'Binder IPC 是主要阻塞源 (' || (SELECT pct FROM dominant) || '%)，检查跨进程调用频率'
           WHEN (SELECT category FROM dominant) = 'sync'
             THEN '同步操作是主要瓶颈 (' || (SELECT pct FROM dominant) || '%)，考虑减少 fsync/sync 调用'
           WHEN (SELECT category FROM dominant) = 'block_device'
@@ -641,13 +763,6 @@ steps:
         suggestions:
           - "减少 fsync 调用频率"
           - "使用 write-back 缓存策略"
-
-      - condition: "(root_cause?.data?.[0]?.root_cause_type) === 'IO_BINDER_BOUND'"
-        severity: warning
-        diagnosis: "Binder IPC 是主要 IO 阻塞源 (${root_cause.data[0].primary_pct}%)"
-        suggestions:
-          - "减少跨进程 IO 操作"
-          - "考虑使用共享内存或本地缓存"
 
       - condition: "(io_overview?.data?.[0]?.severity) === 'normal' || (io_overview?.data?.[0]?.severity) === 'info'"
         severity: info

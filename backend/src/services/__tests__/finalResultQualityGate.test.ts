@@ -1421,6 +1421,162 @@ describe('final result quality gate', () => {
     expect(issue?.message).toContain('置信度与补证');
   });
 
+  it('flags reports that treat epoll or poll blocked_function as IO root cause', () => {
+    const misleadingPollReport = [
+      '# I/O 分析报告',
+      '',
+      '## 综合结论',
+      '',
+      'blocked_function=epoll_wait 命中 120ms，说明主线程在磁盘 IO 阻塞，所以这是 IO 根因。',
+      '',
+      '## I/O 证据类型',
+      '',
+      '- epoll_wait 120ms 与卡顿窗口重叠。',
+      '',
+      '## 文件/数据库/Provider 边界',
+      '',
+      '- 后续优化数据库。',
+      '',
+      '## 置信度与补证',
+      '',
+      '- 置信度高。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: misleadingPollReport,
+        findings: [{
+          severity: 'warning',
+          title: 'poll wait',
+          description: 'main thread epoll_wait 120ms',
+          evidence: ['blocked_function=epoll_wait dur=120ms'],
+        } as any],
+      }),
+      query: '分析 IO 为什么导致卡顿',
+      sceneType: 'io',
+    });
+
+    expect(issue?.code).toBe('kernel_blocking_claim_boundary');
+    expect(issue?.message).toContain('epoll/poll');
+  });
+
+  it('flags reports that turn D-state-only evidence into disk IO root cause', () => {
+    const misleadingDStateReport = [
+      '# I/O 分析报告',
+      '',
+      '## 综合结论',
+      '',
+      '主线程 D-state 占比 35%，证明磁盘 IO 是本次卡顿根因。',
+      '',
+      '## I/O 证据类型',
+      '',
+      '- D-state 35%。',
+      '',
+      '## 文件/数据库/Provider 边界',
+      '',
+      '- 需要优化所有数据库访问。',
+      '',
+      '## 置信度与补证',
+      '',
+      '- 置信度高。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: misleadingDStateReport,
+        findings: [{
+          severity: 'warning',
+          title: 'D-state high',
+          description: 'main thread D-state 35%',
+          evidence: ['state=D pct=35'],
+        } as any],
+      }),
+      query: '分析主线程 D-state 为什么导致卡顿',
+      sceneType: 'io',
+    });
+
+	  expect(issue?.code).toBe('kernel_blocking_claim_boundary');
+	  expect(issue?.message).toContain('不可中断等待');
+	});
+
+	it('flags non-IO blocked_function evidence when D-state is claimed as disk IO root cause', () => {
+	  const misleadingBlockedFunctionReport = [
+	    '# I/O 分析报告',
+	    '',
+	    '## 综合结论',
+	    '',
+	    '主线程 D-state 命中 blocked_function=futex_wait_queue，证明磁盘 IO 是本次卡顿根因。',
+	    '',
+	    '## I/O 证据类型',
+	    '',
+	    '- state=D blocked_function=futex_wait_queue dur=120ms。',
+	    '',
+	    '## 文件/数据库/Provider 边界',
+	    '',
+	    '- 当前没有应用侧补强信息或 Provider 补证。',
+	    '',
+	    '## 置信度与补证',
+	    '',
+	    '- 置信度高。',
+	  ].join('\n');
+
+	  const issue = assessFinalResultQuality({
+	    result: result({
+	      conclusion: misleadingBlockedFunctionReport,
+	      findings: [{
+	        severity: 'warning',
+	        title: 'D-state high',
+	        description: 'main thread D-state blocked_function=futex_wait_queue',
+	        evidence: ['state=D blocked_function=futex_wait_queue dur=120ms'],
+	      } as any],
+	    }),
+	    query: '分析主线程 D-state 为什么导致卡顿',
+	    sceneType: 'io',
+	  });
+
+	  expect(issue?.code).toBe('kernel_blocking_claim_boundary');
+	  expect(issue?.message).toContain('IO/page-cache blocked_function');
+	});
+
+	it('flags reports that describe blocked_function as a full kernel call stack', () => {
+	  const misleadingBlockedFunctionReport = [
+      '# I/O 分析报告',
+      '',
+      '## 综合结论',
+      '',
+      'blocked_function 是完整内核调用栈，filemap_read -> io_schedule 证明这是完整 off-CPU 调用路径。',
+      '',
+      '## I/O 证据类型',
+      '',
+      '- blocked_function=filemap_read+0x508。',
+      '',
+      '## 文件/数据库/Provider 边界',
+      '',
+      '- 文件读候选，业务路径未确认。',
+      '',
+      '## 置信度与补证',
+      '',
+      '- 需要补采样。',
+    ].join('\n');
+
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: misleadingBlockedFunctionReport,
+        findings: [{
+          severity: 'warning',
+          title: 'filemap_read wait',
+          description: 'main thread blocked_function=filemap_read',
+          evidence: ['blocked_function=filemap_read+0x508 dur=120ms'],
+        } as any],
+      }),
+      query: '分析 blocked_function filemap_read 为什么导致卡顿',
+      sceneType: 'io',
+    });
+
+    expect(issue?.code).toBe('kernel_blocking_claim_boundary');
+    expect(issue?.message).toContain('单帧');
+  });
+
   it('accepts io reports that separate evidence class, API boundary, and missing proof', () => {
     const richIoReport = [
       '# I/O 分析报告',

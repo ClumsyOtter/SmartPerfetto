@@ -63,14 +63,14 @@ const FOUNDATION_FRAGMENTS: PerfettoConfigFragment[] = [
 // rely on the trace_processor stdlib to surface android_binder_txns.
 
 const SCROLLING_FRAGMENTS: PerfettoConfigFragment[] = [
-  {dataSource: 'linux.ftrace', reason: 'sched_switch / sched_waking for thread state', options: {sched_switch: 'true', sched_waking: 'true'}},
+  {dataSource: 'linux.ftrace', reason: 'sched_switch / sched_waking / blocked_reason for thread state', options: {sched_switch: 'true', sched_waking: 'true', sched_blocked_reason: 'true'}},
   {dataSource: 'android.surfaceflinger.frametimeline', reason: 'frame jank ground truth (Spark #16)'},
   {dataSource: 'android.surfaceflinger.layers', reason: 'layer composition timing'},
   {dataSource: 'android.input.inputevent', reason: 'input dispatch correlation for scroll start latency'},
 ];
 
 const STARTUP_FRAGMENTS: PerfettoConfigFragment[] = [
-  {dataSource: 'linux.ftrace', reason: 'sched + binder ftrace events for startup phase boundaries', options: {sched_switch: 'true', task_rename: 'true', binder_transaction: 'true'}},
+  {dataSource: 'linux.ftrace', reason: 'sched + blocked_reason + binder ftrace events for startup phase boundaries', options: {sched_switch: 'true', sched_blocked_reason: 'true', task_rename: 'true', binder_transaction: 'true'}},
   {dataSource: 'android.surfaceflinger.frametimeline', reason: 'first-frame latency'},
   {dataSource: 'linux.process_stats', reason: 'process create / app launch attribution'},
 ];

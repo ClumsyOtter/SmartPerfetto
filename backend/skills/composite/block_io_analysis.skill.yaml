@@ -329,14 +329,14 @@ steps:
     optional: true
     condition: data_check.data[0]?.has_data === 1
 
-  # ========== L2 IO 阻塞线程分析 ==========
+  # ========== L2 IO / page-cache 候选线程分析 ==========
   - id: io_thread_blocking
     type: atomic
-    name: "IO 阻塞线程分析"
+    name: "IO/page-cache 候选线程分析"
     display:
       level: detail
       layer: list
-      title: "因 IO 阻塞的线程（D 状态）"
+      title: "IO/page-cache 等待候选线程"
       columns:
         - name: thread_name
           label: "线程"
@@ -346,6 +346,12 @@ steps:
           type: string
         - name: blocked_function
           label: "阻塞函数"
+          type: string
+        - name: io_wait
+          label: "io_wait"
+          type: boolean
+        - name: evidence_strength
+          label: "证据强度"
           type: string
         - name: block_count
           label: "阻塞次数"
@@ -366,26 +372,38 @@ steps:
         t.name AS thread_name,
         p.name AS process_name,
         ts.blocked_function,
+        ts.io_wait,
+        CASE
+          WHEN COALESCE(ts.io_wait, 0) = 1 THEN 'direct_io_wait'
+          ELSE 'inferred_io_or_page_cache'
+        END AS evidence_strength,
         COUNT(*) AS block_count,
         ROUND(SUM(ts.dur) / 1e6, 2) AS total_blocked_ms,
         ROUND(AVG(ts.dur) / 1e6, 2) AS avg_blocked_ms
       FROM thread_state ts
       JOIN thread t ON ts.utid = t.utid
       LEFT JOIN process p ON t.upid = p.upid
-      WHERE ts.state = 'D'
+      WHERE ts.state IN ('D', 'DK')
         AND (
-          ts.blocked_function LIKE '%io%'
-          OR ts.blocked_function LIKE '%read%'
-          OR ts.blocked_function LIKE '%write%'
-          OR ts.blocked_function LIKE '%sync%'
-          OR ts.blocked_function LIKE '%block%'
-          OR ts.blocked_function LIKE '%blk%'
-          OR ts.blocked_function LIKE '%ext4%'
-          OR ts.blocked_function LIKE '%f2fs%'
+          COALESCE(ts.io_wait, 0) = 1
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%sync%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+          OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
         )
         AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
         AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
-      GROUP BY t.name, p.name, ts.blocked_function
+      GROUP BY t.name, p.name, ts.blocked_function, ts.io_wait
       HAVING total_blocked_ms > 10
       ORDER BY total_blocked_ms DESC
       LIMIT 30
@@ -459,16 +477,23 @@ steps:
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         LEFT JOIN process p ON t.upid = p.upid
-        WHERE ts.state = 'D'
+        WHERE ts.state IN ('D', 'DK')
           AND (
-            ts.blocked_function LIKE '%io%'
-            OR ts.blocked_function LIKE '%read%'
-            OR ts.blocked_function LIKE '%write%'
-            OR ts.blocked_function LIKE '%sync%'
-            OR ts.blocked_function LIKE '%block%'
-            OR ts.blocked_function LIKE '%blk%'
-            OR ts.blocked_function LIKE '%ext4%'
-            OR ts.blocked_function LIKE '%f2fs%'
+            COALESCE(ts.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%sync%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
           )
           AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
           AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
@@ -501,12 +526,12 @@ steps:
 
         UNION ALL
 
-        -- IO_MAIN_THREAD_BLOCK: 主线程 D 状态
+        -- IO_MAIN_THREAD_BLOCK: 主线程 D/DK 且有 io_wait 或 IO/page-cache blocked_function
         SELECT
           'IO_MAIN_THREAD_BLOCK' AS category,
           'critical' AS severity,
-          '主线程被 IO 阻塞，影响 UI 响应' AS description,
-          '主线程 IO 阻塞总时间 ' || CAST(ROUND(b.main_thread_blocked_ms, 1) AS TEXT) || 'ms' AS evidence
+          '主线程出现 IO/page-cache 等待候选，影响 UI 响应' AS description,
+          '主线程 IO/page-cache 等待候选总时间 ' || CAST(ROUND(b.main_thread_blocked_ms, 1) AS TEXT) || 'ms' AS evidence
         FROM blocking_stats b
         WHERE b.main_thread_blocked_ms > 50
 

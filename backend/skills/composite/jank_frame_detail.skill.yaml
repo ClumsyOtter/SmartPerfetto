@@ -246,7 +246,7 @@ steps:
             WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'unknown') IN ('prime', 'big') THEN 'Q1_大核运行'
             WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'unknown') IN ('medium', 'little') THEN 'Q2_小核运行'
             WHEN ts.state = 'R' THEN 'Q3_等待调度'
-            WHEN ts.state IN ('D', 'DK') THEN 'Q4a_IO阻塞'
+            WHEN ts.state IN ('D', 'DK') THEN 'Q4a_不可中断等待'
             WHEN ts.state IN ('S', 'I') THEN 'Q4b_休眠等待'
             ELSE 'Other'
           END as quadrant_name
@@ -703,14 +703,14 @@ steps:
     optional: true
     condition: "gc_availability?.data?.[0]?.has_gc_table === 1"
 
-  # ===== IO 阻塞分析（D/DK 状态）=====
+  # ===== IO / page-cache 等待候选分析（D/DK + io_wait/blocked_function）=====
   - id: io_blocking
     type: atomic
-    name: "IO 阻塞分析"
+    name: "IO/page-cache 等待候选分析"
     display:
       level: detail
       layer: deep
-      title: "IO 阻塞"
+      title: "IO/page-cache 等待候选"
       columns:
         - name: thread_name
           label: "线程"
@@ -726,6 +726,12 @@ steps:
           label: "最大单次"
           type: duration
           format: duration_ms
+        - name: io_wait
+          label: "io_wait"
+          type: boolean
+        - name: evidence_strength
+          label: "证据强度"
+          type: string
         - name: io_cause
           label: "等待原因"
           type: string
@@ -749,6 +755,23 @@ steps:
         WHERE ts.ts >= ${start_ts}
           AND ts.ts < ${end_ts}
           AND ts.state IN ('D', 'DK')
+          AND (
+            COALESCE(ts.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%sync%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+          )
           AND ts.dur > 100000
       )
       SELECT
@@ -756,6 +779,11 @@ steps:
         COUNT(*) as blocked_count,
         ROUND(SUM(dur) / 1e6, 2) as total_ms,
         ROUND(MAX(dur) / 1e6, 2) as max_ms,
+        MAX(io_wait) as io_wait,
+        CASE
+          WHEN MAX(io_wait) = 1 THEN 'direct_io_wait'
+          ELSE 'inferred_io_or_page_cache'
+        END as evidence_strength,
         COALESCE(
           MAX(blocked_function),
           CASE WHEN MAX(io_wait) = 1 THEN 'IO wait' ELSE 'kernel wait' END
@@ -1116,7 +1144,7 @@ steps:
         FROM big_freq_window b
         CROSS JOIN big_freq_stats s
       ),
-      -- 6. IO 阻塞检测（主线程 D/DK 状态）
+      -- 6. IO/page-cache 候选检测（主线程 D/DK + io_wait/blocked_function）
       io_block AS (
         SELECT COALESCE(ROUND(SUM(ts2.dur) / 1e6, 2), 0) as io_block_ms
         FROM thread_state ts2
@@ -1124,6 +1152,23 @@ steps:
         WHERE tt2.thread_type = 'MainThread'
           AND ts2.ts >= ${start_ts} AND ts2.ts < ${end_ts}
           AND ts2.state IN ('D', 'DK')
+          AND (
+            COALESCE(ts2.io_wait, 0) = 1
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%folio_wait%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%sync%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%erofs%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts2.blocked_function, '')) LIKE '%dm_%'
+          )
       ),
       -- 7. 调度延迟检测（Runnable 等待）
       sched_latency AS (
@@ -1415,8 +1460,10 @@ steps:
               THEN 'big_core_low_freq'
             WHEN big_load_pct > 90 OR (big_load_pct > 70 AND little_load_pct > 70)
               THEN 'cpu_load_high'
-            WHEN io_block_ms > io_block_critical_ms OR main_q4a > 20
-              THEN 'blocking_io'
+            WHEN io_block_ms > io_block_critical_ms
+              THEN 'io_page_cache_wait'
+            WHEN main_q4a > 20
+              THEN 'uninterruptible_wait'
             WHEN main_q4b > 30
               THEN 'lock_binder_wait'
             ELSE 'unknown'
@@ -1438,15 +1485,15 @@ steps:
             -- 优先级4: 主线程大量等待调度 (Q3 > 20%)
             WHEN main_q3 > 20 THEN
               '主线程 CPU 争抢严重 (' || main_q3 || '% 时间在等待调度)'
-            -- 优先级5: 主线程 IO 阻塞（相对帧预算）
+            -- 优先级5: 主线程 IO/page-cache 等待候选（相对帧预算）
             WHEN io_block_ms > io_block_critical_ms THEN
-              '主线程 IO 阻塞 ' || ROUND(io_block_ms, 1) || 'ms (D 状态)'
+              '主线程 IO/page-cache 等待候选 ' || ROUND(io_block_ms, 1) || 'ms (D/DK + io_wait/blocked_function)'
             -- 优先级6: 总调度延迟（相对帧预算）
             WHEN total_sched_ms > total_sched_critical_ms THEN
               '主线程 Runnable 累计等待 ' || ROUND(total_sched_ms, 1) || 'ms'
-            -- 优先级7a: 主线程 IO 阻塞 (Q4a > 20%)
+            -- 优先级7a: 主线程不可中断等待 (Q4a > 20%)
             WHEN main_q4a > 20 THEN
-              '主线程 IO 阻塞 (D/DK 状态)，占比 ' || main_q4a || '%'
+              '主线程不可中断等待 (D/DK 状态)，占比 ' || main_q4a || '%；IO 归因需 io_wait/blocked_function'
             -- 优先级7b: 主线程锁/Binder等待 (Q4b > 30%)
             WHEN main_q4b > 30 THEN
               '主线程锁/Binder 等待 (S/I 状态)，占比 ' || main_q4b || '%'
@@ -1511,8 +1558,10 @@ steps:
             WHEN reason_code = 'cpu_load_high' THEN
               'CPU 负载高：大核负载 ' || COALESCE(big_load_pct, 0) ||
               '%，小核负载 ' || COALESCE(little_load_pct, 0) || '%'
-            WHEN reason_code = 'blocking_io' THEN
-              'IO 阻塞：主线程不可中断睡眠(D/DK) ' || COALESCE(io_block_ms, 0) || 'ms，Q4a 占比 ' || COALESCE(main_q4a, 0) || '%'
+            WHEN reason_code = 'io_page_cache_wait' THEN
+              'IO/page-cache 等待候选：主线程 D/DK 且有 io_wait/blocked_function ' || COALESCE(io_block_ms, 0) || 'ms，Q4a 占比 ' || COALESCE(main_q4a, 0) || '%'
+            WHEN reason_code = 'uninterruptible_wait' THEN
+              '不可中断等待：主线程 Q4a(D/DK) 占比 ' || COALESCE(main_q4a, 0) || '%；IO 归因需 io_wait/blocked_function'
             WHEN reason_code = 'lock_binder_wait' THEN
               '锁/Binder 等待：主线程可中断睡眠(S/I)，Q4b 占比 ' || COALESCE(main_q4b, 0) || '%'
             WHEN reason_code = 'shader_compile' THEN
@@ -1537,7 +1586,8 @@ steps:
                 ELSE '优化方向：把关键帧内重逻辑拆分到后台并做结果复用，缩短主线程单次执行时长'
               END
             WHEN reason_code = 'cpu_load_high' THEN '优化方向：降低 CPU 总负载并限制后台并发，优先保障 UI 与 RenderThread 预算'
-            WHEN reason_code = 'blocking_io' THEN '优化方向：排查主线程 IO 操作（文件读写/页缺失/磁盘同步），移至后台线程或使用异步 IO'
+            WHEN reason_code = 'io_page_cache_wait' THEN '优化方向：补齐文件/数据库/Provider 证据；确认后将同步 IO 移至后台线程或使用异步 IO'
+            WHEN reason_code = 'uninterruptible_wait' THEN '优化方向：先查 io_wait、blocked_function、page fault 和文件/数据库 slice，确认是否为 IO 后再定向优化'
             WHEN reason_code = 'lock_binder_wait' THEN '优化方向：减少主线程同步等待（Binder/锁/futex），缩短临界区和同步链路'
             WHEN reason_code = 'shader_compile' THEN '优化方向：使用 PrecompiledShaders / Shader Warm-up 在启动时预编译着色器，避免滑动时动态编译'
             WHEN reason_code = 'gpu_wait' THEN '优化方向：降低 draw 复杂度/overdraw，减少 GPU Fence 等待'
@@ -1673,7 +1723,7 @@ steps:
           WHEN reason_code = 'buffer_stuffing' THEN 'none'
           WHEN reason_code = 'sf_composition_slow' THEN 'none'
           WHEN reason_code = 'thermal_throttling' THEN 'thermal_throttle'
-          WHEN reason_code IN ('binder_sync_blocking', 'blocking_io', 'lock_binder_wait', 'binder_timeout') THEN 'blocking_wait'
+          WHEN reason_code IN ('binder_sync_blocking', 'io_page_cache_wait', 'uninterruptible_wait', 'lock_binder_wait', 'binder_timeout') THEN 'blocking_wait'
           WHEN reason_code = 'gc_jank' THEN 'gc_pause'
           WHEN reason_code = 'gc_pressure_cascade' THEN 'gc_pause'
           WHEN reason_code = 'small_core_placement' THEN 'core_placement'
@@ -1752,22 +1802,22 @@ steps:
           - "避免在持锁时做 Binder/IO 操作"
           - "考虑使用异步锁或拆分锁"
 
-      # ===== 高优先级：IO 阻塞 =====
+      # ===== 高优先级：IO/page-cache 等待候选 =====
       - condition: "io_data?.data?.length > 0 && io_data.data[0]?.total_ms > 3"
         severity: critical
-        diagnosis: "IO 阻塞 ${io_data.data[0].total_ms}ms (${io_data.data[0].thread_name}, ${io_data.data[0].io_cause})"
-        confidence: high
+        diagnosis: "IO/page-cache 等待候选 ${io_data.data[0].total_ms}ms (${io_data.data[0].thread_name}, ${io_data.data[0].io_cause})"
+        confidence: medium
         suggestions:
-          - "将文件/数据库 IO 移到后台线程"
-          - "检查是否有不必要的同步 IO 操作"
+          - "结合文件/数据库/SharedPreferences/Provider slice 或 stack 证据确认业务根因"
+          - "确认后再将同步 IO 移到后台线程"
 
       - condition: "io_data?.data?.length > 0 && io_data.data[0]?.total_ms > 1"
         severity: warning
-        diagnosis: "${io_data.data[0].thread_name} IO 等待 ${io_data.data[0].total_ms}ms"
-        confidence: high
+        diagnosis: "${io_data.data[0].thread_name} IO/page-cache 等待候选 ${io_data.data[0].total_ms}ms"
+        confidence: medium
         suggestions:
-          - "检查帧期间是否有磁盘读写操作"
-          - "考虑使用内存映射或预加载"
+          - "检查帧期间是否有文件/数据库 slice、page fault 或 block I/O 证据"
+          - "证据闭环后再考虑内存映射、预加载或异步化"
 
       # ===== 高优先级：GC 影响 =====
       - condition: "gc_data?.data?.length > 0 && gc_data.data.reduce((s, g) => s + (g.overlap_ms || 0), 0) > 3"

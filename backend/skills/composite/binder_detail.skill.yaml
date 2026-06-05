@@ -328,7 +328,7 @@ steps:
           WHEN 'Running' THEN 'Running (CPU执行)'
           WHEN 'R' THEN 'Runnable (等待调度)'
           WHEN 'S' THEN 'Sleeping (等待Binder回复)'
-          WHEN 'D' THEN 'Disk Sleep (IO等待)'
+          WHEN 'D' THEN 'Uninterruptible Sleep (不可中断睡眠; IO需io_wait/blocked_function)'
           ELSE ts.state
         END as state_desc,
         ts.blocked_function,

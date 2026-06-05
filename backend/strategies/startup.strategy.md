@@ -211,7 +211,7 @@ invoke_skill 返回 artifact 摘要（仅含列名和行数）。**必须用 fet
 | CPU 频率 | `cpu_freq_analysis` / "CPU 频率" | 判断是否升频不足 |
 | 可操作热点 | `actionable_main_thread_slices` / "可操作热点" | 确定优化目标（注意 self_ms 列） |
 | 主线程同步 Binder | `main_thread_sync_binder` / "同步 Binder" | Binder 阻塞量化 |
-| 主线程文件 IO | `main_thread_file_io` / "文件 IO" | IO 阻塞量化 |
+| 主线程文件 IO | `main_thread_file_io` / "文件 IO" | 文件 IO 量化；D/DK 是否为 IO 需结合 `io_wait`/`blocked_function` |
 | 调度延迟 | `sched_latency` / "调度延迟" | Q3 根因量化 |
 
 **优先获取**（startup_detail 标记为 optional，可能缺失——缺失时标注"数据不足"，不做排除性结论）：
@@ -264,6 +264,7 @@ fetch_artifact("art-N", detail="rows", offset=0, limit=50)  // 对每个关键 a
 | **启动根因分类体系** | `lookup_knowledge("startup-root-causes")` | 需要根因编号参考(A1-A18/B1-B12)或交叉因素分析(C1-C4) |
 | Binder 阻塞 | `lookup_knowledge("binder-ipc")` | S 状态中 Binder 占比高 |
 | 锁竞争 / futex | `lookup_knowledge("lock-contention")` | blocked_functions 含 futex_wait |
+| D-state / io_wait / blocked_function | `lookup_knowledge("thread-state-blocked-reason")` | 出现不可中断等待、io_wait 或关键 blocked_function，需要解释 kernel wchan 证据边界 |
 | GC 压力 | `lookup_knowledge("gc-dynamics")` | GC 占主线程时间 >5% |
 | CPU 调度 / 大小核 / 升频 | `lookup_knowledge("cpu-scheduler")` | Q2>15% 或 CPU 争抢 >1.5x 或升频异常 |
 | Thermal 限频 | `lookup_knowledge("thermal-throttling")` | 均频远低于峰值或检测到限频 |
@@ -281,7 +282,7 @@ fetch_artifact("art-N", detail="rows", offset=0, limit=50)  // 对每个关键 a
 **Phase 2.56 — 内存压力检测（D 状态异常偏高时应执行 ⚠️）：**
 
 **触发条件**（满足任一即执行）：
-- D 状态占启动时长 >10%（正常冷启动中 DEX/OAT 文件命中 Page Cache 后 D 状态应很低；>10% 已足以暗示 IO 问题，需排查是否为内存压力导致 Page Cache 失效）
+- D 状态占启动时长 >10%（正常冷启动中 DEX/OAT 文件命中 Page Cache 后 D 状态应很低；>10% 是不可中断等待候选，需结合 `io_wait`、blocked_function、page fault 和内存压力判断是否为 IO/page-cache 问题）
 - 存在 kswapd 线程活动（无论 D 状态占比多少，kswapd 活跃即说明系统在回收内存）
 
 **排除场景**（以下场景即使无内存压力也可能产生高 D 状态，Phase 2.56 仍应执行但结论中需结合 Phase 2.6 的 `startup_slow_reasons` 信号综合判断）：
@@ -317,12 +318,12 @@ invoke_skill("memory_pressure_in_range", {
 **对根因结论的影响**：
 
 - **如果 pressure_level 为 "high" 或 "critical"**：
-  - 内存压力是 D 状态异常偏高的**重要因素或放大器**：系统内存紧张导致 Page Cache 被回收，DEX/资源文件无法命中缓存，产生大量真实磁盘读取
+  - 内存压力是 D 状态异常偏高的**重要因素或放大器**：系统内存紧张导致 Page Cache 被回收，DEX/资源文件无法命中缓存，可能产生真实存储读取；是否为 IO wait 需看 `io_wait` 和 blocked_function
   - 注意：内存压力通常不是唯一根因——它放大了 IO 延迟，但应用本身的 IO 模式（DEX 加载量、文件数量）决定了基线。结论中应表述为 **"系统内存压力（pressure_score=YY）显著放大了 IO 耗时"**，而非完全替换原有 IO 归因
   - kswapd 活跃说明后台回收守护进程在启动期间持续工作，Page Cache 被 evict
   - direct reclaim 存在说明应用线程自身也被卷入内存回收，进一步加剧阻塞
   - 优化建议应包含：**"① 清理后台进程释放内存后重测，对比 D 状态变化 ② 检查设备整体内存使用情况 ③ 如果是低内存设备，优化应用自身内存占用以减少系统压力"**
-  - 在根因分析树中标注：`D 状态 XX% ← IO 密集 + 系统内存压力放大 (pressure_score=YY, kswapd=ZZ次)`
+  - 在根因分析树中标注：`D 状态 XX% ← 不可中断等待候选 + 系统内存压力放大 (pressure_score=YY, kswapd=ZZ次)`；若 `io_wait=1` 或文件/page-cache blocked_function 明确，再升级为 IO/page-cache 等待
 
 - **如果 pressure_level 为 "moderate"**：
   - 内存压力存在但不是主因。在结论中作为贡献因素注明，建议清理后台进程后重测以评估内存压力的实际放大效果
@@ -547,15 +548,15 @@ Android 启动有两个串行大阶段，**分析结论必须覆盖两个阶段*
 | S (Sleeping) | `pipe_wait` / `pipe_read` | **管道等待** | 等待子线程/进程通信 |
 | S (Sleeping) | `SyS_nanosleep` / `hrtimer_nanosleep` | **主动 sleep** | 代码中的 Thread.sleep()/SystemClock.sleep() |
 | S (Sleeping) | `do_wait` / `wait_consider_task` | **等待子进程** | fork 后等待 |
-| D (Disk Sleep) | `io_schedule` / `blkdev_issue_flush` | **磁盘 IO** | 文件读写、数据库操作 |
-| D (Disk Sleep) | `SyS_fsync` / `do_fsync` | **fsync 刷盘** | SQLite WAL checkpoint、SharedPreferences commit |
-| D (Disk Sleep) | `filemap_fault` / `do_page_fault` | **页缺失** | 内存映射文件首次访问、dex 文件加载 |
+| D (Uninterruptible sleep) + `io_wait=1` | `io_schedule` / `blkdev_issue_flush` | **IO wait 直接证据** | 文件读写、数据库操作、存储队列等待 |
+| D (Uninterruptible sleep) | `SyS_fsync` / `do_fsync` | **fsync 候选** | SQLite WAL checkpoint、SharedPreferences commit；需结合 DB/SP/file slice |
+| D (Uninterruptible sleep) | `filemap_read` / `filemap_fault` / `do_page_fault` | **页缓存/页缺失候选** | 内存映射文件首次访问、dex/so/resource 加载；需结合 page fault / block I/O / 内存压力 |
 
 ⚠️ **D 状态高占比时应排查系统内存压力** → 满足触发条件时执行 **Phase 2.56（内存压力检测）**，触发条件和排除场景详见 Phase 2.56 定义。
 
 **第 2.5 步：当主线程状态分布的 blocked_functions 为空或 "-" 时**
 
-某些 trace 的 `blocked_functions` 列为空（内核未开启 CONFIG_SCHEDSTATS）。此时：
+某些 trace 的 `blocked_functions` 列为空（未采 `sched/sched_blocked_reason`、设备 tracepoint 不可用、符号化缺失，或内核配置不支持）。此时：
 
 1. **优先使用 hot_slice_states 数据**（已包含在 startup_detail 的返回结果中，Phase 2.5 fetch_artifact 时获取）。
    即使全局 blocked_functions 为空，per-slice 的线程状态分布（Running/S/D 各自占比）仍然有效，可以判断 slice 慢在"计算"还是"阻塞"。
@@ -563,11 +564,11 @@ Android 启动有两个串行大阶段，**分析结论必须覆盖两个阶段*
 2. **从已有数据交叉推断**（hot_slice_states 的 blocked_functions 也为空时）：
    - S 状态时长高 + 主线程同步 Binder >50ms → **Binder 阻塞**是主因
    - S 状态时长高 + GC 在主线程 >20ms → **GC 阻塞**参与
-   - D 状态时长高 + 文件 IO Top15 有大量 open/read → **磁盘 IO** 是主因
+   - D 状态时长高 + `io_wait=1` 或文件 IO Top15 有大量 open/read → **IO/page-cache 候选**，仍需交叉验证 block I/O、page fault 或文件/DB slice
    - S 状态时长高 + 无明显 Binder/GC → 可能是 **锁等待** 或 **sleep()** 调用
    - **结论中必须标注"基于间接证据推断，blocked_functions 不可用"**
 
-3. **在优化建议中**：建议用户后续抓 trace 时开启内核 `CONFIG_SCHEDSTATS` 选项（或使用 `echo 1 > /proc/sys/kernel/sched_schedstats`），以获取完整的 `blocked_functions` 数据。这将大幅提升阻塞根因定位的精度——从"间接推断"升级为"直接证据"
+3. **在优化建议中**：建议用户后续抓 trace 时包含 `ftrace_events: "sched/sched_blocked_reason"`；如设备不产出 blocked_function，再检查 tracepoint 可用性、符号化和内核能力。需要完整 off-CPU 栈时使用 `linux.perf` 对 `sched_switch`/`sched_waking` 做目标线程过滤采样。
 
 **第三步：用热点 Slice 线程状态（hot_slice_states）做 per-slice 根因定位**
 
@@ -580,7 +581,7 @@ Android 启动有两个串行大阶段，**分析结论必须覆盖两个阶段*
 - 如果 `inflate` 的 hot_slice_states 显示 Running=300ms + S=150ms + blocked_functions 为空
   → 结论：部分 CPU-bound + 部分阻塞，blocked_functions 为空则需结合上下文推断阻塞原因
 - 如果 `contentProviderCreate` 的 hot_slice_states 显示 D=30ms + blocked_functions=`io_schedule`
-  → **确证**：ContentProvider 初始化中执行了数据库操作产生磁盘 IO 阻塞
+  → **候选**：ContentProvider 初始化中存在 IO/page-cache 等待；是否为 SQLite/SharedPreferences/Provider 业务根因还要补 DB/SP/Provider slice 或 stack 证据
 
 ⚠️ **重要：slice 的 wall time ≠ 线程状态时间的直接对比**
 slice 的 wall time（如 inflate 479ms）包含 Running + S + D + R 所有状态。
@@ -663,7 +664,7 @@ TTID 和 TTFD 是两个不同的指标，必须区分：
      ① 四象限显示 Q4=NN%（主线程大量时间被阻塞）
      ② 线程状态：S(Sleeping) = XX ms >> D(IO) = YY ms → 阻塞主因是 S 状态
      ③ blocked_functions 含 futex_wait_queue → 锁等待
-     ④ 结合热点 slice：该 slice 内部存在 [锁竞争/sleep/同步Binder/IO阻塞]
+     ④ 结合热点 slice：该 slice 内部存在 [锁竞争/sleep/同步Binder/IO/page-cache 候选]
    - SR 交叉验证：SR10 检测到 futex 等待 XX ms，与此发现一致
    - 结论：此 slice 慢的根因是 [具体根因]，不是 [排除的因素]
    - 建议：[可操作的优化建议]
@@ -719,7 +720,7 @@ TTID 和 TTFD 是两个不同的指标，必须区分：
    | 内存压力 | Phase 2.56 被执行（D 状态 >10% 或 kswapd 活跃）| memory_pressure_in_range |
    | Binder 线程池 | binder_pool artifact 存在 | Binder 线程池利用率（optional artifact） |
    | Thermal | 均频远低于峰值（>10% 差距）| thermal_zone counters（需 execute_sql 查询） |
-   | IO 子系统 | D 状态 >30% 且 memory_pressure 排除 | 文件 IO 类型、blocked_functions |
+   | IO 子系统 | D 状态 >30% 且有 `io_wait=1` 或 IO/page-cache blocked_function，memory_pressure 已解释或排除 | 文件 IO 类型、blocked_functions、block I/O |
    | 进程管理 | LMK 事件 > 0 或 Binder 中有 freezer 相关调用 | oom_adj_intervals（需 execute_sql 查询） |
    | OEM 差异 | 检测到厂商特定 Slice（HyperBoost/TurboX/MiBoost 等）| slice 名称匹配 |
 

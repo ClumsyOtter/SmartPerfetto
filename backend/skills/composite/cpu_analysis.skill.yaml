@@ -377,7 +377,7 @@ steps:
           type: number
           format: compact
         - name: io_wait
-          label: "IO 等待"
+          label: "io_wait"
           type: number
     sql: |
       WITH main_thread AS (
@@ -393,8 +393,8 @@ steps:
           WHEN 'Running' THEN 'Running (CPU执行中)'
           WHEN 'R' THEN 'Runnable (等待调度)'
           WHEN 'R+' THEN 'Runnable+ (抢占等待)'
-          WHEN 'S' THEN 'Sleeping (主动睡眠)'
-          WHEN 'D' THEN 'Disk Sleep (IO等待)'
+          WHEN 'S' THEN 'Sleeping (可中断睡眠/等待)'
+          WHEN 'D' THEN CASE WHEN COALESCE(ts.io_wait, 0) = 1 THEN 'Uninterruptible sleep (io_wait)' ELSE 'Uninterruptible sleep (不可中断等待)' END
           WHEN 'I' THEN 'Idle (空闲)'
           ELSE ts.state
         END as state_desc,
@@ -407,12 +407,12 @@ steps:
         ), 1) as percent,
         COUNT(*) as count,
         -- IO 等待详情
-        CASE WHEN ts.state = 'D' THEN ts.io_wait ELSE NULL END as io_wait
+        CASE WHEN ts.state IN ('D', 'DK') THEN COALESCE(ts.io_wait, 0) ELSE NULL END as io_wait
       FROM thread_state ts
       WHERE ts.utid = (SELECT utid FROM main_thread)
         AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
         AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
-      GROUP BY ts.state
+      GROUP BY ts.state, CASE WHEN ts.state IN ('D', 'DK') THEN COALESCE(ts.io_wait, 0) ELSE NULL END
       ORDER BY total_dur_ms DESC
     save_as: main_thread_states
     condition: target_process.data.length > 0
@@ -600,6 +600,12 @@ steps:
           type: duration
           format: duration_ms
           unit: ms
+        - name: io_wait
+          label: "io_wait"
+          type: number
+        - name: evidence_strength
+          label: "证据强度"
+          type: string
     sql: |
       WITH main_thread AS (
         SELECT t.utid
@@ -611,6 +617,28 @@ steps:
       SELECT
         ts.blocked_function,
         ts.state,
+        COALESCE(ts.io_wait, 0) as io_wait,
+        CASE
+          WHEN ts.state IN ('D', 'DK') AND COALESCE(ts.io_wait, 0) = 1 THEN 'direct_io_wait'
+          WHEN ts.state IN ('D', 'DK') AND (
+            LOWER(COALESCE(ts.blocked_function, '')) LIKE '%filemap%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%page_fault%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%wait_on_page%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%io_schedule%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%submit_bio%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%blk_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ext4%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%f2fs%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%ufshcd%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mmc_%'
+            OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%dm_%'
+          ) THEN 'inferred_io_or_page_cache'
+          WHEN ts.state IN ('D', 'DK') THEN 'ambiguous_uninterruptible_wait'
+          WHEN ts.state = 'S' AND (LOWER(COALESCE(ts.blocked_function, '')) LIKE '%epoll%' OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%poll%') THEN 'poll_idle_or_ambiguous'
+          WHEN ts.state = 'S' AND (LOWER(COALESCE(ts.blocked_function, '')) LIKE '%futex%' OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%mutex%' OR LOWER(COALESCE(ts.blocked_function, '')) LIKE '%monitor%') THEN 'lock_wait'
+          WHEN LOWER(COALESCE(ts.blocked_function, '')) LIKE '%binder%' THEN 'binder_wait'
+          ELSE 'state_only'
+        END as evidence_strength,
         COUNT(*) as count,
         SUM(ts.dur) / 1e6 as total_dur_ms,
         ROUND(AVG(ts.dur) / 1e6, 2) as avg_dur_ms,
@@ -621,7 +649,7 @@ steps:
         AND ts.dur > 1000000  -- > 1ms
         AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
         AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
-      GROUP BY ts.blocked_function, ts.state
+      GROUP BY ts.blocked_function, ts.state, COALESCE(ts.io_wait, 0)
       ORDER BY total_dur_ms DESC
       LIMIT 15
     save_as: blocked_functions
@@ -929,11 +957,11 @@ steps:
       # 阻塞函数问题
       - condition: "((blocked_functions?.data?.[0]?.total_dur_ms) || 0) > (blocked_function_threshold_ms || 50)"
         severity: warning
-        diagnosis: "主线程阻塞在 ${blocked_functions?.data?.[0]?.blocked_function} 上 ${blocked_functions?.data?.[0]?.total_dur_ms}ms"
-        confidence: high
+        diagnosis: "主线程 kernel blocked_function/wchan 候选为 ${blocked_functions?.data?.[0]?.blocked_function}，累计 ${blocked_functions?.data?.[0]?.total_dur_ms}ms；它是单帧阻塞点，需结合 app slice、文件/DB、Binder 或锁链证据后再定业务根因"
+        confidence: medium
         suggestions:
-          - "[Owner] App | [Priority] P0 | [Action] 针对阻塞函数做异步化/拆分"
-          - "[Verify] 复测 blocked_function 总耗时和主线程可运行占比"
+          - "[Owner] Perf | [Priority] P1 | [Action] 交叉检查对应时间窗的 app slice、文件/DB、Binder 或 lock contention 证据"
+          - "[Verify] 复测 blocked_function/io_wait 总耗时和主线程可运行占比"
         evidence_fields: [blocked_functions.data]
 
       # 线程迁核过于频繁

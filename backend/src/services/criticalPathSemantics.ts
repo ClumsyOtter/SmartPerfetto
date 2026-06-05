@@ -369,8 +369,9 @@ async function loadIoSignals(
   traceId: string,
   segments: SegmentInput[]
 ): Promise<{rows: IoRow[]; status: SemanticSourceStatus; warning?: string}> {
-  // No stdlib io table in v54 — use thread_state.io_wait + blocked_function
-  // text patterns (block layer / fs / mmc / ufs) as fallback.
+  // No stdlib io table in v54 — use thread_state.io_wait + kernel wchan
+  // single-frame blocked_function patterns (page cache / block layer / fs /
+  // mmc / ufs) as fallback. blocked_function is not a full call stack.
   const cte = buildSegmentValuesCte(segments);
   const sql = `
     WITH segs(idx, utid, tid, upid, ts_start, ts_end) AS (VALUES ${cte})
@@ -384,17 +385,24 @@ async function loadIoSignals(
       ON ts.utid = segs.utid
      AND ts.ts <= segs.ts_end
      AND ts.ts + ts.dur >= segs.ts_start
-    WHERE ts.state = 'D'
+    WHERE ts.state IN ('D', 'DK')
       AND (
         ts.io_wait = 1
         OR ts.blocked_function LIKE '%io_schedule%'
         OR ts.blocked_function LIKE '%wait_on_buffer%'
+        OR ts.blocked_function LIKE '%wait_on_page%'
+        OR ts.blocked_function LIKE '%folio_wait%'
         OR ts.blocked_function LIKE '%submit_bio%'
+        OR ts.blocked_function LIKE '%filemap_read%'
         OR ts.blocked_function LIKE '%filemap_fault%'
+        OR ts.blocked_function LIKE '%do_page_fault%'
         OR ts.blocked_function LIKE '%ext4_%'
         OR ts.blocked_function LIKE '%f2fs_%'
+        OR ts.blocked_function LIKE '%erofs_%'
+        OR ts.blocked_function LIKE '%dm_%'
         OR ts.blocked_function LIKE '%mmc_%'
         OR ts.blocked_function LIKE '%ufshcd_%'
+        OR ts.blocked_function LIKE '%blk_%'
         OR ts.blocked_function LIKE '%blk_mq_%'
       )
     ORDER BY ts.dur DESC

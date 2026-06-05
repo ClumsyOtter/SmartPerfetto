@@ -4,7 +4,8 @@
 -- Q1: Running on big/prime cores (compute-capable)
 -- Q2: Running on medium/little cores (power-efficient)
 -- Q3: Runnable but not scheduled (scheduling contention)
--- Q4a: IO-blocked (D=uninterruptible sleep, DK=kernel IO) — potential IO bottleneck
+-- Q4a: Uninterruptible wait (D/DK). Treat as IO only when io_wait=1
+--       or blocked_function matches an IO/page-cache family.
 -- Q4b: Voluntary sleep (S=interruptible sleep, I=idle) — waiting on lock/futex/binder
 thread_states AS (
   SELECT
