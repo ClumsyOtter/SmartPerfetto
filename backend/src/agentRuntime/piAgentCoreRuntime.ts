@@ -17,6 +17,8 @@ import { getExtendedKnowledgeBase } from '../services/sqlKnowledgeBase';
 import { sanitizeCodeAwareText } from '../services/security/codeAwareOutputRegistry';
 import {
   createPiAgentCoreSnapshotEngineState,
+  getPiAgentCoreSnapshotEngineState,
+  type PiAgentCoreOpaqueState,
   type SessionFieldsForSnapshot,
   type SessionStateSnapshot,
 } from '../agentv3/sessionStateSnapshot';
@@ -102,6 +104,10 @@ const PI_AGENT_CORE_PREVIEW_CLAIM_VERIFICATION: ClaimVerificationResult = {
 
 type EnvLike = Record<string, string | undefined>;
 
+const MAX_PI_OPAQUE_MESSAGES = 80;
+const MAX_PI_OPAQUE_BYTES = 512 * 1024;
+const SENSITIVE_OPAQUE_KEY_RE = /(?:api[_-]?key|auth|authorization|bearer|password|secret|token)/i;
+
 interface PiAgentCoreAgentState {
   messages?: unknown[];
   tools?: unknown[];
@@ -118,6 +124,67 @@ interface PiAgentCoreAgent {
 
 interface PiAgentCoreModule {
   Agent: new (options?: Record<string, unknown>) => PiAgentCoreAgent;
+}
+
+function sanitizeOpaqueJsonValue(value: unknown, key = ''): unknown {
+  if (SENSITIVE_OPAQUE_KEY_RE.test(key)) return '[redacted]';
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeOpaqueJsonValue(item))
+      .filter(item => item !== undefined);
+  }
+  if (typeof value === 'object' && value) {
+    const out: Record<string, unknown> = {};
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
+      const sanitized = sanitizeOpaqueJsonValue(childValue, childKey);
+      if (sanitized !== undefined) out[childKey] = sanitized;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function createPiOpaqueStateFromMessages(messages: unknown[] | undefined): PiAgentCoreOpaqueState {
+  const allMessages = Array.isArray(messages) ? messages : [];
+  const visibleMessages = allMessages.slice(-MAX_PI_OPAQUE_MESSAGES);
+  const truncated = allMessages.length > visibleMessages.length;
+  try {
+    const sanitized = sanitizeOpaqueJsonValue(visibleMessages);
+    const json = JSON.stringify(sanitized);
+    if (!json) {
+      return { version: 1, messageCount: 0, degradedReason: 'not_json_serializable' };
+    }
+    const byteSize = Buffer.byteLength(json, 'utf8');
+    if (byteSize > MAX_PI_OPAQUE_BYTES) {
+      return {
+        version: 1,
+        messageCount: visibleMessages.length,
+        originalMessageCount: allMessages.length,
+        truncated: truncated || undefined,
+        byteSize,
+        degradedReason: 'too_large',
+      };
+    }
+    return {
+      version: 1,
+      messages: JSON.parse(json) as unknown[],
+      messageCount: visibleMessages.length,
+      originalMessageCount: truncated ? allMessages.length : undefined,
+      truncated: truncated || undefined,
+      byteSize,
+    };
+  } catch {
+    return {
+      version: 1,
+      messageCount: visibleMessages.length,
+      originalMessageCount: allMessages.length,
+      truncated: truncated || undefined,
+      degradedReason: 'not_json_serializable',
+    };
+  }
 }
 
 const importEsmModule = new Function(
@@ -686,6 +753,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
   private readonly sessionHypotheses = new Map<string, Hypothesis[]>();
   private readonly sessionUncertaintyFlags = new Map<string, UncertaintyFlag[]>();
   private readonly architectureCache = new Map<string, ArchitectureInfo>();
+  private readonly sessionOpaqueStates = new Map<string, PiAgentCoreOpaqueState>();
 
   constructor(
     private readonly traceProcessorService: TraceProcessorService,
@@ -709,6 +777,29 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
       : this.analyzeWithSmartPerfettoTools(query, sessionId, traceId, options);
   }
 
+  private getInitialMessagesForSession(sessionId: string): unknown[] {
+    const opaque = this.sessionOpaqueStates.get(sessionId);
+    if (!opaque) return [];
+    if (opaque.degradedReason) {
+      this.emit('update', {
+        type: 'degraded',
+        content: {
+          module: 'pi-agent-core',
+          fallback: 'smartperfetto_context',
+          reason: opaque.degradedReason,
+          message: 'Pi Agent Core third-party transcript state was unavailable; continuing with SmartPerfetto session context only.',
+        },
+        timestamp: Date.now(),
+      });
+      return [];
+    }
+    return Array.isArray(opaque.messages) ? [...opaque.messages] : [];
+  }
+
+  private rememberOpaqueState(sessionId: string, agent: PiAgentCoreAgent): void {
+    this.sessionOpaqueStates.set(sessionId, createPiOpaqueStateFromMessages(agent.state.messages));
+  }
+
   private async analyzeFakeStream(
     query: string,
     sessionId: string,
@@ -729,7 +820,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
         systemPrompt,
         model: modelConfig.model,
         tools: [],
-        messages: [],
+        messages: this.getInitialMessagesForSession(sessionId),
       },
       streamFn,
       toolExecution: 'sequential',
@@ -759,6 +850,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
       });
       await agent.prompt(query);
     } finally {
+      this.rememberOpaqueState(sessionId, agent);
       unsubscribe();
       if (this.activeAgents.get(sessionId) === agent) {
         this.activeAgents.delete(sessionId);
@@ -805,7 +897,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
         systemPrompt: prep.systemPrompt,
         model: modelConfig.model,
         tools: prep.tools,
-        messages: [],
+        messages: this.getInitialMessagesForSession(sessionId),
         thinkingLevel: modelConfig.thinkingLevel ?? 'off',
       },
       sessionId,
@@ -854,6 +946,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
       });
       await agent.prompt(prep.prompt);
     } finally {
+      this.rememberOpaqueState(sessionId, agent);
       unsubscribe();
       if (this.activeAgents.get(sessionId) === agent) {
         this.activeAgents.delete(sessionId);
@@ -1259,6 +1352,8 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
     const planState = this.sessionPlans.get(sessionId);
     const artifactStore = this.artifactStores.get(sessionId);
     const activeAgent = this.activeAgents.get(sessionId);
+    const opaque = this.sessionOpaqueStates.get(sessionId)
+      ?? createPiOpaqueStateFromMessages(activeAgent?.state.messages);
     return {
       version: 1,
       snapshotTimestamp: Date.now(),
@@ -1274,10 +1369,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
       engineState: createPiAgentCoreSnapshotEngineState({
         providerId: sessionFields.agentRuntimeProviderId,
         providerSnapshotHash: sessionFields.agentRuntimeProviderSnapshotHash,
-        opaque: {
-          messageCount: activeAgent?.state.messages?.length ?? 0,
-          toolCount: activeAgent?.state.tools?.length ?? 0,
-        },
+        opaque,
       }),
       agentRuntimeKind: PI_AGENT_CORE_RUNTIME_KIND,
       agentRuntimeProviderId: sessionFields.agentRuntimeProviderId,
@@ -1308,6 +1400,10 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
     if (snapshot.architecture) {
       this.architectureCache.set(traceId, snapshot.architecture);
     }
+    const opaque = getPiAgentCoreSnapshotEngineState(snapshot)?.opaque;
+    if (opaque) {
+      this.sessionOpaqueStates.set(sessionId, opaque);
+    }
   }
 
   reset(): void {
@@ -1315,6 +1411,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
       agent.reset();
     }
     this.activeAgents.clear();
+    this.sessionOpaqueStates.clear();
     this.removeAllListeners();
   }
 
@@ -1336,6 +1433,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
     this.sessionPlans.delete(sessionId);
     this.sessionHypotheses.delete(sessionId);
     this.sessionUncertaintyFlags.delete(sessionId);
+    this.sessionOpaqueStates.delete(sessionId);
   }
 }
 

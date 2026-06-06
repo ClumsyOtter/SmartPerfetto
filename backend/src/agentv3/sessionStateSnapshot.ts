@@ -117,12 +117,38 @@ export interface OpenAISnapshotEngineState {
   runState?: string;
 }
 
+export type ThirdPartyOpaqueDegradedReason =
+  | 'not_json_serializable'
+  | 'too_large'
+  | 'missing_required_fields'
+  | 'state_unavailable'
+  | 'session_restore_failed';
+
+export interface PiAgentCoreOpaqueState {
+  version: 1;
+  messages?: unknown[];
+  messageCount: number;
+  originalMessageCount?: number;
+  truncated?: boolean;
+  byteSize?: number;
+  degradedReason?: ThirdPartyOpaqueDegradedReason;
+}
+
+export interface OpenCodeOpaqueState {
+  version: 1;
+  openCodeSessionId?: string;
+  projectDir?: string;
+  homeDir?: string;
+  configDir?: string;
+  degradedReason?: ThirdPartyOpaqueDegradedReason;
+}
+
 export interface PiAgentCoreSnapshotEngineState {
-  opaque?: unknown;
+  opaque?: PiAgentCoreOpaqueState;
 }
 
 export interface OpenCodeSnapshotEngineState {
-  opaque?: unknown;
+  opaque?: OpenCodeOpaqueState;
 }
 
 export type SnapshotEngineState =
@@ -281,6 +307,53 @@ export function getOpenAISnapshotEngineState(
     };
   }
   return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function getPiAgentCoreSnapshotEngineState(
+  snapshot: Pick<SessionStateSnapshot, 'engineState'>,
+): PiAgentCoreSnapshotEngineState | undefined {
+  if (snapshot.engineState?.kind !== 'pi-agent-core') return undefined;
+  const opaque = snapshot.engineState.pi.opaque;
+  if (!isRecord(opaque) || opaque.version !== 1) return undefined;
+  return {
+    opaque: {
+      version: 1,
+      messages: Array.isArray(opaque.messages) ? opaque.messages : undefined,
+      messageCount: typeof opaque.messageCount === 'number' ? opaque.messageCount : 0,
+      originalMessageCount: typeof opaque.originalMessageCount === 'number'
+        ? opaque.originalMessageCount
+        : undefined,
+      truncated: typeof opaque.truncated === 'boolean' ? opaque.truncated : undefined,
+      byteSize: typeof opaque.byteSize === 'number' ? opaque.byteSize : undefined,
+      degradedReason: typeof opaque.degradedReason === 'string'
+        ? opaque.degradedReason as ThirdPartyOpaqueDegradedReason
+        : undefined,
+    },
+  };
+}
+
+export function getOpenCodeSnapshotEngineState(
+  snapshot: Pick<SessionStateSnapshot, 'engineState'>,
+): OpenCodeSnapshotEngineState | undefined {
+  if (snapshot.engineState?.kind !== 'opencode') return undefined;
+  const opaque = snapshot.engineState.opencode.opaque;
+  if (!isRecord(opaque) || opaque.version !== 1) return undefined;
+  return {
+    opaque: {
+      version: 1,
+      openCodeSessionId: typeof opaque.openCodeSessionId === 'string' ? opaque.openCodeSessionId : undefined,
+      projectDir: typeof opaque.projectDir === 'string' ? opaque.projectDir : undefined,
+      homeDir: typeof opaque.homeDir === 'string' ? opaque.homeDir : undefined,
+      configDir: typeof opaque.configDir === 'string' ? opaque.configDir : undefined,
+      degradedReason: typeof opaque.degradedReason === 'string'
+        ? opaque.degradedReason as ThirdPartyOpaqueDegradedReason
+        : undefined,
+    },
+  };
 }
 
 export function normalizeSessionStateSnapshot(

@@ -6,6 +6,8 @@ import { describe, expect, it } from '@jest/globals';
 import {
   getClaudeSnapshotEngineState,
   getOpenAISnapshotEngineState,
+  getOpenCodeSnapshotEngineState,
+  getPiAgentCoreSnapshotEngineState,
   getSnapshotRuntimeKind,
   getSnapshotRuntimeProviderId,
   getSnapshotRuntimeProviderSnapshotHash,
@@ -260,6 +262,98 @@ describe('SessionStateSnapshot runtime state inventory', () => {
       },
       pi: {
         opaque: undefined,
+      },
+    });
+  });
+
+  it('reads canonical Pi and OpenCode opaque engine states', () => {
+    const piSnapshot: SessionStateSnapshot = {
+      version: 1,
+      snapshotTimestamp: 1,
+      sessionId: 'session-pi',
+      traceId: 'trace-pi',
+      conversationSteps: [],
+      queryHistory: [],
+      conclusionHistory: [],
+      agentDialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      hypotheses: [],
+      analysisNotes: [],
+      analysisPlan: null,
+      planHistory: [],
+      uncertaintyFlags: [],
+      engineState: {
+        kind: 'pi-agent-core',
+        provider: {
+          providerId: 'provider-pi',
+          providerSnapshotHash: 'hash-pi',
+        },
+        pi: {
+          opaque: {
+            version: 1,
+            messages: [{ role: 'assistant', content: [{ type: 'text', text: 'prior' }] }],
+            messageCount: 1,
+            byteSize: 72,
+          },
+        },
+      },
+      runSequence: 0,
+      conversationOrdinal: 0,
+    };
+
+    expect(getPiAgentCoreSnapshotEngineState(piSnapshot)).toEqual({
+      opaque: {
+        version: 1,
+        messages: [{ role: 'assistant', content: [{ type: 'text', text: 'prior' }] }],
+        messageCount: 1,
+        byteSize: 72,
+      },
+    });
+
+    const openCodeSnapshot: SessionStateSnapshot = {
+      version: 1,
+      snapshotTimestamp: 1,
+      sessionId: 'session-opencode',
+      traceId: 'trace-opencode',
+      conversationSteps: [],
+      queryHistory: [],
+      conclusionHistory: [],
+      agentDialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      hypotheses: [],
+      analysisNotes: [],
+      analysisPlan: null,
+      planHistory: [],
+      uncertaintyFlags: [],
+      engineState: {
+        kind: 'opencode',
+        provider: {
+          providerId: 'provider-opencode',
+          providerSnapshotHash: 'hash-opencode',
+        },
+        opencode: {
+          opaque: {
+            version: 1,
+            openCodeSessionId: 'ses-opencode',
+            projectDir: '/data/opencode/session/project',
+            homeDir: '/data/opencode/session/home',
+            configDir: '/data/opencode/session/config',
+          },
+        },
+      },
+      runSequence: 0,
+      conversationOrdinal: 0,
+    };
+
+    expect(getOpenCodeSnapshotEngineState(openCodeSnapshot)).toEqual({
+      opaque: {
+        version: 1,
+        openCodeSessionId: 'ses-opencode',
+        projectDir: '/data/opencode/session/project',
+        homeDir: '/data/opencode/session/home',
+        configDir: '/data/opencode/session/config',
       },
     });
   });

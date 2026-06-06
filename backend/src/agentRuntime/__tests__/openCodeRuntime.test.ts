@@ -3,6 +3,9 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { describe, expect, it, jest } from '@jest/globals';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import {
   EXPERIMENTAL_OPENCODE_RUNTIME_KIND,
   OpenCodeRuntime,
@@ -30,6 +33,33 @@ function createFakeRuntimeInput(): RuntimeFactoryInput {
       source: 'env',
     },
   };
+}
+
+function createSnapshotFields(): any {
+  return {
+    conversationSteps: [],
+    queryHistory: [],
+    conclusionHistory: [],
+    agentDialogue: [],
+    agentResponses: [],
+    dataEnvelopes: [],
+    hypotheses: [],
+    runSequence: 1,
+    conversationOrdinal: 0,
+  };
+}
+
+async function withBackendDataDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-opencode-state-'));
+  const previous = process.env.SMARTPERFETTO_BACKEND_DATA_DIR;
+  process.env.SMARTPERFETTO_BACKEND_DATA_DIR = dir;
+  try {
+    return await fn(dir);
+  } finally {
+    if (previous === undefined) delete process.env.SMARTPERFETTO_BACKEND_DATA_DIR;
+    else process.env.SMARTPERFETTO_BACKEND_DATA_DIR = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function createFakeModuleLoader(record: {
@@ -455,6 +485,228 @@ describe('experimental OpenCode runtime contract', () => {
       expect.objectContaining({ type: 'progress' }),
       expect.objectContaining({ type: 'conclusion' }),
     ]));
+  });
+
+  it('hydrates OpenCode opaque session state and prompts the restored session', async () => {
+    await withBackendDataDir(async (dataDir) => {
+      const firstRecord = {
+        closeCount: 0,
+        createInput: undefined as unknown,
+        promptInput: undefined as unknown,
+        homeAtCreate: undefined as string | undefined,
+        configAtCreate: undefined as string | undefined,
+      };
+      const firstRuntime = new OpenCodeRuntime(createFakeRuntimeInput(), {
+        moduleLoader: async () => ({
+          createOpencode: jest.fn(async () => {
+            firstRecord.homeAtCreate = process.env.HOME;
+            firstRecord.configAtCreate = process.env.OPENCODE_CONFIG_DIR;
+            return {
+              server: {
+                url: 'http://127.0.0.1:4106',
+                close: jest.fn(() => {
+                  firstRecord.closeCount += 1;
+                }),
+              },
+              client: {
+                session: {
+                  create: jest.fn(async (input: unknown) => {
+                    firstRecord.createInput = input;
+                    return { data: { id: 'ses-opencode-original' } };
+                  }),
+                  prompt: jest.fn(async (input: unknown) => {
+                    firstRecord.promptInput = input;
+                    return { data: { info: { role: 'user' }, parts: [] } };
+                  }),
+                },
+              },
+            };
+          }),
+        }),
+      });
+
+      await firstRuntime.analyze('first OpenCode question', 'session-opencode-resume', 'trace-opencode');
+      const snapshot = firstRuntime.takeSnapshot(
+        'session-opencode-resume',
+        'trace-opencode',
+        createSnapshotFields(),
+      );
+      const opaque = snapshot.engineState?.kind === 'opencode'
+        ? snapshot.engineState.opencode.opaque
+        : undefined;
+
+      expect(opaque).toMatchObject({
+        version: 1,
+        openCodeSessionId: 'ses-opencode-original',
+      });
+      expect(opaque?.projectDir).toContain(dataDir);
+      expect(opaque?.homeDir).toContain(dataDir);
+      expect(opaque?.configDir).toContain(dataDir);
+      expect(firstRecord.homeAtCreate).toBe(opaque?.homeDir);
+      expect(firstRecord.configAtCreate).toBe(opaque?.configDir);
+
+      const restoredRecord = {
+        closeCount: 0,
+        createCalls: 0,
+        getInput: undefined as unknown,
+        promptInput: undefined as unknown,
+        homeAtCreate: undefined as string | undefined,
+        configAtCreate: undefined as string | undefined,
+      };
+      const restoredRuntime = new OpenCodeRuntime(createFakeRuntimeInput(), {
+        moduleLoader: async () => ({
+          createOpencode: jest.fn(async () => {
+            restoredRecord.homeAtCreate = process.env.HOME;
+            restoredRecord.configAtCreate = process.env.OPENCODE_CONFIG_DIR;
+            return {
+              server: {
+                url: 'http://127.0.0.1:4107',
+                close: jest.fn(() => {
+                  restoredRecord.closeCount += 1;
+                }),
+              },
+              client: {
+                session: {
+                  get: jest.fn(async (input: unknown) => {
+                    restoredRecord.getInput = input;
+                    return { data: { id: 'ses-opencode-original' } };
+                  }),
+                  create: jest.fn(async () => {
+                    restoredRecord.createCalls += 1;
+                    return { data: { id: 'ses-opencode-new' } };
+                  }),
+                  prompt: jest.fn(async (input: unknown) => {
+                    restoredRecord.promptInput = input;
+                    return { data: { info: { role: 'user' }, parts: [] } };
+                  }),
+                },
+              },
+            };
+          }),
+        }),
+      });
+      restoredRuntime.restoreFromSnapshot('session-opencode-resume', 'trace-opencode', snapshot);
+
+      await restoredRuntime.analyze('follow-up OpenCode question', 'session-opencode-resume', 'trace-opencode');
+
+      expect(restoredRecord.createCalls).toBe(0);
+      expect(restoredRecord.getInput).toEqual({
+        path: { id: 'ses-opencode-original' },
+        query: { directory: opaque?.projectDir },
+      });
+      expect(restoredRecord.promptInput).toMatchObject({
+        path: { id: 'ses-opencode-original' },
+        query: { directory: opaque?.projectDir },
+      });
+      expect(restoredRecord.homeAtCreate).toBe(opaque?.homeDir);
+      expect(restoredRecord.configAtCreate).toBe(opaque?.configDir);
+    });
+  });
+
+  it('degrades OpenCode restore when the third-party session is unavailable', async () => {
+    await withBackendDataDir(async () => {
+      const runtime = new OpenCodeRuntime(createFakeRuntimeInput(), {
+        moduleLoader: async () => ({
+          createOpencode: jest.fn(async () => ({
+            server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+            client: {
+              session: {
+                create: jest.fn(async () => ({ data: { id: 'ses-opencode-original' } })),
+                prompt: jest.fn(async () => ({ data: { info: { role: 'user' }, parts: [] } })),
+              },
+            },
+          })),
+        }),
+      });
+      await runtime.analyze('first', 'session-opencode-missing', 'trace-opencode');
+      const snapshot = runtime.takeSnapshot(
+        'session-opencode-missing',
+        'trace-opencode',
+        createSnapshotFields(),
+      );
+
+      const createCalls: unknown[] = [];
+      const updates: any[] = [];
+      const restoredRuntime = new OpenCodeRuntime(createFakeRuntimeInput(), {
+        moduleLoader: async () => ({
+          createOpencode: jest.fn(async () => ({
+            server: { url: 'http://127.0.0.1:4107', close: jest.fn() },
+            client: {
+              session: {
+                get: jest.fn(async () => {
+                  throw new Error('missing session');
+                }),
+                create: jest.fn(async (input: unknown) => {
+                  createCalls.push(input);
+                  return { data: { id: 'ses-opencode-fresh' } };
+                }),
+                prompt: jest.fn(async () => ({ data: { info: { role: 'user' }, parts: [] } })),
+              },
+            },
+          })),
+        }),
+      });
+      restoredRuntime.on('update', update => updates.push(update));
+      restoredRuntime.restoreFromSnapshot('session-opencode-missing', 'trace-opencode', snapshot);
+
+      await restoredRuntime.analyze('follow-up', 'session-opencode-missing', 'trace-opencode');
+
+      expect(createCalls).toHaveLength(1);
+      expect(updates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'degraded',
+          content: expect.objectContaining({
+            module: 'opencode',
+            fallback: 'fresh_session',
+            reason: 'session_restore_failed',
+            message: 'OpenCode session state unavailable; started a fresh OpenCode session with SmartPerfetto context.',
+          }),
+        }),
+      ]));
+    });
+  });
+
+  it('serializes OpenCode process env overrides while starting servers concurrently', async () => {
+    await withBackendDataDir(async () => {
+      let activeCreates = 0;
+      let maxActiveCreates = 0;
+      const createRecords: Array<{ home?: string; config?: string }> = [];
+      const moduleLoader: OpenCodeSdkModuleLoader = async () => ({
+        createOpencode: jest.fn(async () => {
+          activeCreates += 1;
+          maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
+          createRecords.push({
+            home: process.env.HOME,
+            config: process.env.OPENCODE_CONFIG_DIR,
+          });
+          await new Promise(resolve => setTimeout(resolve, 20));
+          activeCreates -= 1;
+          return {
+            server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+            client: {
+              session: {
+                create: jest.fn(async () => ({ data: { id: `ses-${createRecords.length}` } })),
+                prompt: jest.fn(async () => ({ data: { info: { role: 'user' }, parts: [] } })),
+              },
+            },
+          };
+        }),
+      });
+      const runtimeA = new OpenCodeRuntime(createFakeRuntimeInput(), { moduleLoader });
+      const runtimeB = new OpenCodeRuntime(createFakeRuntimeInput(), { moduleLoader });
+
+      await Promise.all([
+        runtimeA.analyze('first', 'session-opencode-a', 'trace-opencode'),
+        runtimeB.analyze('second', 'session-opencode-b', 'trace-opencode'),
+      ]);
+
+      expect(maxActiveCreates).toBe(1);
+      expect(createRecords).toHaveLength(2);
+      expect(createRecords[0].home).toContain('session-opencode-a');
+      expect(createRecords[1].home).toContain('session-opencode-b');
+      expect(createRecords[0].config).toContain('session-opencode-a');
+      expect(createRecords[1].config).toContain('session-opencode-b');
+    });
   });
 
   it('reports hidden runtime diagnostics without exposing a public provider', () => {

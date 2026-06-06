@@ -42,10 +42,12 @@ class FakePiAgent {
       tools?: unknown[];
       systemPrompt?: string;
       model?: unknown;
+      messages?: unknown[];
     } | undefined;
     this.state.tools = initialState?.tools ?? [];
     this.state.systemPrompt = initialState?.systemPrompt ?? '';
     this.state.model = initialState?.model;
+    this.state.messages = [...(initialState?.messages ?? [])];
   }
 
   subscribe(listener: (event: PiAgentCoreEvent) => void): () => void {
@@ -129,6 +131,20 @@ function createSharedSpec(handler?: SharedToolSpec['handler']): SharedToolSpec {
     handler: handler ?? (async () => ({
       content: [{ type: 'text', text: 'ok' }],
     } as RuntimeToolResult)),
+  };
+}
+
+function createSnapshotFields(): any {
+  return {
+    conversationSteps: [],
+    queryHistory: [],
+    conclusionHistory: [],
+    agentDialogue: [],
+    agentResponses: [],
+    dataEnvelopes: [],
+    hypotheses: [],
+    runSequence: 1,
+    conversationOrdinal: 0,
   };
 }
 
@@ -377,6 +393,76 @@ describe('experimental Pi agent-core runtime contract', () => {
     expect(result.identityResolutions).toBeUndefined();
     expect(updates.map((update) => update.type)).toContain('architecture_detected');
     expect(updates.map((update) => update.type)).not.toContain('answer_token');
+  });
+
+  it('hydrates Pi agent-core transcript state from opaque snapshots on follow-up', async () => {
+    FakePiAgent.promptMessages = [
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'First Pi answer' }],
+      },
+    ];
+    const firstRuntime = new PiAgentCoreRuntime(
+      createFakeTraceProcessorService(),
+      { kind: 'pi-agent-core', source: 'env' },
+      {
+        env: { [PI_AGENT_CORE_MODEL_JSON_ENV]: PI_TEST_MODEL_JSON },
+        moduleLoader: async () => ({ Agent: FakePiAgent }),
+      },
+    );
+
+    await firstRuntime.analyze('first question', 'session-pi-resume', 'trace-pi', {
+      analysisMode: 'fast',
+    });
+    const snapshot = firstRuntime.takeSnapshot(
+      'session-pi-resume',
+      'trace-pi',
+      createSnapshotFields(),
+    );
+
+    expect(snapshot.engineState?.kind).toBe('pi-agent-core');
+    const piOpaque = snapshot.engineState?.kind === 'pi-agent-core'
+      ? snapshot.engineState.pi.opaque
+      : undefined;
+    expect(piOpaque?.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'First Pi answer' }],
+      },
+    ]);
+
+    FakePiAgent.promptMessages = [
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Second Pi answer' }],
+      },
+    ];
+    const secondRuntime = new PiAgentCoreRuntime(
+      createFakeTraceProcessorService(),
+      { kind: 'pi-agent-core', source: 'env' },
+      {
+        env: { [PI_AGENT_CORE_MODEL_JSON_ENV]: PI_TEST_MODEL_JSON },
+        moduleLoader: async () => ({ Agent: FakePiAgent }),
+      },
+    );
+    secondRuntime.restoreFromSnapshot('session-pi-resume', 'trace-pi', snapshot);
+
+    await secondRuntime.analyze('follow-up question', 'session-pi-resume', 'trace-pi', {
+      analysisMode: 'fast',
+    });
+
+    const restoredAgent = FakePiAgent.instances[1];
+    expect(restoredAgent.options).toMatchObject({
+      initialState: expect.objectContaining({
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'First Pi answer' }],
+          },
+        ],
+      }),
+    });
+    expect(restoredAgent.lastPrompt).toBe('follow-up question');
   });
 
   it('keeps Pi quick mode on shared core tools without preview verification metadata', async () => {
