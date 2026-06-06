@@ -187,4 +187,75 @@ describe('runtimeCommon', () => {
     expect(fs.readFileSync(path.join(srcRoot, 'openCodeRuntime.ts'), 'utf8'))
       .not.toMatch(privateConverterPattern);
   });
+
+  it('keeps runtimeCommon as a compatibility barrel only', () => {
+    const srcRoot = path.resolve(__dirname, '..');
+    const source = fs.readFileSync(path.join(srcRoot, 'runtimeCommon.ts'), 'utf8');
+    const activeLines = source
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('//'));
+
+    expect(activeLines).toEqual([
+      "export * from './runtimeScopes';",
+      "export * from './runtimeCache';",
+      "export * from './runtimePromptContext';",
+      "export * from './runtimeEntities';",
+      "export * from './runtimeHypothesis';",
+      "export * from './runtimeSkillNotes';",
+    ]);
+    expect(source).not.toMatch(/^\s*import\b/m);
+    expect(source).not.toMatch(/^\s*(export\s+)?(function|const|class|interface|type)\s+/m);
+  });
+
+  it('keeps split runtime helper ownership aligned with module names', () => {
+    const srcRoot = path.resolve(__dirname, '..');
+    const modules: Record<string, string> = {
+      runtimeScopes: fs.readFileSync(path.join(srcRoot, 'runtimeScopes.ts'), 'utf8'),
+      runtimeCache: fs.readFileSync(path.join(srcRoot, 'runtimeCache.ts'), 'utf8'),
+      runtimePromptContext: fs.readFileSync(path.join(srcRoot, 'runtimePromptContext.ts'), 'utf8'),
+      runtimeEntities: fs.readFileSync(path.join(srcRoot, 'runtimeEntities.ts'), 'utf8'),
+      runtimeHypothesis: fs.readFileSync(path.join(srcRoot, 'runtimeHypothesis.ts'), 'utf8'),
+      runtimeSkillNotes: fs.readFileSync(path.join(srcRoot, 'runtimeSkillNotes.ts'), 'utf8'),
+    };
+    const ownership: Record<string, readonly string[]> = {
+      runtimeScopes: [
+        'providerScopeFromAnalysisOptions',
+        'knowledgeScopeFromAnalysisOptions',
+      ],
+      runtimeCache: [
+        'SDK_SESSION_FRESHNESS_MS',
+        'DEFAULT_RUNTIME_CACHE_LIMIT',
+        'buildRuntimeSessionMapKey',
+        'isFreshRuntimeEntry',
+        'getLruCacheEntry',
+        'setLruCacheEntry',
+      ],
+      runtimePromptContext: [
+        'formatTraceContext',
+        'buildQuickConversationContext',
+        'collectRecentFindings',
+      ],
+      runtimeEntities: [
+        'buildEntityContext',
+        'captureSkillDisplayEntities',
+      ],
+      runtimeHypothesis: [
+        'RuntimeHypothesisSource',
+        'toProtocolHypothesis',
+      ],
+      runtimeSkillNotes: [
+        'createRuntimeSkillNotesBudget',
+      ],
+    };
+
+    for (const [owner, symbols] of Object.entries(ownership)) {
+      for (const symbol of symbols) {
+        const containingModules = Object.entries(modules)
+          .filter(([, source]) => source.includes(symbol))
+          .map(([moduleName]) => moduleName);
+        expect(containingModules).toEqual([owner]);
+      }
+    }
+  });
 });
