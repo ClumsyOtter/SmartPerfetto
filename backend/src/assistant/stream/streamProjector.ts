@@ -21,6 +21,7 @@ export interface BufferedSseEvent {
   seqId: number;
   eventType: string;
   eventData: string;
+  runId?: string;
 }
 
 /** Max events retained in the per-session ring buffer. */

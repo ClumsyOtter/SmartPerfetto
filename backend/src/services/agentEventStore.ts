@@ -146,7 +146,9 @@ function terminalStatusForEvent(eventType: string, eventData?: string): 'complet
 export function persistSerializedAgentEvent(
   scope: AgentEventPersistenceScope,
   event: SerializedAgentEvent,
+  options: { updateSessionStatus?: boolean } = {},
 ): void {
+  const updateSessionStatus = options.updateSessionStatus !== false;
   const db = getAgentEventDb();
   const write = db.transaction(() => {
     ensureAgentEventGraph(db, scope, event.createdAt);
@@ -184,11 +186,19 @@ export function persistSerializedAgentEvent(
         scope.workspaceId,
         scope.runId,
       );
-      db.prepare(`
-        UPDATE analysis_sessions
-        SET status = ?, updated_at = ?
-        WHERE tenant_id = ? AND workspace_id = ? AND id = ?
-      `).run(terminalStatus, event.createdAt, scope.tenantId, scope.workspaceId, scope.sessionId);
+      if (updateSessionStatus) {
+        db.prepare(`
+          UPDATE analysis_sessions
+          SET status = ?, updated_at = ?
+          WHERE tenant_id = ? AND workspace_id = ? AND id = ?
+        `).run(terminalStatus, event.createdAt, scope.tenantId, scope.workspaceId, scope.sessionId);
+      } else {
+        db.prepare(`
+          UPDATE analysis_sessions
+          SET updated_at = ?
+          WHERE tenant_id = ? AND workspace_id = ? AND id = ?
+        `).run(event.createdAt, scope.tenantId, scope.workspaceId, scope.sessionId);
+      }
     } else {
       db.prepare(`
         UPDATE analysis_runs

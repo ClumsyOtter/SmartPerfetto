@@ -168,10 +168,11 @@ function ensureAnalysisRunGraph(
 export function persistAnalysisRunState(
   scope: AnalysisRunPersistenceScope,
   status: PersistedAnalysisRunStatus,
-  options: { now?: number; error?: string } = {},
+  options: { now?: number; error?: string; updateSessionStatus?: boolean } = {},
 ): void {
   const now = options.now ?? Date.now();
   const terminal = isTerminalStatus(status);
+  const updateSessionStatus = options.updateSessionStatus !== false;
   const db = getAnalysisRunDb();
   const write = db.transaction(() => {
     ensureAnalysisRunGraph(db, scope, now);
@@ -199,19 +200,29 @@ export function persistAnalysisRunState(
       scope.workspaceId,
       scope.runId,
     );
-    db.prepare(`
-      UPDATE analysis_sessions
-      SET status = ?, updated_at = ?
-      WHERE tenant_id = ?
-        AND workspace_id = ?
-        AND id = ?
-    `).run(
-      terminal ? status : 'running',
-      now,
-      scope.tenantId,
-      scope.workspaceId,
-      scope.sessionId,
-    );
+    if (updateSessionStatus) {
+      db.prepare(`
+        UPDATE analysis_sessions
+        SET status = ?, updated_at = ?
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+          AND id = ?
+      `).run(
+        terminal ? status : 'running',
+        now,
+        scope.tenantId,
+        scope.workspaceId,
+        scope.sessionId,
+      );
+    } else {
+      db.prepare(`
+        UPDATE analysis_sessions
+        SET updated_at = ?
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+          AND id = ?
+      `).run(now, scope.tenantId, scope.workspaceId, scope.sessionId);
+    }
   });
   write();
 }

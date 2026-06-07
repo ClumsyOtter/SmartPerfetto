@@ -90,9 +90,11 @@ export interface SceneStorySession {
 
 export interface SceneStoryServiceDeps {
   /** Per-session SSE broadcast (sessionId, update) → void. */
-  broadcast: (sessionId: string, update: StreamingUpdate) => void;
+  broadcast: (sessionId: string, update: StreamingUpdate, runId?: string) => void;
   /** Session lookup. */
   getSession: (sessionId: string) => SceneStorySession | undefined;
+  /** Return false when a late run no longer owns the parent session. */
+  isRunCurrent?: (sessionId: string, runId?: string) => boolean;
   /** Wraps the static SkillExecutor.toDataEnvelopes for unit testability. */
   toEnvelopes?: (result: SkillExecutionResult, traceId: string) => DataEnvelope[];
 
@@ -118,6 +120,7 @@ export interface SceneStoryServiceDeps {
 
 export interface SceneStoryStartArgs {
   sessionId: string;
+  runId?: string;
   traceId: string;
   owner?: ResourceOwnerFields;
   /** Per-request SkillExecutor — must already have its registry loaded. */
@@ -178,6 +181,19 @@ export class SceneStoryService {
     }));
   }
 
+  private runKey(sessionId: string, runId?: string): string {
+    return runId ? `${sessionId}:${runId}` : sessionId;
+  }
+
+  private shouldApply(sessionId: string, runId?: string): boolean {
+    return this.deps.isRunCurrent?.(sessionId, runId) ?? true;
+  }
+
+  private broadcast(sessionId: string, update: StreamingUpdate, runId?: string): void {
+    if (!this.shouldApply(sessionId, runId)) return;
+    this.deps.broadcast(sessionId, update, runId);
+  }
+
   /**
    * Run the full Scene Story pipeline for a session. Resolves when the
    * pipeline reaches a terminal state (completed / failed / cancelled).
@@ -187,7 +203,8 @@ export class SceneStoryService {
    * wraps it for safety).
    */
   async start(args: SceneStoryStartArgs): Promise<SceneReport | null> {
-    const { sessionId, traceId, skillExecutor, options } = args;
+    const { sessionId, runId, traceId, skillExecutor, options } = args;
+    const runKey = this.runKey(sessionId, runId);
     const forceRefresh = options?.forceRefresh ?? false;
     const routeProfile = options?.routeProfile ?? 'legacy';
     const previewOnly = options?.previewOnly === true;
@@ -197,13 +214,15 @@ export class SceneStoryService {
     if (!session) {
       throw new Error(`SceneStoryService.start: session ${sessionId} not found`);
     }
-    if (this.inProgress.has(sessionId)) {
-      throw new Error(`SceneStoryService.start: session ${sessionId} is already running`);
+    if (this.inProgress.has(runKey)) {
+      throw new Error(`SceneStoryService.start: session ${sessionId} run ${runId ?? 'default'} is already running`);
     }
 
-    this.inProgress.add(sessionId);
-    session.status = 'running';
-    session.lastActivityAt = Date.now();
+    this.inProgress.add(runKey);
+    if (this.shouldApply(sessionId, runId)) {
+      session.status = 'running';
+      session.lastActivityAt = Date.now();
+    }
 
     let scenes: DisplayedScene[] = [];
     let intervals: AnalysisInterval[] = [];
@@ -228,7 +247,7 @@ export class SceneStoryService {
         // Disk (by hash) or memory (by traceId) cache lookup.
         const cached = await this.lookupCachedReport(traceHash, traceId, routeProfile, args.owner);
         if (cached) {
-          this.emitCachedReport(sessionId, session, cached);
+          this.emitCachedReport(sessionId, session, cached, runId);
           return cached;
         }
       }
@@ -242,7 +261,7 @@ export class SceneStoryService {
         const inFlight = this.pendingByHash.get(pendingKey);
         if (inFlight) {
           const shared = await inFlight;
-          this.emitCachedReport(sessionId, session, shared);
+          this.emitCachedReport(sessionId, session, shared, runId);
           return shared;
         }
         // Register a deferred promise so peer requests can wait on us.
@@ -257,11 +276,11 @@ export class SceneStoryService {
         pending.catch(() => undefined);
       }
 
-      this.deps.broadcast(sessionId, {
+      this.broadcast(sessionId, {
         type: 'progress',
         content: { phase: 'detecting', message: '场景检测中' },
         timestamp: Date.now(),
-      });
+      }, runId);
 
       // ── Stage 1: scene_reconstruction skill ──────────────────────────────
       // We also capture each envelope into a local array so the finalised
@@ -276,11 +295,11 @@ export class SceneStoryService {
         stage1Envelopes.push(env);
         // Forward each envelope as a `data` SSE event so the existing
         // track_overlay frontend code keeps populating state lanes.
-        this.deps.broadcast(sessionId, {
+        this.broadcast(sessionId, {
           type: 'data',
           content: env,
           timestamp: Date.now(),
-        });
+        }, runId);
       });
 
       scenes = stage1.scenes;
@@ -301,7 +320,7 @@ export class SceneStoryService {
         ? []
         : buildAnalysisIntervals(selectedScenes, { cap, routeProfile });
       if (routeProfile === 'smart') {
-        this.deps.broadcast(sessionId, {
+        this.broadcast(sessionId, {
           type: 'scene_story_smart_eta_refined',
           content: {
             etaSec: estimateSmartEtaSec(previewOnly ? candidateIntervals.length : intervals.length),
@@ -311,7 +330,7 @@ export class SceneStoryService {
             selectedSceneCount: selectedScenes.length,
           },
           timestamp: Date.now(),
-        });
+        }, runId);
       }
 
       // Mark which scenes were selected for analysis.
@@ -324,10 +343,12 @@ export class SceneStoryService {
 
       // Sync to legacy session.scenes / session.trackEvents so the legacy
       // frontend that listens to `track_data` keeps working until C5 lands.
-      session.scenes = scenes.map(toLegacySceneShape);
-      session.trackEvents = scenes.map(toLegacyTrackEventShape);
+      if (this.shouldApply(sessionId, runId)) {
+        session.scenes = scenes.map(toLegacySceneShape);
+        session.trackEvents = scenes.map(toLegacyTrackEventShape);
+      }
 
-      this.deps.broadcast(sessionId, {
+      this.broadcast(sessionId, {
         type: 'scene_story_detected',
         content: {
           scenes,
@@ -337,18 +358,19 @@ export class SceneStoryService {
           previewOnly,
         },
         timestamp: Date.now(),
-      });
+      }, runId);
 
       // Legacy `track_data` event for the rollout period.
-      this.deps.broadcast(sessionId, {
+      this.broadcast(sessionId, {
         type: 'track_data',
         content: { tracks: session.trackEvents, scenes: session.scenes },
         timestamp: Date.now(),
-      });
+      }, runId);
 
       if (previewOnly) {
         const previewReport = this.finalizeSelectionPreview({
           sessionId,
+          runId,
           traceId,
           session,
           scenes,
@@ -367,6 +389,7 @@ export class SceneStoryService {
         options?.cancelToken?.throwIfAborted();
         const emptyReport = await this.finalize({
           sessionId,
+          runId,
           traceId,
           session,
           scenes,
@@ -398,9 +421,9 @@ export class SceneStoryService {
         toDataEnvelopes: routeProfile === 'smart'
           ? (result, tid) => this.toEnvelopes(result as SkillExecutionResult, tid)
           : undefined,
-        onEvent: (event) => this.handleJobEvent(sessionId, scenes, event),
+        onEvent: (event) => this.handleJobEvent(sessionId, runId, scenes, event),
       });
-      this.runners.set(sessionId, runner);
+      this.runners.set(runKey, runner);
 
       runner.enqueue(intervals);
       await runner.waitForAllDone();
@@ -412,11 +435,11 @@ export class SceneStoryService {
       // ── Stage 3: cross-scene narrative summary ──────────────────────────
       let summary: string | null = null;
       if (!cancelled) {
-        this.deps.broadcast(sessionId, {
+        this.broadcast(sessionId, {
           type: 'progress',
           content: { phase: 'summarizing', message: '生成整体叙述' },
           timestamp: Date.now(),
-        });
+        }, runId);
         options?.cancelToken?.throwIfAborted();
         summary = await runStage3Summary({ scenes, jobs });
       }
@@ -425,6 +448,7 @@ export class SceneStoryService {
       options?.cancelToken?.throwIfAborted();
       const finalReport = await this.finalize({
         sessionId,
+        runId,
         traceId,
         session,
         scenes,
@@ -442,21 +466,23 @@ export class SceneStoryService {
       return finalReport;
     } catch (err) {
       pipelineError = err as Error;
-      session.status = 'failed';
-      session.error = pipelineError.message;
-      this.deps.broadcast(sessionId, {
-        type: 'error',
-        content: { message: pipelineError.message },
-        timestamp: Date.now(),
-      });
+      if (this.shouldApply(sessionId, runId)) {
+        session.status = 'failed';
+        session.error = pipelineError.message;
+        this.broadcast(sessionId, {
+          type: 'error',
+          content: { message: pipelineError.message },
+          timestamp: Date.now(),
+        }, runId);
+      }
       // Wake any peer requests that were awaiting this hash so they propagate
       // the same failure on their own SSE channels (instead of hanging).
       rejectPending?.(pipelineError);
       return null;
     } finally {
       if (pendingKeyToDelete) this.pendingByHash.delete(pendingKeyToDelete);
-      this.runners.delete(sessionId);
-      this.inProgress.delete(sessionId);
+      this.runners.delete(runKey);
+      this.inProgress.delete(runKey);
     }
   }
 
@@ -468,18 +494,18 @@ export class SceneStoryService {
    * Returns true when a runner was found and cancelled; false otherwise
    * (already settled or never started).
    */
-  cancel(sessionId: string): boolean {
-    const runner = this.runners.get(sessionId);
+  cancel(sessionId: string, runId?: string): boolean {
+    const runner = this.runners.get(this.runKey(sessionId, runId));
     if (!runner) return false;
 
     runner.cancel();
     // Session-scope cancel — distinct from per-job cancel which uses
     // scope: 'job'. Frontend dispatchers must inspect content.scope.
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: 'scene_story_cancelled',
       content: { scope: 'session', reason: 'user_requested', sessionId },
       timestamp: Date.now(),
-    });
+    }, runId);
     return true;
   }
 
@@ -489,9 +515,11 @@ export class SceneStoryService {
 
   private handleJobEvent(
     sessionId: string,
+    runId: string | undefined,
     scenes: DisplayedScene[],
     event: JobRunnerEvent,
   ): void {
+    if (!this.shouldApply(sessionId, runId)) return;
     if (event.type !== 'all_done' && 'job' in event && event.job) {
       const job = event.job;
       const scene = scenes.find((s) => s.id === job.interval.displayedSceneId);
@@ -526,15 +554,16 @@ export class SceneStoryService {
       content.error = event.error;
     }
 
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: sseType,
       content,
       timestamp: Date.now(),
-    });
+    }, runId);
   }
 
   private async finalize(args: {
     sessionId: string;
+    runId?: string;
     traceId: string;
     session: SceneStorySession;
     scenes: DisplayedScene[];
@@ -576,9 +605,15 @@ export class SceneStoryService {
       sceneVerification: args.sceneVerification,
     });
 
-    args.session.sceneStoryReport = report;
-    args.session.status = args.cancelled ? 'cancelled' : 'completed';
-    args.session.lastActivityAt = Date.now();
+    if (!this.shouldApply(args.sessionId, args.runId)) {
+      return report;
+    }
+
+    if (this.shouldApply(args.sessionId, args.runId)) {
+      args.session.sceneStoryReport = report;
+      args.session.status = args.cancelled ? 'cancelled' : 'completed';
+      args.session.lastActivityAt = Date.now();
+    }
 
     // Persist BEFORE broadcasting scene_story_report_ready so any client
     // that immediately calls GET /scene-reconstruct/report/:id is guaranteed
@@ -587,7 +622,7 @@ export class SceneStoryService {
       indexByHash: args.cacheableByHash,
     });
 
-    this.deps.broadcast(args.sessionId, {
+    this.broadcast(args.sessionId, {
       type: 'scene_story_report_ready',
       content: {
         reportId: report.reportId,
@@ -597,23 +632,24 @@ export class SceneStoryService {
         jobCount: report.jobs.length,
       },
       timestamp: Date.now(),
-    });
+    }, args.runId);
 
     // Final progress event so the legacy frontend has a clean terminal signal.
-    this.deps.broadcast(args.sessionId, {
+    this.broadcast(args.sessionId, {
       type: 'progress',
       content: {
         phase: args.cancelled ? 'cancelled' : 'completed',
         message: args.cancelled ? '场景还原已取消' : '场景还原完成',
       },
       timestamp: Date.now(),
-    });
+    }, args.runId);
 
     return report;
   }
 
   private finalizeSelectionPreview(args: {
     sessionId: string;
+    runId?: string;
     traceId: string;
     session: SceneStorySession;
     scenes: DisplayedScene[];
@@ -642,12 +678,18 @@ export class SceneStoryService {
       sceneVerification: args.sceneVerification,
     });
 
-    args.session.sceneStoryReport = report;
-    args.session.status = 'completed';
-    args.session.lastActivityAt = Date.now();
+    if (!this.shouldApply(args.sessionId, args.runId)) {
+      return report;
+    }
+
+    if (this.shouldApply(args.sessionId, args.runId)) {
+      args.session.sceneStoryReport = report;
+      args.session.status = 'completed';
+      args.session.lastActivityAt = Date.now();
+    }
     this.memoryReportById.set(report.reportId, report);
 
-    this.deps.broadcast(args.sessionId, {
+    this.broadcast(args.sessionId, {
       type: 'scene_story_selection_ready',
       content: {
         sceneCount: report.displayedScenes.length,
@@ -657,16 +699,16 @@ export class SceneStoryService {
         sceneVerification: report.sceneVerification,
       },
       timestamp: Date.now(),
-    });
+    }, args.runId);
 
-    this.deps.broadcast(args.sessionId, {
+    this.broadcast(args.sessionId, {
       type: 'progress',
       content: {
         phase: 'selection_ready',
         message: '场景盘点完成,请选择智能分析范围',
       },
       timestamp: Date.now(),
-    });
+    }, args.runId);
 
     return report;
   }
@@ -722,32 +764,35 @@ export class SceneStoryService {
     sessionId: string,
     session: SceneStorySession,
     report: SceneReport,
+    runId?: string,
   ): void {
     const now = Date.now();
-    session.sceneStoryReport = report;
-    session.scenes = report.displayedScenes.map(toLegacySceneShape);
-    session.trackEvents = report.displayedScenes.map(toLegacyTrackEventShape);
-    session.status = 'completed';
-    session.lastActivityAt = now;
+    if (this.shouldApply(sessionId, runId)) {
+      session.sceneStoryReport = report;
+      session.scenes = report.displayedScenes.map(toLegacySceneShape);
+      session.trackEvents = report.displayedScenes.map(toLegacyTrackEventShape);
+      session.status = 'completed';
+      session.lastActivityAt = now;
+    }
 
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: 'progress',
       content: { phase: 'cached', message: '已命中缓存,加载历史报告' },
       timestamp: now,
-    });
+    }, runId);
 
     // Replay Stage1 DataEnvelopes so lane overlays / state-timeline tracks
     // render the same way they would on a cold run. Without this, cache hits
     // would show the scene list but no lane overlays.
     for (const env of report.cachedDataEnvelopes) {
-      this.deps.broadcast(sessionId, {
+      this.broadcast(sessionId, {
         type: 'data',
         content: env,
         timestamp: now,
-      });
+      }, runId);
     }
 
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: 'scene_story_detected',
       content: {
         scenes: report.displayedScenes,
@@ -756,17 +801,17 @@ export class SceneStoryService {
         previewOnly: report.jobs.length === 0 && report.summary === '场景盘点已完成，等待用户选择智能分析深钻范围。',
       },
       timestamp: now,
-    });
+    }, runId);
 
     // Legacy track_data so the existing track_overlay code keeps painting
     // lanes for cache hits as well.
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: 'track_data',
       content: { tracks: session.trackEvents, scenes: session.scenes },
       timestamp: now,
-    });
+    }, runId);
 
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: 'scene_story_report_ready',
       content: {
         reportId: report.reportId,
@@ -777,13 +822,13 @@ export class SceneStoryService {
         cached: true,
       },
       timestamp: now,
-    });
+    }, runId);
 
-    this.deps.broadcast(sessionId, {
+    this.broadcast(sessionId, {
       type: 'progress',
       content: { phase: 'completed', message: '场景还原完成 (缓存)' },
       timestamp: now,
-    });
+    }, runId);
   }
 
   // -------------------------------------------------------------------------

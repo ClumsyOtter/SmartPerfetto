@@ -16,6 +16,7 @@ interface FinalizeSessionLike {
   conclusionHistory: Array<{ turn: number; conclusion: string; confidence: number; timestamp: number }>;
   runSequence?: number;
   activeRun?: { runId?: string; requestId?: string; sequence?: number };
+  lastRun?: { runId?: string; requestId?: string; sequence?: number };
   status: SessionStatus;
   sseClients: any[];
   logger: {
@@ -31,12 +32,13 @@ export interface FinalizeAgentDrivenSessionDeps<TSession extends FinalizeSession
     result: AgentRuntimeAnalysisResult;
     query: string;
   }): { code: string; message: string } | null | undefined;
-  broadcast(sessionId: string, update: StreamingUpdate): void;
-  buildConversationStepUpdate(session: TSession, update: StreamingUpdate): StreamingUpdate | null;
+  isRunCurrent(session: TSession, runId?: string): boolean;
+  broadcast(sessionId: string, update: StreamingUpdate, runId?: string): void;
+  buildConversationStepUpdate(session: TSession, update: StreamingUpdate, runId?: string): StreamingUpdate | null;
   appendConversationStep(session: TSession, update: StreamingUpdate): void;
   annotateLatestCompletedTurn(sessionId: string, traceId: string, result: AgentRuntimeAnalysisResult): void;
   terminalRunStatusForResult(result: AgentRuntimeAnalysisResult): string;
-  markSessionRunStatus(session: TSession, status: string): void;
+  markSessionRunStatus(session: TSession, status: string, error?: string, runId?: string): void;
   persistAgentTurn(input: {
     session: any;
     sessionId: string;
@@ -51,8 +53,8 @@ export interface FinalizeAgentDrivenSessionDeps<TSession extends FinalizeSession
     logger: TSession['logger'];
     logComponent: string;
   }): void;
-  ensureCompletedAnalysisSseEvents(session: TSession): unknown[];
-  sendAgentDrivenResult(client: any, session: TSession): void;
+  ensureCompletedAnalysisSseEvents(session: TSession, runId?: string): unknown[];
+  sendAgentDrivenResult(client: any, session: TSession, runId?: string): void;
 }
 
 export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>(input: {
@@ -61,15 +63,28 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
   traceId: string;
   session: TSession;
   result: AgentRuntimeAnalysisResult;
+  runId?: string;
   logComponent: string;
 }, deps: FinalizeAgentDrivenSessionDeps<TSession>): void {
-  const { sessionId, query, traceId, session, result } = input;
+  const { sessionId, query, traceId, session, result, runId } = input;
   const { logger } = session;
+  if (!deps.isRunCurrent(session, runId)) {
+    logger.warn(input.logComponent, 'Skipping stale finalization', {
+      sessionId,
+      runId,
+    });
+    return;
+  }
 
   session.result = result;
-  delete (session as any).completedAnalysisFinalArtifacts;
-  delete (session as any).completedAnalysisSseEvents;
-  delete (session as any).completedAnalysisSseEventsQualityGateVersion;
+  if (runId) {
+    delete (session as any).completedAnalysisFinalArtifactsByRunId?.[runId];
+    delete (session as any).completedAnalysisSseEventsByRunId?.[runId];
+  } else {
+    delete (session as any).completedAnalysisFinalArtifacts;
+    delete (session as any).completedAnalysisSseEvents;
+    delete (session as any).completedAnalysisSseEventsQualityGateVersion;
+  }
 
   const existingIds = new Set(session.hypotheses.map(h => h.id));
   for (const h of result.hypotheses) {
@@ -106,11 +121,11 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
       },
       timestamp: Date.now(),
     };
-    deps.broadcast(sessionId, update);
-    const conversationStep = deps.buildConversationStepUpdate(session, update);
+    deps.broadcast(sessionId, update, runId);
+    const conversationStep = deps.buildConversationStepUpdate(session, update, runId);
     if (conversationStep) {
       deps.appendConversationStep(session, conversationStep);
-      deps.broadcast(sessionId, conversationStep);
+      deps.broadcast(sessionId, conversationStep, runId);
     }
   }
 
@@ -120,7 +135,7 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
   session.status = terminalRunStatus === 'quota_exceeded'
     ? 'quota_exceeded'
     : result.success ? 'completed' : 'failed';
-  deps.markSessionRunStatus(session, terminalRunStatus);
+  deps.markSessionRunStatus(session, terminalRunStatus, undefined, runId);
 
   logger.info(input.logComponent, 'Agent-driven result finalized', {
     confidence: result.confidence,
@@ -131,9 +146,9 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     claimVerifierStatus: result.claimVerificationResult?.status,
     partial: result.partial,
     terminationReason: result.terminationReason,
-    runId: session.activeRun?.runId,
-    requestId: session.activeRun?.requestId,
-    runSequence: session.activeRun?.sequence,
+    runId: runId || session.activeRun?.runId || session.lastRun?.runId,
+    requestId: session.activeRun?.requestId || session.lastRun?.requestId,
+    runSequence: session.activeRun?.sequence || session.lastRun?.sequence,
   });
 
   deps.persistAgentTurn({
@@ -151,12 +166,12 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     logComponent: input.logComponent,
   });
 
-  deps.ensureCompletedAnalysisSseEvents(session);
+  deps.ensureCompletedAnalysisSseEvents(session, runId);
   const clientCount = session.sseClients.length;
   session.sseClients.forEach((client, index) => {
     try {
       logger.info('AgentRoutes', `Sending finalized result to client ${index + 1}/${clientCount}`);
-      deps.sendAgentDrivenResult(client, session);
+      deps.sendAgentDrivenResult(client, session, runId);
     } catch (e: any) {
       logger.error('AgentRoutes', `Error sending finalized result to client ${index + 1}`, e);
     }

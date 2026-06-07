@@ -167,6 +167,36 @@ describe('analysis run store', () => {
     }
   });
 
+  it('can preserve current session status when persisting a stale terminal run', () => {
+    const firstRun = scope({ runId: 'run-first', sessionId: 'session-shared' });
+    const secondRun = scope({ runId: 'run-second', sessionId: 'session-shared' });
+
+    persistAnalysisRunState(firstRun, 'running', { now: 1_777_000_000_000 });
+    persistAnalysisRunState(secondRun, 'running', { now: 1_777_000_001_000 });
+    persistAnalysisRunState(firstRun, 'cancelled', {
+      now: 1_777_000_002_000,
+      error: 'cancelled by user',
+      updateSessionStatus: false,
+    });
+
+    expect(getAnalysisRunLifecycle(firstRun, 'run-first')).toEqual(expect.objectContaining({
+      status: 'cancelled',
+      completedAt: 1_777_000_002_000,
+    }));
+    expect(getAnalysisRunLifecycle(secondRun, 'run-second')).toEqual(expect.objectContaining({
+      status: 'running',
+    }));
+
+    const db = openEnterpriseDb();
+    try {
+      expect(db.prepare('SELECT status FROM analysis_sessions WHERE id = ?').get('session-shared')).toEqual({
+        status: 'running',
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('fails interrupted nonterminal runs on backend startup while preserving terminal runs', () => {
     const pendingScope = scope({ sessionId: 'session-pending', runId: 'run-pending' });
     const runningScope = scope({ sessionId: 'session-running', runId: 'run-running' });

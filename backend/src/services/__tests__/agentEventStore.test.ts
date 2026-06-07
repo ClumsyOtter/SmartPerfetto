@@ -147,6 +147,40 @@ describe('agent event store', () => {
     }
   });
 
+  it('can persist stale terminal events without overwriting the session status', () => {
+    const firstRun = scope({ runId: 'run-first', sessionId: 'session-shared' });
+    const secondRun = scope({ runId: 'run-second', sessionId: 'session-shared' });
+
+    persistSerializedAgentEvent(secondRun, {
+      cursor: 1,
+      eventType: 'progress',
+      eventData: JSON.stringify({ type: 'progress', data: { phase: 'running' } }),
+      createdAt: 1_777_000_001_000,
+    });
+    persistSerializedAgentEvent(firstRun, {
+      cursor: 1,
+      eventType: 'analysis_cancelled',
+      eventData: JSON.stringify({
+        type: 'analysis_cancelled',
+        data: { terminalRunStatus: 'cancelled' },
+      }),
+      createdAt: 1_777_000_002_000,
+    }, { updateSessionStatus: false });
+
+    const db = openEnterpriseDb();
+    try {
+      expect(db.prepare('SELECT status, completed_at FROM analysis_runs WHERE id = ?').get('run-first')).toEqual({
+        status: 'cancelled',
+        completed_at: 1_777_000_002_000,
+      });
+      expect(db.prepare('SELECT status FROM analysis_sessions WHERE id = ?').get('session-shared')).toEqual({
+        status: 'running',
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('preserves quota_exceeded terminal status from analysis_completed payloads', () => {
     persistSerializedAgentEvent(scope({ runId: 'run-quota', sessionId: 'session-quota' }), {
       cursor: 1,
