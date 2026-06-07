@@ -572,6 +572,6 @@ export interface VerificationResult {
 
 export interface VerificationIssue {
   type: 'missing_evidence' | 'too_many_criticals' | 'known_misdiagnosis' | 'severity_mismatch' | 'missing_check' | 'plan_deviation' | 'missing_reasoning' | 'unresolved_hypothesis' | 'truncation';
-  severity: 'warning' | 'error';
+  severity: 'warning' | 'error' | 'info';
   message: string;
 }

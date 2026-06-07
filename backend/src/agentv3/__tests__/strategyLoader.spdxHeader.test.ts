@@ -20,9 +20,11 @@
 
 import { describe, it, expect, beforeAll } from '@jest/globals';
 import {
+  getAllVerifierMisdiagnosisPatterns,
   getFinalReportContract,
   getRegisteredScenes,
   getStrategyContent,
+  getVerifierMisdiagnosisPatterns,
   getPhaseHints,
   invalidateStrategyCache,
   loadPromptTemplate,
@@ -175,6 +177,42 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     )?.triggerPatterns).toEqual(expect.arrayContaining([
       'allow[- ]while[- ]idle|setExactAndAllowWhileIdle|exact alarm|AlarmManager|wakeup alarm|excessive wakeups',
     ]));
+  });
+
+  it('loads verifier misdiagnosis patterns with scene and global scopes', () => {
+    const all = getAllVerifierMisdiagnosisPatterns();
+    expect(all.map(pattern => pattern.id)).toEqual(expect.arrayContaining([
+      'vsync_vrr_alignment_false_positive',
+      'buffer_stuffing_not_app_jank',
+      'single_frame_critical_false_positive',
+    ]));
+    expect(all).toHaveLength(3);
+    expect(all.every(pattern => pattern.type === 'known_misdiagnosis')).toBe(true);
+    expect(all.every(pattern => pattern.severity === 'warning' || pattern.severity === 'info')).toBe(true);
+
+    const pipeline = getVerifierMisdiagnosisPatterns('pipeline').map(pattern => pattern.id);
+    expect(pipeline).toEqual(expect.arrayContaining([
+      'vsync_vrr_alignment_false_positive',
+      'buffer_stuffing_not_app_jank',
+      'single_frame_critical_false_positive',
+    ]));
+
+    const startup = getVerifierMisdiagnosisPatterns('startup').map(pattern => pattern.id);
+    expect(startup).toEqual(['single_frame_critical_false_positive']);
+
+    const scrollResponse = getVerifierMisdiagnosisPatterns('scroll_response').map(pattern => pattern.id);
+    expect(scrollResponse).toEqual(expect.arrayContaining([
+      'vsync_vrr_alignment_false_positive',
+      'single_frame_critical_false_positive',
+    ]));
+    expect(scrollResponse).not.toContain('buffer_stuffing_not_app_jank');
+
+    const interaction = getVerifierMisdiagnosisPatterns('interaction').map(pattern => pattern.id);
+    expect(interaction).toEqual(expect.arrayContaining([
+      'vsync_vrr_alignment_false_positive',
+      'single_frame_critical_false_positive',
+    ]));
+    expect(interaction).not.toContain('buffer_stuffing_not_app_jank');
   });
 
   it('keeps contract-only smart strategy out of normal scene registration', () => {

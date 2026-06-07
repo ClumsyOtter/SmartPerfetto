@@ -25,31 +25,21 @@ import { expectedCallMatchesRecord, expectedToolNames, formatExpectedCall } from
 import type { SceneType } from '../../../agentv3/sceneClassifier';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../../../agentv3/outputLanguage';
 import { backendLogPath } from '../../../runtimePaths';
-import { getFinalReportContract, loadPromptTemplate, renderTemplate } from '../../../agentv3/strategyLoader';
+import {
+  getFinalReportContract,
+  getVerifierMisdiagnosisPatterns,
+  loadPromptTemplate,
+  renderTemplate,
+  type VerifierMisdiagnosisSeverity,
+} from '../../../agentv3/strategyLoader';
 import { assessFinalReportContractCompleteness } from '../../../services/finalReportContractGate';
 
-/** Hardcoded known misdiagnosis patterns — common false positives in performance analysis. */
-const HARDCODED_MISDIAGNOSIS_PATTERNS: Array<{
+interface CompiledMisdiagnosisPattern {
   pattern: RegExp;
-  type: VerificationIssue['type'];
+  type: 'known_misdiagnosis';
   message: string;
-}> = [
-  {
-    pattern: /VSync.*(?:对齐异常|misalign|偏移)/i,
-    type: 'known_misdiagnosis',
-    message: 'VSync 对齐异常可能是正常的 VRR (可变刷新率) 行为，需确认设备是否支持 VRR',
-  },
-  {
-    pattern: /Buffer Stuffing.*(?:严重|critical|掉帧)/i,
-    type: 'known_misdiagnosis',
-    message: 'Buffer Stuffing 是管线背压问题，非 App 逻辑缺陷 — 感知掉帧率已排除 Buffer Stuffing，请勿将其等同于真实掉帧',
-  },
-  {
-    pattern: /(?:单帧|single frame|1帧).*(?:异常|critical|严重)/i,
-    type: 'known_misdiagnosis',
-    message: '单帧异常不应标记为 CRITICAL — 需确认是否有模式性重复',
-  },
-];
+  severity: VerifierMisdiagnosisSeverity;
+}
 
 // P2-G14: Learned misdiagnosis patterns — auto-extracted from verification results
 interface LearnedMisdiagnosisPattern {
@@ -84,11 +74,36 @@ function saveLearnedPatterns(patterns: LearnedMisdiagnosisPattern[]): void {
   }
 }
 
+function compileStrategyMisdiagnosisPatterns(sceneType?: SceneType): CompiledMisdiagnosisPattern[] {
+  if (!sceneType) return [];
+  const strategyPatterns = getVerifierMisdiagnosisPatterns(sceneType);
+  const compiled: CompiledMisdiagnosisPattern[] = [];
+  for (const entry of strategyPatterns) {
+    for (const pattern of entry.patterns) {
+      try {
+        compiled.push({
+          pattern: new RegExp(pattern, 'i'),
+          type: 'known_misdiagnosis',
+          message: entry.message,
+          severity: entry.severity,
+        });
+      } catch (error) {
+        console.warn('[ClaudeVerifier] Ignoring invalid strategy misdiagnosis regex:', {
+          id: entry.id,
+          pattern,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return compiled;
+}
+
 /**
- * Build combined misdiagnosis patterns from hardcoded + learned.
+ * Build combined misdiagnosis patterns from strategy frontmatter + learned.
  * Learned patterns are converted to regex on-the-fly from stored keywords.
  */
-function getKnownMisdiagnosisPatterns(): Array<{ pattern: RegExp; type: VerificationIssue['type']; message: string }> {
+function getKnownMisdiagnosisPatterns(sceneType?: SceneType): CompiledMisdiagnosisPattern[] {
   const learned = loadLearnedPatterns();
   const cutoff = Date.now() - LEARNED_PATTERN_TTL_MS;
 
@@ -96,11 +111,12 @@ function getKnownMisdiagnosisPatterns(): Array<{ pattern: RegExp; type: Verifica
     .filter(p => p.createdAt >= cutoff && p.occurrences >= 2) // Only use patterns seen ≥2 times
     .map(p => ({
       pattern: new RegExp(p.keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i'),
-      type: 'known_misdiagnosis' as VerificationIssue['type'],
+      type: 'known_misdiagnosis' as const,
       message: `(学习) ${p.message}`,
+      severity: 'warning' as const,
     }));
 
-  return [...HARDCODED_MISDIAGNOSIS_PATTERNS, ...learnedAsPatterns];
+  return [...compileStrategyMisdiagnosisPatterns(sceneType), ...learnedAsPatterns];
 }
 
 /**
@@ -175,6 +191,7 @@ export function learnFromVerificationResults(
 export function verifyHeuristic(
   findings: Finding[],
   conclusion: string,
+  sceneType?: SceneType,
 ): VerificationIssue[] {
   const issues: VerificationIssue[] = [];
 
@@ -199,13 +216,13 @@ export function verifyHeuristic(
     });
   }
 
-  // Check 3: Known misdiagnosis pattern matching (hardcoded + learned, P2-G14)
+  // Check 3: Known misdiagnosis pattern matching (strategy frontmatter + learned, P2-G14)
   const fullText = conclusion + ' ' + findings.map(f => `${f.title} ${f.description}`).join(' ');
-  for (const pattern of getKnownMisdiagnosisPatterns()) {
+  for (const pattern of getKnownMisdiagnosisPatterns(sceneType)) {
     if (pattern.pattern.test(fullText)) {
       issues.push({
         type: pattern.type,
-        severity: 'warning',
+        severity: pattern.severity,
         message: pattern.message,
       });
     }
@@ -1196,7 +1213,7 @@ export async function verifyConclusion(
   const outputLanguage = options.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
 
   // Layer 1: Heuristic checks
-  const heuristicIssues = verifyHeuristic(findings, conclusion);
+  const heuristicIssues = verifyHeuristic(findings, conclusion, sceneType);
 
   // Layer 2: Plan adherence check
   const planIssues = verifyPlanAdherence(plan ?? null);

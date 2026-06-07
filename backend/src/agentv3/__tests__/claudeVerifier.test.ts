@@ -51,6 +51,25 @@ import {
   parseVerifierJsonIssues,
 } from '../claudeVerifier';
 
+const mockFs = require('fs') as jest.Mocked<typeof import('fs')>;
+const actualFs = jest.requireActual<typeof import('fs')>('fs');
+
+beforeEach(() => {
+  (mockFs.existsSync as jest.Mock).mockImplementation((...args: unknown[]) => {
+    const p = args[0] as string;
+    if (typeof p === 'string' && p.includes('learned_misdiagnosis_patterns')) return false;
+    return actualFs.existsSync(p);
+  });
+  (mockFs.readFileSync as jest.Mock).mockImplementation((...args: unknown[]) => {
+    const p = args[0] as string;
+    if (typeof p === 'string' && p.includes('learned_misdiagnosis_patterns')) return '[]';
+    return actualFs.readFileSync(p, args[1] as BufferEncoding | undefined);
+  });
+  (mockFs.writeFileSync as jest.Mock).mockClear();
+  (mockFs.renameSync as jest.Mock).mockClear();
+  (mockFs.mkdirSync as jest.Mock).mockClear();
+});
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
@@ -120,16 +139,70 @@ describe('verifyHeuristic', () => {
   });
 
   describe('Check 3: Known misdiagnosis patterns', () => {
-    it('should flag VSync alignment false positive', () => {
+    it('should flag VSync alignment false positive only for scoped scenes', () => {
       const findings = [makeFinding({ title: 'VSync 对齐异常', description: 'VSync misalign detected' })];
-      const issues = verifyHeuristic(findings, 'VSync 对齐异常严重');
-      expect(issues.some(i => i.type === 'known_misdiagnosis')).toBe(true);
+      const pipelineIssues = verifyHeuristic(findings, 'VSync 对齐异常严重', 'pipeline');
+      expect(pipelineIssues).toContainEqual(expect.objectContaining({
+        type: 'known_misdiagnosis',
+        severity: 'warning',
+        message: expect.stringContaining('VRR'),
+      }));
+
+      const scrollResponseIssues = verifyHeuristic(findings, 'VSync 对齐异常严重', 'scroll_response');
+      expect(scrollResponseIssues.some(i => i.type === 'known_misdiagnosis')).toBe(true);
+
+      const startupIssues = verifyHeuristic(findings, 'VSync 对齐异常严重', 'startup');
+      expect(startupIssues.filter(i => i.type === 'known_misdiagnosis')).toHaveLength(0);
     });
 
-    it('should flag single frame CRITICAL', () => {
+    it('should flag Buffer Stuffing only for scoped scenes', () => {
+      const findings = [makeFinding({ title: 'Buffer Stuffing 严重', description: 'Buffer Stuffing critical' })];
+      const pipelineIssues = verifyHeuristic(findings, 'Buffer Stuffing critical 掉帧', 'pipeline');
+      expect(pipelineIssues).toContainEqual(expect.objectContaining({
+        type: 'known_misdiagnosis',
+        severity: 'warning',
+        message: expect.stringContaining('Buffer Stuffing'),
+      }));
+
+      const interactionIssues = verifyHeuristic(findings, 'Buffer Stuffing critical 掉帧', 'interaction');
+      expect(interactionIssues.filter(i => i.type === 'known_misdiagnosis')).toHaveLength(0);
+    });
+
+    it('should flag single frame CRITICAL globally when a scene is provided', () => {
       const findings = [makeFinding({ title: '单帧异常', severity: 'critical', description: '1帧异常 critical', evidence: [{}] })];
-      const issues = verifyHeuristic(findings, '单帧异常是严重问题');
-      expect(issues.some(i => i.type === 'known_misdiagnosis')).toBe(true);
+      const issues = verifyHeuristic(findings, '单帧异常是严重问题', 'startup');
+      expect(issues).toContainEqual(expect.objectContaining({
+        type: 'known_misdiagnosis',
+        severity: 'warning',
+      }));
+    });
+
+    it('appends learned patterns after strategy patterns', () => {
+      const learned = [{
+        keywords: ['VSync', 'alignment'],
+        message: 'Learned VSync warning',
+        occurrences: 2,
+        createdAt: Date.now(),
+      }];
+      (mockFs.existsSync as jest.Mock).mockImplementation((...args: unknown[]) => {
+        const p = args[0] as string;
+        if (typeof p === 'string' && p.includes('learned_misdiagnosis_patterns')) return true;
+        return actualFs.existsSync(p);
+      });
+      (mockFs.readFileSync as jest.Mock).mockImplementation((...args: unknown[]) => {
+        const p = args[0] as string;
+        if (typeof p === 'string' && p.includes('learned_misdiagnosis_patterns')) {
+          return JSON.stringify(learned);
+        }
+        return actualFs.readFileSync(p, args[1] as BufferEncoding | undefined);
+      });
+
+      const issues = verifyHeuristic([], 'VSync alignment misalign and VSync 对齐异常严重', 'pipeline')
+        .filter(issue => issue.type === 'known_misdiagnosis');
+      expect(issues.map(issue => issue.message)).toEqual([
+        expect.stringContaining('VRR'),
+        expect.stringContaining('(学习) Learned VSync warning'),
+      ]);
     });
   });
 
@@ -858,6 +931,19 @@ describe('verifyConclusion progress output', () => {
       type: 'missing_reasoning',
       severity: 'error',
       message: expect.stringContaining('App/系统分层建议'),
+    }));
+  });
+
+  it('passes sceneType into heuristic misdiagnosis matching', async () => {
+    const result = await verifyConclusion([], 'VSync 对齐异常严重，且报告正文已经足够长以通过长度检查。', {
+      enableLLM: false,
+      sceneType: 'pipeline',
+    });
+
+    expect(result.heuristicIssues).toContainEqual(expect.objectContaining({
+      type: 'known_misdiagnosis',
+      severity: 'warning',
+      message: expect.stringContaining('VRR'),
     }));
   });
 

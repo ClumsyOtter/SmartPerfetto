@@ -75,6 +75,12 @@ interface VendorOverrideDefinition {
 const SKILLS_DIR = path.join(__dirname, '../../../skills');
 const STRATEGIES_DIR = path.join(__dirname, '../../../strategies');
 const STRATEGY_FRONTMATTER_RE = /^(?:\s*<!--[\s\S]*?-->\s*)*---\n([\s\S]*?)\n---\n?/;
+const VERIFIER_MISDIAGNOSIS_SEVERITIES = new Set(['warning', 'info']);
+
+export interface StrategyFrontmatterValidationContext {
+  knownScenes?: Set<string>;
+  seenVerifierMisdiagnosisIds?: Map<string, string>;
+}
 
 /**
  * Tier + stdlib lint rules (rules 1, 2, 3 from docs/skills-audit-2026-05.md §7).
@@ -912,18 +918,127 @@ function validateFinalReportContractFrontmatter(frontmatter: Record<string, unkn
   return errors;
 }
 
-function validateStrategyFrontmatter(content: string, file: string): string[] {
+function validateVerifierMisdiagnosisFrontmatter(
+  frontmatter: Record<string, unknown>,
+  file: string,
+  context: StrategyFrontmatterValidationContext = {},
+): string[] {
+  const errors: string[] = [];
+  const entries = frontmatter.verifier_misdiagnosis_patterns;
+  if (entries === undefined) return errors;
+  if (!Array.isArray(entries)) {
+    return [`${file}: verifier_misdiagnosis_patterns must be an array`];
+  }
+
+  entries.forEach((entry, index) => {
+    const prefix = `verifier_misdiagnosis_patterns[${index}]`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(`${prefix} must be an object`);
+      return;
+    }
+
+    const record = entry as Record<string, unknown>;
+    if (!isNonEmptyString(record.id)) {
+      errors.push(`${prefix}.id must be a non-empty string`);
+    } else if (context.seenVerifierMisdiagnosisIds) {
+      const previousFile = context.seenVerifierMisdiagnosisIds.get(record.id);
+      if (previousFile) {
+        errors.push(`${prefix}.id duplicates "${record.id}" already declared in ${previousFile}`);
+      } else {
+        context.seenVerifierMisdiagnosisIds.set(record.id, file);
+      }
+    }
+
+    if (record.type !== 'known_misdiagnosis') {
+      errors.push(`${prefix}.type must be known_misdiagnosis`);
+    }
+    if (!isNonEmptyString(record.message)) {
+      errors.push(`${prefix}.message must be a non-empty string`);
+    }
+    if (
+      record.severity !== undefined
+      && (
+        typeof record.severity !== 'string'
+        || !VERIFIER_MISDIAGNOSIS_SEVERITIES.has(record.severity)
+      )
+    ) {
+      errors.push(`${prefix}.severity must be one of warning, info`);
+    }
+
+    if (!Array.isArray(record.patterns) || record.patterns.length === 0) {
+      errors.push(`${prefix}.patterns must be a non-empty array`);
+    } else {
+      record.patterns.forEach((pattern, patternIndex) => {
+        validateRegexPattern(pattern, errors, `${prefix}.patterns[${patternIndex}]`);
+      });
+    }
+
+    if (record.global !== undefined && typeof record.global !== 'boolean') {
+      errors.push(`${prefix}.global must be a boolean when present`);
+    }
+
+    const scenes = record.scenes;
+    const hasGlobalScope = record.global === true;
+    let validSceneCount = 0;
+    const seenScenes = new Set<string>();
+    if (scenes !== undefined) {
+      if (!Array.isArray(scenes)) {
+        errors.push(`${prefix}.scenes must be an array when present`);
+      } else {
+        scenes.forEach((scene, sceneIndex) => {
+          const scenePath = `${prefix}.scenes[${sceneIndex}]`;
+          if (!isNonEmptyString(scene)) {
+            errors.push(`${scenePath} must be a non-empty string`);
+            return;
+          }
+          validSceneCount++;
+          if (seenScenes.has(scene)) {
+            errors.push(`${scenePath} duplicates scene "${scene}"`);
+            return;
+          }
+          seenScenes.add(scene);
+          if (context.knownScenes && !context.knownScenes.has(scene)) {
+            errors.push(`${scenePath} references unknown or contract-only scene "${scene}"`);
+          }
+        });
+      }
+    }
+
+    if (hasGlobalScope && validSceneCount > 0) {
+      errors.push(`${prefix} must declare either global: true or scenes, not both`);
+    } else if (!hasGlobalScope && validSceneCount === 0) {
+      errors.push(`${prefix} must declare global: true or a non-empty scenes array`);
+    }
+  });
+
+  return errors.map(error => `${file}: ${error}`);
+}
+
+function parseStrategyFrontmatter(content: string, file: string): { frontmatter: Record<string, unknown> | null; errors: string[] } {
   const match = content.match(STRATEGY_FRONTMATTER_RE);
-  if (!match) return [`${file}: missing or invalid YAML frontmatter`];
+  if (!match) return { frontmatter: null, errors: [`${file}: missing or invalid YAML frontmatter`] };
   try {
     const frontmatter = yaml.load(match[1]);
     if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) {
-      return [`${file}: YAML frontmatter must be an object`];
+      return { frontmatter: null, errors: [`${file}: YAML frontmatter must be an object`] };
     }
-    return validateFinalReportContractFrontmatter(frontmatter as Record<string, unknown>, file);
+    return { frontmatter: frontmatter as Record<string, unknown>, errors: [] };
   } catch (error: any) {
-    return [`${file}: failed to parse YAML frontmatter: ${error.message}`];
+    return { frontmatter: null, errors: [`${file}: failed to parse YAML frontmatter: ${error.message}`] };
   }
+}
+
+export function validateStrategyFrontmatter(
+  content: string,
+  file: string,
+  context: StrategyFrontmatterValidationContext = {},
+): string[] {
+  const parsed = parseStrategyFrontmatter(content, file);
+  if (parsed.errors.length > 0 || !parsed.frontmatter) return parsed.errors;
+  return [
+    ...validateFinalReportContractFrontmatter(parsed.frontmatter, file),
+    ...validateVerifierMisdiagnosisFrontmatter(parsed.frontmatter, file, context),
+  ];
 }
 
 /**
@@ -957,7 +1072,7 @@ function validateStrategySkillReferences(): number {
   console.log(colors.bold('\nStrategy → Skill Reference Validation\n'));
   console.log(`Skill registry: ${skillNames.size} skills loaded from YAML.\n`);
 
-  // Parse strategy files for invoke_skill("xxx") references
+  // Parse strategy files for invoke_skill("xxx") references and cross-file frontmatter contracts.
   const strategyFiles = fs.readdirSync(STRATEGIES_DIR)
     .filter(f => f.endsWith('.strategy.md'));
 
@@ -967,12 +1082,31 @@ function validateStrategySkillReferences(): number {
   }
 
   let totalMissing = 0;
-  let totalContractErrors = 0;
-
+  let totalFrontmatterErrors = 0;
+  const strategyContents = new Map<string, string>();
+  const knownScenes = new Set<string>();
   for (const file of strategyFiles) {
     const filePath = path.join(STRATEGIES_DIR, file);
     const content = fs.readFileSync(filePath, 'utf-8');
-    const frontmatterErrors = validateStrategyFrontmatter(content, file);
+    strategyContents.set(file, content);
+    const parsed = parseStrategyFrontmatter(content, file);
+    const frontmatter = parsed.frontmatter;
+    if (!frontmatter) continue;
+    if (
+      isNonEmptyString(frontmatter.scene)
+      && frontmatter.strategy_kind !== 'contract_only'
+    ) {
+      knownScenes.add(frontmatter.scene);
+    }
+  }
+  const frontmatterValidationContext: StrategyFrontmatterValidationContext = {
+    knownScenes,
+    seenVerifierMisdiagnosisIds: new Map(),
+  };
+
+  for (const file of strategyFiles) {
+    const content = strategyContents.get(file) || '';
+    const frontmatterErrors = validateStrategyFrontmatter(content, file, frontmatterValidationContext);
 
     // Extract all unique skill names referenced
     const referencedSkills = new Set<string>();
@@ -992,7 +1126,7 @@ function validateStrategySkillReferences(): number {
         console.log(`  ${colors.red('ERROR:')} ${error}`);
       }
       totalMissing += missing.length;
-      totalContractErrors += frontmatterErrors.length;
+      totalFrontmatterErrors += frontmatterErrors.length;
       continue;
     }
 
@@ -1007,9 +1141,9 @@ function validateStrategySkillReferences(): number {
   console.log(colors.bold('\nStrategy Validation Summary:'));
   console.log(`  Strategy files: ${strategyFiles.length}`);
   console.log(`  Missing skills: ${totalMissing > 0 ? colors.red(String(totalMissing)) : colors.green('0')}`);
-  console.log(`  Contract/frontmatter errors: ${totalContractErrors > 0 ? colors.red(String(totalContractErrors)) : colors.green('0')}`);
+  console.log(`  Contract/frontmatter errors: ${totalFrontmatterErrors > 0 ? colors.red(String(totalFrontmatterErrors)) : colors.green('0')}`);
 
-  return totalMissing + totalContractErrors;
+  return totalMissing + totalFrontmatterErrors;
 }
 
 /**

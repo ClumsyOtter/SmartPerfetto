@@ -123,10 +123,14 @@ runtime result
   -> frontend visible projection
 ```
 
-`final_report_contract` comes from strategy frontmatter. Claim verification and
-identity resolution depend on structured Skill/DataEnvelope evidence. The
-frontend may filter noise from the visible chat conclusion, but it must not
-remove provenance needed by reports, CLI artifacts, or snapshots.
+`final_report_contract` comes from strategy frontmatter. Known verifier
+misdiagnosis rules also come from strategy frontmatter through
+`verifier_misdiagnosis_patterns`: runtime loads scene-aware patterns, global
+patterns can be shared across scenes, regexes must compile under
+`validate:strategies`, and severity is limited to `warning` or `info`. Claim
+verification and identity resolution depend on structured Skill/DataEnvelope
+evidence. The frontend may filter noise from the visible chat conclusion, but
+it must not remove provenance needed by reports, CLI artifacts, or snapshots.
 
 ## Sessions And Resume
 

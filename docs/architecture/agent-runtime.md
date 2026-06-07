@@ -138,7 +138,7 @@ runtime result
   -> frontend visible projection
 ```
 
-`final_report_contract` 来自 strategy frontmatter。claim verification 和 identity resolution 依赖 Skill/DataEnvelope 中的结构化证据。前端可以对可见 chat conclusion 做噪音过滤，但不能删除 report、CLI 或 snapshot 需要的 provenance。
+`final_report_contract` 来自 strategy frontmatter。Verifier 已知误诊规则同样来自 strategy frontmatter 的 `verifier_misdiagnosis_patterns`：运行时按 scene 载入匹配规则，global 规则可跨 scene 共享，regex 必须通过 `validate:strategies` 编译校验，severity 只允许 `warning` 或 `info`。claim verification 和 identity resolution 依赖 Skill/DataEnvelope 中的结构化证据。前端可以对可见 chat conclusion 做噪音过滤，但不能删除 report、CLI 或 snapshot 需要的 provenance。
 
 ## Session 与恢复
 

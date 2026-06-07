@@ -76,6 +76,19 @@ export interface FinalReportContract {
   requiredSections: FinalReportContractRequirement[];
 }
 
+export type VerifierMisdiagnosisSeverity = 'warning' | 'info';
+
+export interface VerifierMisdiagnosisPattern {
+  id: string;
+  patterns: string[];
+  message: string;
+  severity: VerifierMisdiagnosisSeverity;
+  type: 'known_misdiagnosis';
+  scenes: string[];
+  global: boolean;
+  sourceScene: string;
+}
+
 export type StrategyKind = 'normal' | 'contract_only';
 
 export interface StrategyDefinition {
@@ -103,6 +116,7 @@ export interface StrategyDefinition {
    * execute this contract generically instead of hardcoding scene checks.
    */
   finalReportContract: FinalReportContract | null;
+  verifierMisdiagnosisPatterns: VerifierMisdiagnosisPattern[];
   content: string;
   /**
    * Absolute path to the source `*.strategy.md` file. Required because the
@@ -188,6 +202,25 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
     };
   }
 
+  const rawVerifierMisdiagnosisPatterns =
+    frontmatter.verifier_misdiagnosis_patterns as Array<Record<string, unknown>> | undefined;
+  const verifierMisdiagnosisPatterns: VerifierMisdiagnosisPattern[] = (
+    Array.isArray(rawVerifierMisdiagnosisPatterns) ? rawVerifierMisdiagnosisPatterns : []
+  ).map(entry => ({
+    id: (entry.id as string) || '',
+    patterns: Array.isArray(entry.patterns)
+      ? (entry.patterns as unknown[]).filter((pattern): pattern is string => typeof pattern === 'string')
+      : [],
+    message: (entry.message as string) || '',
+    severity: entry.severity === 'info' ? 'info' : 'warning',
+    type: 'known_misdiagnosis',
+    scenes: Array.isArray(entry.scenes)
+      ? (entry.scenes as unknown[]).filter((scene): scene is string => typeof scene === 'string')
+      : [],
+    global: entry.global === true,
+    sourceScene: (frontmatter.scene as string) || '',
+  }));
+
   const rawStrategyKind = frontmatter.strategy_kind as string | undefined;
   const strategyKind: StrategyKind = rawStrategyKind === 'contract_only'
     ? 'contract_only'
@@ -205,6 +238,7 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
     phaseHints,
     planTemplate,
     finalReportContract,
+    verifierMisdiagnosisPatterns,
     content,
     sourcePath: filePath,
   };
@@ -266,6 +300,16 @@ export function getPlanTemplate(scene: string): PlanTemplate | null {
  */
 export function getFinalReportContract(scene: string): FinalReportContract | null {
   return loadStrategies().get(scene)?.finalReportContract ?? null;
+}
+
+export function getAllVerifierMisdiagnosisPatterns(): VerifierMisdiagnosisPattern[] {
+  return Array.from(loadStrategies().values())
+    .flatMap(def => def.verifierMisdiagnosisPatterns);
+}
+
+export function getVerifierMisdiagnosisPatterns(scene: string): VerifierMisdiagnosisPattern[] {
+  return getAllVerifierMisdiagnosisPatterns()
+    .filter(pattern => pattern.global || pattern.scenes.includes(scene));
 }
 
 /**
