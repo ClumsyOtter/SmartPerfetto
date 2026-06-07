@@ -161,6 +161,7 @@ backend/.context/
 backend/data/secrets/
 backend/data/scene-reports/
 backend/data/scene-job-artifacts/
+backend/data/agent-runtime/
 backend/data/self_improve/
 
 # ===================
