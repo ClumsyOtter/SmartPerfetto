@@ -18,7 +18,7 @@ import type { DisplayResult as SkillDisplayResult } from '../services/skillEngin
 import type { IdentityResolutionV1 } from '../types/identityContract';
 import type { StreamingUpdate } from '../agent/types';
 import { phaseMatchesCall } from './types';
-import type { SqlSchemaEntry, SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanAspectWaiver, PlanPhase, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
+import type { SqlSchemaEntry, SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanAspectWaiver, PlanPhase, PlanRevision, Hypothesis, ToolCallRecord, UncertaintyFlag } from './types';
 import type { SceneType } from './sceneClassifier';
 import { summarizeSqlResult, type SqlSummary } from './sqlSummarizer';
 import { matchPatterns, matchNegativePatterns, extractTraceFeatures } from './analysisPatternMemory';
@@ -45,6 +45,13 @@ import { matchPhaseHintForNextPhase } from './phaseHintMatcher';
 import { buildActivePhaseReminder } from './activePhaseReminder';
 import { validatePlanAgainstSceneTemplate, MIN_WAIVER_REASON_CHARS } from './scenePlanTemplates';
 import { summarizeToolCallInput } from './toolCallSummary';
+import {
+  findBestPhaseForExpectedCallGap,
+  findCompletedPhaseEvidenceGaps,
+  findMissingExpectedCallsForPhase,
+  formatPlanEvidenceGap,
+} from './planToolCallRecorder';
+import { isConclusionLikePlanPhase } from './planPhaseSemantics';
 import { formatToolCallNarration } from './toolNarration';
 import type { ArtifactStore } from './artifactStore';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
@@ -296,8 +303,52 @@ type NormalizedPlanPhaseToolInput = Omit<PlanPhase, 'status'> & {
   status?: PlanPhase['status'];
 };
 
+const CORE_EXPECTED_CALL_TOOL_NAMES = new Set([
+  'detect_architecture',
+  'execute_sql',
+  'execute_sql_on',
+  'fetch_artifact',
+  'lookup_sql_schema',
+  'lookup_knowledge',
+  'submit_hypothesis',
+  'resolve_hypothesis',
+  'mark_uncertainty',
+]);
+
+function shortExpectedToolName(toolName: string): string {
+  const MCP_PREFIX = 'mcp__smartperfetto__';
+  return toolName.startsWith(MCP_PREFIX) ? toolName.slice(MCP_PREFIX.length) : toolName;
+}
+
+function normalizeExpectedCall(call: NonNullable<PlanPhase['expectedCalls']>[number]): NonNullable<PlanPhase['expectedCalls']>[number] | undefined {
+  if (!call || typeof call.tool !== 'string') return undefined;
+  const tool = shortExpectedToolName(call.tool.trim());
+  const skillId = typeof call.skillId === 'string' ? call.skillId.trim() : undefined;
+  if (!tool) return undefined;
+  if (tool === 'invoke_skill' && skillId && CORE_EXPECTED_CALL_TOOL_NAMES.has(shortExpectedToolName(skillId))) {
+    return { tool: shortExpectedToolName(skillId) };
+  }
+  return skillId ? { tool, skillId } : { tool };
+}
+
+function normalizeExpectedCallsInput(input: unknown): PlanPhase['expectedCalls'] | undefined {
+  const parsed = parseToolArrayInput<NonNullable<PlanPhase['expectedCalls']>[number]>(input);
+  if (!parsed) return undefined;
+  const normalized = parsed
+    .map(normalizeExpectedCall)
+    .filter((call): call is NonNullable<PlanPhase['expectedCalls']>[number] => Boolean(call));
+  if (normalized.length === 0) return [];
+  const seen = new Set<string>();
+  return normalized.filter(call => {
+    const key = `${call.tool}:${call.skillId ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function normalizePlanPhaseToolInput(input: PlanPhaseToolInput): Omit<PlanPhase, 'status'> {
-  const expectedCalls = parseToolArrayInput<NonNullable<PlanPhase['expectedCalls']>[number]>(input.expectedCalls);
+  const expectedCalls = normalizeExpectedCallsInput(input.expectedCalls);
   return {
     id: input.id,
     name: input.name,
@@ -305,12 +356,6 @@ function normalizePlanPhaseToolInput(input: PlanPhaseToolInput): Omit<PlanPhase,
     expectedTools: parseToolStringArrayInput(input.expectedTools),
     ...(expectedCalls ? { expectedCalls } : {}),
   };
-}
-
-function isConclusionLikePlanPhase(phase: Pick<PlanPhase, 'id' | 'name' | 'goal'>): boolean {
-  const text = `${phase.id} ${phase.name} ${phase.goal}`.toLowerCase();
-  return /(综合结论|最终结论|结论输出|输出结论|输出最终报告|最终报告|综合报告|final conclusion|conclusion|final report|write final answer)/i
-    .test(text);
 }
 
 function moveConclusionPhasesLast<T extends Pick<PlanPhase, 'id' | 'name' | 'goal'>>(phases: T[]): T[] {
@@ -1053,6 +1098,35 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     });
   }
 
+  function toolInputToPlanCallRecord(
+    toolName: string,
+    input: Record<string, unknown>,
+    matchedPhaseId?: string,
+  ): ToolCallRecord {
+    const skillId = typeof input.skillId === 'string' ? input.skillId : undefined;
+    return {
+      toolName,
+      timestamp: Date.now(),
+      ...(skillId ? { skillId } : {}),
+      ...(matchedPhaseId ? { matchedPhaseId } : {}),
+    };
+  }
+
+  function phaseExpectedCallsSatisfiedAfterEvidence(
+    phase: PlanPhase,
+    toolName: string,
+    input: Record<string, unknown>,
+  ): boolean {
+    const plan = analysisPlanRef?.current;
+    if (!plan) return true;
+    const toolCallLog = Array.isArray(plan.toolCallLog) ? plan.toolCallLog : [];
+    const records = [
+      ...toolCallLog,
+      toolInputToPlanCallRecord(toolName, input, phase.id),
+    ];
+    return findMissingExpectedCallsForPhase(phase, records).length === 0;
+  }
+
   function phaseSemanticScore(
     phase: PlanPhase,
     toolName: string,
@@ -1281,6 +1355,29 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
 
       const otherIndex = plan.phases.findIndex(p => p.id === other.id);
       if (otherIndex >= 0 && nextIndex >= 0 && otherIndex < nextIndex) {
+        const toolCallLog = Array.isArray(plan.toolCallLog) ? plan.toolCallLog : [];
+        const missingExpectedCalls = findMissingExpectedCallsForPhase(other, toolCallLog);
+        if (missingExpectedCalls.length > 0) {
+          other.status = 'pending';
+          other.completedAt = undefined;
+          other.summary = undefined;
+          emitUpdate?.({
+            type: 'plan_phase_updated',
+            content: {
+              phaseId: other.id,
+              status: 'pending',
+              summary: localize(
+                outputLanguage,
+                `阶段「${other.name}」已进入后续阶段「${nextPhase.name}」，但仍缺少关键工具证据，保持待补证状态。`,
+                `Phase "${other.name}" moved behind "${nextPhase.name}" but is still missing required tool evidence, so it remains pending.`,
+              ),
+              phaseName: other.name,
+            },
+            timestamp: Date.now(),
+          });
+          continue;
+        }
+
         const summary = autoClosedPhaseSummary(other, nextPhase);
         other.status = 'completed';
         other.completedAt = Date.now();
@@ -1312,6 +1409,19 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     const plan = analysisPlanRef?.current;
     const laterActive = plan ? laterInProgressPhase(plan, phase) : undefined;
     if (plan && phase.status === 'pending' && laterActive) {
+      const shouldClosePhase = phaseExpectedCallsSatisfiedAfterEvidence(phase, toolName, input);
+      if (!shouldClosePhase) {
+        return {
+          phase,
+          attribution: 'inferred',
+          warning: localize(
+            outputLanguage,
+            `证据语义匹配较早阶段 "${phase.name}"，但该阶段仍缺少其他关键工具证据；已先绑定证据，阶段保持待补证。`,
+            `Evidence semantically matched earlier phase "${phase.name}", but that phase is still missing other required tool evidence; bound this evidence while keeping the phase pending.`,
+          ),
+        };
+      }
+
       const narration = formatToolCallNarration(toolName, input, outputLanguage);
       const summary = localize(
         outputLanguage,
@@ -1347,6 +1457,28 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   ): { phase?: PlanPhase; attribution: PlanPhaseAttribution; warning?: string } {
     const plan = analysisPlanRef?.current;
     if (!plan) return { attribution: 'none' };
+
+    const expectedGapPhase = findBestPhaseForExpectedCallGap(
+      plan,
+      toolInputToPlanCallRecord(toolName, input),
+    );
+    if (expectedGapPhase) {
+      if (expectedGapPhase.status === 'pending') {
+        return bindPendingPhaseForEvidence(expectedGapPhase, toolName, input);
+      }
+      if (expectedGapPhase.status === 'in_progress') {
+        return { phase: expectedGapPhase, attribution: 'active' };
+      }
+      return {
+        phase: expectedGapPhase,
+        attribution: 'inferred',
+        warning: localize(
+          outputLanguage,
+          `工具调用补齐了较早阶段 "${expectedGapPhase.name}" 的关键证据缺口；已按补证绑定到该阶段。`,
+          `Tool call filled a required evidence gap for earlier phase "${expectedGapPhase.name}"; bound it to that phase as backfilled evidence.`,
+        ),
+      };
+    }
 
     const active = plan.phases.filter(p => p.status === 'in_progress');
     if (active.length === 0) {
@@ -3521,8 +3653,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'Use when: starting any new analysis — this is mandatory before execute_sql or invoke_skill.\n' +
     'Don\'t use when: plan already submitted (use revise_plan to modify, update_plan_phase to track progress).\n\n' +
     'Examples:\n' +
-    '1. Scrolling plan: phases=[{id:"p1", name:"概览采集", goal:"获取帧统计和卡顿分布", expectedTools:["invoke_skill"]}, ' +
-    '{id:"p2", name:"根因分析", goal:"逐帧诊断卡顿原因", expectedTools:["invoke_skill","execute_sql"]}, ' +
+    '1. Scrolling plan: phases=[{id:"p1", name:"概览采集", goal:"获取帧统计和卡顿分布", expectedTools:["invoke_skill"], expectedCalls:[{tool:"invoke_skill", skillId:"scrolling_analysis"}]}, ' +
+    '{id:"p2", name:"根因分析", goal:"逐帧诊断卡顿原因", expectedTools:["invoke_skill","execute_sql"], expectedCalls:[{tool:"invoke_skill", skillId:"jank_frame_detail"}]}, ' +
     '{id:"p3", name:"深入验证", goal:"验证根因假设", expectedTools:["execute_sql","fetch_artifact"]}], ' +
     'successCriteria="识别卡顿根因并提供量化证据"',
     {
@@ -3758,6 +3890,45 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           }],
           isError: true,
         };
+      }
+
+      if (normalizedStatus === 'completed' && (phase.expectedCalls ?? []).length > 0) {
+        const prospectivePlan: AnalysisPlanV3 = {
+          ...plan,
+          phases: plan.phases.map(p =>
+            p.id === phase.id
+              ? {
+                  ...p,
+                  status: 'completed' as const,
+                  summary: trimmedSummary,
+                  completedAt: Date.now(),
+                }
+              : p,
+          ),
+        };
+        const evidenceGap = findCompletedPhaseEvidenceGaps(prospectivePlan)
+          .find(gap => gap.phase.id === phase.id);
+        if (evidenceGap) {
+          const message = formatPlanEvidenceGap(evidenceGap, outputLanguage);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: localize(
+                  outputLanguage,
+                  `${message}。请先调用缺失的关键工具，或如果数据确实不可用则将阶段标记为 skipped 并说明原因。`,
+                  `${message}. Call the missing required tool first, or mark the phase skipped with a concrete reason if the data is genuinely unavailable.`,
+                ),
+                action_required: 'run_expected_calls_before_completing_phase',
+                currentPhaseId: phase.id,
+                currentPhaseName: phase.name,
+                missingExpectedCalls: evidenceGap.missingExpectedCalls,
+              }),
+            }],
+            isError: true,
+          };
+        }
       }
 
       const semanticMismatch = findPhaseSemanticMismatch(plan, phase, trimmedSummary);

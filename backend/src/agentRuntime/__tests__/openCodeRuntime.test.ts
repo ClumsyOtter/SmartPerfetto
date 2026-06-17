@@ -356,6 +356,67 @@ describe('experimental OpenCode runtime contract', () => {
     ]);
   });
 
+  it('records OpenCode MCP bridge tool executions into the shared analysis plan evidence log', async () => {
+    const plan = {
+      phases: [
+        {
+          id: 'p-frame-detail',
+          name: '代表帧深钻',
+          goal: '调用 jank_frame_detail 获取代表掉帧调用栈',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'jank_frame_detail' }],
+          status: 'in_progress',
+          summary: '',
+        },
+      ],
+      successCriteria: '完整解释代表掉帧根因',
+      submittedAt: 1,
+      toolCallLog: [],
+    } as any;
+    const response = await dispatchOpenCodeBridgeRequest([
+      {
+        name: 'invoke_skill',
+        exposure: 'internal',
+        tool: {},
+        shared: {
+          name: 'invoke_skill',
+          description: 'Invoke a SmartPerfetto skill',
+          exposure: 'internal',
+          inputSchema: {},
+          handler: jest.fn(async () => ({
+            content: [{ type: 'text', text: '{"planPhaseId":"p-frame-detail","ok":true}' }],
+          })),
+        },
+      } as any,
+    ], {
+      jsonrpc: '2.0',
+      id: 'tool-call-frame-detail',
+      method: 'tools/call',
+      params: {
+        name: 'mcp__smartperfetto__invoke_skill',
+        arguments: { skillId: 'jank_frame_detail', params: { frameId: 59665219 } },
+      },
+    }, undefined, {
+      analysisPlan: { current: plan },
+    });
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 'tool-call-frame-detail',
+      result: {
+        content: [{ type: 'text', text: '{"planPhaseId":"p-frame-detail","ok":true}' }],
+      },
+    });
+    expect(plan.toolCallLog).toEqual([
+      expect.objectContaining({
+        toolName: 'invoke_skill',
+        skillId: 'jank_frame_detail',
+        inputSummary: 'jank_frame_detail(frameId)',
+        matchedPhaseId: 'p-frame-detail',
+      }),
+    ]);
+  });
+
   it('rethrows bridge tool cancellation instead of returning a JSON-RPC tool error', async () => {
     await expect(dispatchOpenCodeBridgeRequest([
       {
@@ -386,17 +447,42 @@ describe('experimental OpenCode runtime contract', () => {
   it('treats completed and skipped OpenCode plan phases as closed', () => {
     expect(getOpenCodePlanCompletionStatus({
       phases: [
-        { id: 'p1', status: 'completed' },
-        { id: 'p2', status: 'skipped' },
+        { id: 'p1', status: 'completed', summary: '已完成概览采集并记录关键证据。' },
+        { id: 'p2', status: 'skipped', summary: '已确认该阶段在当前 trace 中不可验证并跳过。' },
       ],
-    } as any)).toEqual({ complete: true, pending: [] });
+    } as any)).toMatchObject({ complete: true, pending: [] });
 
     expect(getOpenCodePlanCompletionStatus({
       phases: [
-        { id: 'p1', status: 'completed' },
+        { id: 'p1', status: 'completed', summary: '已完成概览采集并记录关键证据。' },
         { id: 'p2', status: 'in_progress' },
       ],
-    } as any)).toEqual({ complete: false, pending: ['p2'] });
+    } as any)).toMatchObject({ complete: false, pending: ['p2'] });
+  });
+
+  it('does not treat a completed OpenCode phase as closed when required tool evidence is missing', () => {
+    const status = getOpenCodePlanCompletionStatus({
+      phases: [
+        {
+          id: 'p-frame-detail',
+          name: '代表帧深钻',
+          goal: '调用 jank_frame_detail 获取代表掉帧调用栈',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'jank_frame_detail' }],
+          status: 'completed',
+          summary: '已完成代表帧根因分析，并整理出主线程阻塞调用栈证据。',
+        },
+      ],
+      toolCallLog: [],
+    } as any);
+
+    expect(status).toMatchObject({
+      complete: false,
+      pending: ['p-frame-detail'],
+    });
+    expect(status.evidenceGaps?.[0].missingExpectedCalls).toEqual([
+      { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+    ]);
   });
 
   it('auto-closes only the final OpenCode report phase after a deliverable report is present', () => {
@@ -407,6 +493,7 @@ describe('experimental OpenCode runtime contract', () => {
           name: '概览采集',
           goal: '采集滑动概览',
           status: 'completed',
+          summary: '已采集滑动概览、掉帧数量和最长帧耗时等关键证据。',
         },
         {
           id: 'p3',
@@ -434,7 +521,7 @@ describe('experimental OpenCode runtime contract', () => {
       completedAt: 42,
       summary: expect.stringContaining('最终报告已由 OpenCode 直接交付'),
     });
-    expect(getOpenCodePlanCompletionStatus(plan)).toEqual({ complete: true, pending: [] });
+    expect(getOpenCodePlanCompletionStatus(plan)).toMatchObject({ complete: true, pending: [] });
   });
 
   it('does not auto-close OpenCode phases when earlier work is still pending', () => {
@@ -457,7 +544,7 @@ describe('experimental OpenCode runtime contract', () => {
     const report = '# 滑动性能分析报告\n\n## 代表帧分析\n- evidence/source: art-frame-detail';
 
     expect(completeOpenCodeFinalReportPhaseIfDelivered(plan, report, 'zh-CN', () => 42)).toBeUndefined();
-    expect(getOpenCodePlanCompletionStatus(plan)).toEqual({ complete: false, pending: ['p1', 'p3'] });
+    expect(getOpenCodePlanCompletionStatus(plan)).toMatchObject({ complete: false, pending: ['p1', 'p3'] });
   });
 
   it('projects OpenCode events without synthesizing route terminal events', () => {

@@ -526,6 +526,43 @@ describe('final result quality gate', () => {
     })).toBeUndefined();
   });
 
+  it('accepts localized representative-frame wording from OpenAI-compatible runtimes', () => {
+    const localizedJankReport = [
+      '## 综合结论',
+      '',
+      'com.example.demo 滑动性能一般：347 帧中 7 帧真实掉帧，最长帧 62.73ms。',
+      '',
+      '## 峰值与口径指标',
+      '',
+      '| 指标 | 数值 |',
+      '| --- | --- |',
+      '| 真实掉帧 / Buffer Stuffing 假阳性 | 7 / 14 |',
+      '| 最长帧 | 62.73ms（frame_id=59665234，7.5× 预算） |',
+      '',
+      '## 全帧根因分布',
+      '',
+      '| 纠正后根因 | 帧数 | 占比 |',
+      '| --- | ---: | ---: |',
+      '| ANIMATION 回调同步重计算 | 6 | 85.7% |',
+      '| Shader Pipeline 编译 | 1 | 14.3% |',
+      '',
+      '## 代表帧分析',
+      '',
+      '### 帧 59665234（最严重）',
+      '',
+      '| 维度 | 详情 |',
+      '| --- | --- |',
+      '| 耗时 / 预算 | 62.73ms / 8.33ms（7.5×） |',
+      '| VSync 丢失 | 7 |',
+      '| 主线程 | animation 59.31ms -> CustomScroll_longFrameLoad 59.01ms |',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({ conclusion: localizedJankReport }),
+      query: '分析滑动性能',
+    })).toBeUndefined();
+  });
+
   it('flags pipeline reports that omit rendering-stage and BufferQueue/Fence boundaries', () => {
     const hollowPipelineReport = [
       '# 渲染管线分析报告',

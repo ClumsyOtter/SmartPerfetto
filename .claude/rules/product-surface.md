@@ -24,6 +24,8 @@ be checked against the public product surfaces below.
 | --- | --- | --- | --- |
 | `claude-agent-sdk` | Anthropic direct, Bedrock, Vertex, Claude/Anthropic-compatible gateways, local Claude Code auth for source runs | Claude SDK session id in `SessionStateSnapshot` | Local Claude Code auth is not available in Docker or portable packages unless explicitly configured in that environment |
 | `openai-agents-sdk` | OpenAI Responses API, OpenAI-compatible gateways, Ollama/chat-completions endpoints | OpenAI history and last response id in `SessionStateSnapshot` | Requires OpenAI runtime rules; do not validate only Claude env vars |
+| `pi-agent-core` | Custom Provider Manager profiles, Pi model JSON, OpenAI-compatible providers where supported by Pi AI | Pi opaque transcript state in `SessionStateSnapshot` | Keep SmartPerfetto MCP tool allowlists, plan evidence logging, and final verifier parity with the Claude target path |
+| `opencode` | Custom Provider Manager profiles, OpenCode model JSON, OpenAI-compatible providers | OpenCode session id and isolated project/home/config dirs in `SessionStateSnapshot` | Keep the bridge sandboxed and route all SmartPerfetto tools through the shared MCP registry/plan evidence log |
 
 Provider Manager active profiles override `.env` and system fallback. A
 session keeps its selected provider/runtime. Resume must not silently switch to
@@ -64,8 +66,8 @@ affected:
 - Web UI, CLI, API, reports, Docker, portable packages, and source scripts.
 - CLI trace capture, including capture presets/config output and optional
   post-capture analysis.
-- Claude runtime, OpenAI runtime, Provider Manager, env fallback, local Claude
-  auth, and resume/session snapshots.
+- Claude, OpenAI, Pi Agent Core, and OpenCode runtimes; Provider Manager, env
+  fallback, local Claude auth, and resume/session snapshots.
 - Single-trace, raw trace comparison, multi-analysis-result comparison, and
   report export.
 - Live chat projection, HTML report, CLI artifacts, claim verification,

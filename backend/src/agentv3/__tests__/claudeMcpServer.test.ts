@@ -603,6 +603,7 @@ describe('createClaudeMcpServer', () => {
           start_ts: '506731768732822',
           end_ts: '506731787394072',
         },
+        expect.objectContaining({ signal: undefined }),
       );
     });
 
@@ -830,7 +831,11 @@ describe('createClaudeMcpServer', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.traceSide).toBe('current');
-      expect(mockTpService.query).toHaveBeenCalledWith('test-trace-123', expect.stringContaining("SELECT 'FROM art-2' AS note"));
+      expect(mockTpService.query as any).toHaveBeenCalledWith(
+        'test-trace-123',
+        expect.stringContaining("SELECT 'FROM art-2' AS note"),
+        expect.objectContaining({ signal: undefined }),
+      );
     });
 
     it('binds lightweight evidence to the synthetic quick phase', async () => {
@@ -1024,7 +1029,11 @@ describe('createClaudeMcpServer', () => {
 
       const result = await callTool(tools, 'execute_sql_on', { trace: 'reference', sql: 'SELECT 1' });
 
-      expect(mockTpService.query).toHaveBeenCalledWith('ref-trace-456', 'SELECT 1');
+      expect(mockTpService.query as any).toHaveBeenCalledWith(
+        'ref-trace-456',
+        'SELECT 1',
+        expect.objectContaining({ signal: undefined }),
+      );
       expect(result.success).toBe(true);
       expect(result.traceSide).toBe('reference');
       expect(result.traceId).toBe('ref-trace-456');
@@ -1390,7 +1399,7 @@ describe('createClaudeMcpServer', () => {
 
       await callTool(tools, 'update_plan_phase', { phaseId: 'p1', status: 'in_progress' });
       await callTool(tools, 'update_plan_phase', { phaseId: 'p1b', status: 'in_progress' });
-      expect(analysisPlan.current?.phases.find(p => p.id === 'p1')?.status).toBe('completed');
+      expect(analysisPlan.current?.phases.find(p => p.id === 'p1')?.status).toBe('pending');
       expect(analysisPlan.current?.phases.find(p => p.id === 'p1b')?.status).toBe('in_progress');
 
       const result = await callTool(tools, 'invoke_skill', {
@@ -1405,7 +1414,8 @@ describe('createClaudeMcpServer', () => {
       expect(result.success).toBe(true);
       expect(envelope?.meta?.planPhaseId).toBe('p1');
       expect(envelope?.meta?.planPhaseAttribution).toBe('inferred');
-      expect(envelope?.meta?.planPhaseWarning).toContain('并发工具回填绑定');
+      expect(envelope?.meta?.planPhaseWarning).toContain('补记阶段绑定');
+      expect(analysisPlan.current?.phases.find(p => p.id === 'p1')?.status).toBe('completed');
     });
 
     it('allows active-phase support SQL when expectedCalls narrow the skill call', async () => {
@@ -1680,7 +1690,7 @@ describe('createClaudeMcpServer', () => {
       expect(envelope?.meta?.planPhaseId).toBe('p3');
       expect(envelope?.meta?.planPhaseAttribution).toBe('active');
       expect(envelope?.meta?.planPhaseWarning).toBeUndefined();
-      expect(analysisPlan.current?.phases.find(p => p.id === 'p2')?.status).toBe('completed');
+      expect(analysisPlan.current?.phases.find(p => p.id === 'p2')?.status).toBe('pending');
       expect(analysisPlan.current?.phases.find(p => p.id === 'p3')?.status).toBe('in_progress');
     });
 
@@ -2094,6 +2104,25 @@ describe('createClaudeMcpServer', () => {
       expect(analysisPlan.current?.phases[0].name).toBe('Collect');
     });
 
+    it('normalizes core tools that OpenAI-compatible callers put under invoke_skill expectedCalls', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      const result = await callTool(tools, 'submit_plan', {
+        phases: [{
+          id: 'p1',
+          name: '架构检测',
+          goal: '检测渲染架构',
+          expectedTools: ['invoke_skill', 'detect_architecture'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'detect_architecture' }],
+        }],
+        successCriteria: 'Core tool expectedCalls should match the actual core tool',
+      });
+
+      expect(result.success).toBe(true);
+      expect(analysisPlan.current?.phases[0].expectedCalls).toEqual([
+        { tool: 'detect_architecture' },
+      ]);
+    });
+
     it('moves conclusion-like phases after later data-collection phases', async () => {
       const { tools, analysisPlan } = createTestServer();
       const result = await callTool(tools, 'submit_plan', {
@@ -2129,13 +2158,47 @@ describe('createClaudeMcpServer', () => {
       expect(analysisPlan.current?.phases[0].status).toBe('in_progress');
     });
 
+    it('rejects completing a phase before declared expectedCalls are executed', async () => {
+      const { tools } = createTestServer();
+      await callTool(tools, 'submit_plan', {
+        phases: [{
+          id: 'p1',
+          name: '滑动概览',
+          goal: '获取帧统计',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }],
+        }],
+        successCriteria: 'Done',
+      });
+
+      const result = await callTool(tools, 'update_plan_phase', {
+        phaseId: 'p1',
+        status: 'completed',
+        summary: '已完成概览阶段，准备输出后续结论和优化建议。',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.action_required).toBe('run_expected_calls_before_completing_phase');
+      expect(result.missingExpectedCalls).toEqual([{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }]);
+    });
+
     it('does not inject next-phase reminders when merely starting a phase', async () => {
       const { tools } = createTestServer({ sceneType: 'scrolling' });
       await callTool(tools, 'submit_plan', {
         phases: [
           { id: 'p1', name: 'TextureView 架构检测', goal: '确认混合渲染架构类型，判断是否为 TextureView producer 场景', expectedTools: ['invoke_skill'] },
-          { id: 'p2', name: '滑动帧卡顿概览', goal: '获取 scroll frame jank 帧统计和掉帧分布', expectedTools: ['invoke_skill'] },
-          { id: 'p3', name: '根因诊断深钻', goal: '分析 jank root cause，对代表帧执行机制级分析', expectedTools: ['invoke_skill'] },
+          { id: 'p2', name: '滑动帧卡顿概览', goal: '获取 scroll frame jank 帧统计和掉帧分布', expectedTools: ['invoke_skill'], expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }] },
+          {
+            id: 'p3',
+            name: '根因诊断深钻',
+            goal: '分析 jank root cause，对代表帧执行机制级分析',
+            expectedTools: ['invoke_skill'],
+            expectedCalls: [
+              { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+              { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+              { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+            ],
+          },
         ],
         successCriteria: 'Do not push conclusion or next-phase hints on phase start',
       });

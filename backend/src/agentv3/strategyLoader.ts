@@ -21,6 +21,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
+import type { ExpectedCall } from './types';
 
 /** Phase-level restatement hint — loaded from strategy frontmatter `phase_hints`. */
 export interface PhaseHint {
@@ -43,6 +44,10 @@ export interface PlanMandatoryAspect {
   id: string;
   matchKeywords: string[];
   suggestion: string;
+  /** Calls that must be declared on at least one matching plan phase. */
+  requiredExpectedCalls?: ExpectedCall[];
+  /** At least one of these calls must be declared on a matching plan phase. */
+  alternativeExpectedCalls?: ExpectedCall[];
 }
 
 /** Plan template loaded from a strategy's `plan_template:` frontmatter. */
@@ -136,6 +141,23 @@ const DEV_MODE = process.env.NODE_ENV !== 'production';
 
 let cache: Map<string, StrategyDefinition> | null = null;
 
+function parseExpectedCalls(value: unknown): ExpectedCall[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry): ExpectedCall | null => {
+      if (!entry || typeof entry !== 'object') return null;
+      const record = entry as Record<string, unknown>;
+      const tool = typeof record.tool === 'string' ? record.tool : '';
+      const skillId = typeof record.skillId === 'string'
+        ? record.skillId
+        : typeof record.skill_id === 'string'
+          ? record.skill_id
+          : undefined;
+      return tool ? { tool, ...(skillId ? { skillId } : {}) } : null;
+    })
+    .filter((entry): entry is ExpectedCall => entry !== null);
+}
+
 function parseStrategyFile(filePath: string): StrategyDefinition | null {
   const raw = fs.readFileSync(filePath, 'utf-8');
   const match = raw.match(FRONTMATTER_RE);
@@ -165,6 +187,8 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
         id: (a.id as string) || '',
         matchKeywords: (a.match_keywords as string[]) || [],
         suggestion: (a.suggestion as string) || '',
+        requiredExpectedCalls: parseExpectedCalls(a.required_expected_calls),
+        alternativeExpectedCalls: parseExpectedCalls(a.required_expected_call_alternatives),
       })),
     };
   }

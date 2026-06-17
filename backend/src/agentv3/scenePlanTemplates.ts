@@ -18,6 +18,7 @@ import {
   getPlanTemplate as getPlanTemplateFromFrontmatter,
   getRegisteredScenes,
 } from './strategyLoader';
+import type { ExpectedCall } from './types';
 
 export interface ScenePlanTemplateAspect {
   /**
@@ -28,6 +29,8 @@ export interface ScenePlanTemplateAspect {
   id?: string;
   matchKeywords: string[];
   suggestion: string;
+  requiredExpectedCalls?: ExpectedCall[];
+  alternativeExpectedCalls?: ExpectedCall[];
 }
 
 export interface ScenePlanTemplate {
@@ -165,6 +168,22 @@ export interface PlanValidationResult {
 /** Minimum justification length for a waiver to be accepted. */
 export const MIN_WAIVER_REASON_CHARS = 50;
 
+function shortToolName(toolName: string): string {
+  const MCP_PREFIX = 'mcp__smartperfetto__';
+  return toolName.startsWith(MCP_PREFIX) ? toolName.slice(MCP_PREFIX.length) : toolName;
+}
+
+function expectedCallMatchesExpectedCall(required: ExpectedCall, declared: ExpectedCall): boolean {
+  if (shortToolName(required.tool) !== shortToolName(declared.tool)) return false;
+  if (required.skillId && required.skillId !== declared.skillId) return false;
+  return true;
+}
+
+function formatExpectedCallForPlanText(call: ExpectedCall): string {
+  const tool = shortToolName(call.tool);
+  return call.skillId ? `${tool} ${call.skillId} ${tool}(${call.skillId})` : tool;
+}
+
 /**
  * Detect mandatory aspects of a scene's plan template that a submitted
  * `phases` array fails to mention. Returns empty arrays for scenes without
@@ -179,7 +198,7 @@ export const MIN_WAIVER_REASON_CHARS = 50;
  * revise endpoint.
  */
 export function validatePlanAgainstSceneTemplate(
-  phases: ReadonlyArray<{ name: string; goal: string; expectedTools?: string[] }>,
+  phases: ReadonlyArray<{ name: string; goal: string; expectedTools?: string[]; expectedCalls?: ExpectedCall[] }>,
   scene: SceneType | undefined,
   waivers?: ReadonlyArray<{ aspectId: string; reason: string }>,
 ): PlanValidationResult {
@@ -187,9 +206,10 @@ export function validatePlanAgainstSceneTemplate(
   if (!template) return { warnings: [], missingAspectIds: [] };
 
   const planText = phases
-    .map(p => `${p.name} ${p.goal} ${(p.expectedTools ?? []).join(' ')}`)
+    .map(p => `${p.name} ${p.goal} ${(p.expectedTools ?? []).join(' ')} ${(p.expectedCalls ?? []).map(formatExpectedCallForPlanText).join(' ')}`)
     .join(' ')
     .toLowerCase();
+  const declaredExpectedCalls = phases.flatMap(p => p.expectedCalls ?? []);
 
   const acceptedWaiverIds = new Set(
     (waivers ?? [])
@@ -203,7 +223,16 @@ export function validatePlanAgainstSceneTemplate(
     const aspectId = aspect.id || aspect.matchKeywords[0];
     if (acceptedWaiverIds.has(aspectId)) continue;
     const covered = aspect.matchKeywords.some(kw => planText.includes(kw.toLowerCase()));
-    if (!covered) {
+    const missingRequiredCalls = (aspect.requiredExpectedCalls ?? [])
+      .filter(required => !declaredExpectedCalls.some(declared =>
+        expectedCallMatchesExpectedCall(required, declared),
+      ));
+    const alternatives = aspect.alternativeExpectedCalls ?? [];
+    const missingAlternative = alternatives.length > 0 &&
+      !alternatives.some(required => declaredExpectedCalls.some(declared =>
+        expectedCallMatchesExpectedCall(required, declared),
+      ));
+    if (!covered || missingRequiredCalls.length > 0 || missingAlternative) {
       warnings.push(aspect.suggestion);
       missingAspectIds.push(aspectId);
     }

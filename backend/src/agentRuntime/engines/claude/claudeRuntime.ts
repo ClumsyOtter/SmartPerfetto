@@ -53,10 +53,9 @@ import { classifyQueryComplexity } from '../../../agentv3/queryComplexityClassif
 import { buildComplexityClassifierInput } from '../../../agentv3/queryComplexityContext';
 import { buildAgentDefinitions } from './claudeAgentDefinitions';
 import { getExtendedKnowledgeBase } from '../../../services/sqlKnowledgeBase';
-import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityClassifierInput, FailedApproach, Hypothesis, QueryComplexity, TraceCompleteness, ToolCallRecord, UncertaintyFlag, VerificationIssue } from '../../../agentv3/types';
-import { phaseMatchesCall } from '../../../agentv3/types';
+import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityClassifierInput, FailedApproach, Hypothesis, QueryComplexity, TraceCompleteness, UncertaintyFlag, VerificationIssue } from '../../../agentv3/types';
 import { ArtifactStore } from '../../../agentv3/artifactStore';
-import { summarizeToolCallInput } from '../../../agentv3/toolCallSummary';
+import { recordPlanToolCall } from '../../../agentv3/planToolCallRecorder';
 import { buildRecoveryNote } from '../../../agentv3/recoveryNoteBuilder';
 import { evaluateThreshold as evaluateContextThreshold } from '../../../agentv3/contextTokenMeter';
 import {
@@ -86,66 +85,6 @@ import {
   looksLikeProcessNarrationConclusion,
   looksLikePhaseSummaryFallback,
 } from '../../../services/finalResultQualityGate';
-
-function parseLeadingJsonObject(text: string): Record<string, unknown> | null {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === '\\') {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-    } else if (char === '{') {
-      depth++;
-    } else if (char === '}') {
-      depth--;
-      if (depth === 0) {
-        try {
-          const parsed = JSON.parse(text.slice(0, i + 1));
-          return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-            ? parsed as Record<string, unknown>
-            : null;
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function extractPlanPhaseIdFromToolResult(resultStr: string): string | undefined {
-  const candidates: string[] = [resultStr];
-  try {
-    const parsed = JSON.parse(resultStr);
-    const entries = Array.isArray(parsed) ? parsed : [parsed];
-    for (const entry of entries) {
-      if (entry && typeof entry === 'object' && typeof (entry as any).text === 'string') {
-        candidates.push((entry as any).text);
-      }
-    }
-  } catch {
-    // Fall through to leading-object parsing below.
-  }
-
-  for (const candidate of candidates) {
-    const trimmed = candidate.trim();
-    const parsed = parseLeadingJsonObject(trimmed);
-    const planPhaseId = parsed?.planPhaseId;
-    if (typeof planPhaseId === 'string' && planPhaseId.trim()) return planPhaseId.trim();
-  }
-  return undefined;
-}
 
 function looksLikeProcessNarration(text: string): boolean {
   return /(?:我来|我需要|我将|接下来|先重新|重新读取|继续调用|首先.*提交|计划已提交|工具|tool|let me|i need to|i will|next i)/i
@@ -1442,38 +1381,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               // Track tool call for plan adherence with phase matching (P0-1 + P1-1)
               // P1-G5: Best-fit phase-tool matching — search all eligible phases, not just first
               if (ctx.analysisPlan.current && matchedTool) {
-                const plan = ctx.analysisPlan.current;
-                const shortToolName = matchedTool.name.replace(MCP_NAME_PREFIX, '');
-                const callSummary = summarizeToolCallInput(shortToolName, matchedTool.input);
-                const candidate: ToolCallRecord = {
+                recordPlanToolCall(ctx.analysisPlan.current, {
                   toolName: matchedTool.name,
-                  timestamp: Date.now(),
-                  ...callSummary,
-                };
-                const toolReturnedPhaseId = extractPlanPhaseIdFromToolResult(resultStr);
-                let matchedPhaseId = toolReturnedPhaseId &&
-                  plan.phases.some(p => p.id === toolReturnedPhaseId)
-                  ? toolReturnedPhaseId
-                  : undefined;
-                // Priority: MCP-side semantic attribution first, then in_progress phase,
-                // then any pending phase whose expectations match.
-                if (!matchedPhaseId) {
-                  const activePhase = plan.phases.find(p => p.status === 'in_progress');
-                  if (activePhase && phaseMatchesCall(activePhase, candidate)) {
-                    matchedPhaseId = activePhase.id;
-                  }
-                }
-                if (!matchedPhaseId) {
-                  const pendingMatch = plan.phases.find(p =>
-                    p.status === 'pending' && phaseMatchesCall(p, candidate),
-                  );
-                  matchedPhaseId = pendingMatch?.id;
-                }
-                plan.toolCallLog.push({ ...candidate, matchedPhaseId });
-                // P2-8: Cap toolCallLog to prevent unbounded growth within a turn
-                if (plan.toolCallLog.length > 100) {
-                  plan.toolCallLog.splice(0, plan.toolCallLog.length - 100);
-                }
+                  input: matchedTool.input,
+                  resultText: resultStr,
+                });
               }
 
               // P0-G16: Circuit breaker — overall failure rate monitoring

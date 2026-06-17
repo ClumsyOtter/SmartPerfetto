@@ -53,6 +53,18 @@ import type {
   TraceCompleteness,
   UncertaintyFlag,
 } from '../../../agentv3/types';
+import { expectedToolNames } from '../../../agentv3/types';
+import {
+  formatPlanEvidenceGap,
+  recordPlanToolCall,
+  type PlanEvidenceGap,
+} from '../../../agentv3/planToolCallRecorder';
+import {
+  getAnalysisPlanCompletionStatus,
+  hasAdequateClosedPhaseSummary as hasAdequateClosedPhaseSummaryWithMin,
+  type AnalysisPlanCompletionStatus,
+} from '../../../agentv3/planCompletionStatus';
+import { isConclusionLikePlanPhase } from '../../../agentv3/planPhaseSemantics';
 import { classifyQueryComplexityLocal } from '../../../agentv3/queryComplexityClassifier';
 import { buildComplexityClassifierInput } from '../../../agentv3/queryComplexityContext';
 import { classifyQueryWithOpenAILightModel } from './openAiComplexityClassifier';
@@ -83,6 +95,7 @@ import {
   hasDeliverableFinalReportHeading,
   looksLikePhaseSummaryFallback,
 } from '../../../services/finalResultQualityGate';
+import { verifyConclusion } from '../claude/claudeVerifier';
 import { assessFinalReportContractCompleteness } from '../../../services/finalReportContractGate';
 import {
   SDK_SESSION_FRESHNESS_MS,
@@ -96,6 +109,8 @@ import {
   isFreshRuntimeEntry,
   knowledgeScopeFromAnalysisOptions,
   providerScopeFromAnalysisOptions,
+  isTruncationVerificationIssue,
+  repairTruncatedFinalReport,
   setLruCacheEntry,
   toProtocolHypothesis as toRuntimeProtocolHypothesis,
 } from '../../runtimeCommon';
@@ -121,15 +136,10 @@ const OPENAI_MAX_PLAN_CONTINUATIONS = 3;
 const OPENAI_MAX_FINAL_REPORT_CONTINUATIONS = 4;
 const OPENAI_PLAN_COMPLETE_IDLE_ABORT_MS = 8_000;
 
-interface PlanCompletionStatus {
-  complete: boolean;
-  hasPlan: boolean;
-  pendingPhases: PlanPhase[];
-}
+type PlanCompletionStatus = AnalysisPlanCompletionStatus;
 
 function hasAdequateClosedPhaseSummary(phase: PlanPhase): boolean {
-  if (phase.status !== 'completed' && phase.status !== 'skipped') return false;
-  return typeof phase.summary === 'string' && phase.summary.trim().length >= MIN_PHASE_SUMMARY_CHARS;
+  return hasAdequateClosedPhaseSummaryWithMin(phase, MIN_PHASE_SUMMARY_CHARS);
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
@@ -790,6 +800,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         let terminationReason: AnalysisTerminationReason | undefined;
         let terminationMessage: string | undefined;
         let finalReportContinuations = 0;
+        const toolInputsByTaskId = new Map<string, { toolName: string; args: Record<string, unknown> }>();
         const markTimeoutPartial = (planStatus: PlanCompletionStatus) => {
           partial = true;
           terminationReason = 'timeout';
@@ -876,6 +887,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
                   sessionId,
                   quickMode,
                   answerStreamFilter,
+                  toolInputsByTaskId,
                 });
                 if (delta) {
                   runAnswer += delta;
@@ -1036,8 +1048,8 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             timestamp: Date.now(),
           });
         }
-        const findings = extractFindingsFromText(conclusion);
-        const confidence = partial
+        let findings = extractFindingsFromText(conclusion);
+        let confidence = partial
           ? Math.min(0.55, this.estimateConfidence(findings, conclusion))
           : this.estimateConfidence(findings, conclusion);
         const result: AnalysisResult = {
@@ -1053,6 +1065,74 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           terminationReason,
           terminationMessage,
         };
+        if (!quickMode) {
+          const verifyCurrentConclusion = async () => verifyConclusion(result.findings, result.conclusion, {
+            emitUpdate: (update) => this.emitUpdate(update),
+            enableLLM: false,
+            plan: this.sessionPlans.get(sessionId)?.current ?? null,
+            hypotheses: context.hypotheses,
+            sceneType,
+            outputLanguage: config.outputLanguage,
+            query,
+            emitIssueProgress: false,
+          });
+          let verification = await verifyCurrentConclusion();
+          let verificationIssue = [
+            ...verification.heuristicIssues,
+            ...(verification.llmIssues || []),
+          ].find(issue => issue.severity === 'error');
+          if (
+            verificationIssue &&
+            isTruncationVerificationIssue(verificationIssue) &&
+            this.getPlanCompletionStatus(sessionId, quickMode).complete
+          ) {
+            const repairedConclusion = repairTruncatedFinalReport({
+              conclusion: result.conclusion,
+              plan: this.sessionPlans.get(sessionId)?.current ?? null,
+              hypotheses: context.hypotheses,
+              outputLanguage: config.outputLanguage,
+            });
+            if (repairedConclusion) {
+              result.conclusion = repairedConclusion;
+              result.findings = extractFindingsFromText(repairedConclusion);
+              result.confidence = this.estimateConfidence(result.findings, repairedConclusion);
+              this.emitUpdate({
+                type: 'progress',
+                content: {
+                  phase: 'concluding',
+                  message: localize(
+                    config.outputLanguage,
+                    '最终报告输出被截断，已基于结构化证据补齐收尾并重新验证。',
+                    'The final report output was truncated; it was closed from structured evidence and re-verified.',
+                  ),
+                },
+                timestamp: Date.now(),
+              });
+              verification = await verifyCurrentConclusion();
+              verificationIssue = [
+                ...verification.heuristicIssues,
+                ...(verification.llmIssues || []),
+              ].find(issue => issue.severity === 'error');
+            }
+          }
+          if (verificationIssue) {
+            result.partial = true;
+            result.terminationReason = result.terminationReason ?? 'plan_incomplete';
+            result.terminationMessage = result.terminationMessage ?? verificationIssue.message;
+            result.confidence = Math.min(0.55, result.confidence);
+            this.emitUpdate({
+              type: 'degraded',
+              content: {
+                module: 'openAiRuntime',
+                fallback: 'verification_failed',
+                partial: true,
+                terminationReason: result.terminationReason,
+                message: verificationIssue.message,
+              },
+              timestamp: Date.now(),
+            });
+          }
+        }
         const gateIssue = applyFinalResultQualityGate({ result, query, sceneType });
         if (gateIssue) {
           this.emitUpdate({
@@ -1672,19 +1752,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   }
 
   private getPlanCompletionStatus(sessionId: string, quickMode: boolean): PlanCompletionStatus {
-    if (quickMode) {
-      return { complete: true, hasPlan: false, pendingPhases: [] };
-    }
     const plan = this.sessionPlans.get(sessionId)?.current ?? null;
-    if (!plan) {
-      return { complete: false, hasPlan: false, pendingPhases: [] };
-    }
-    const pendingPhases = plan.phases.filter(phase => !hasAdequateClosedPhaseSummary(phase));
-    return {
-      complete: pendingPhases.length === 0,
-      hasPlan: true,
-      pendingPhases,
-    };
+    return getAnalysisPlanCompletionStatus(plan, {
+      quickMode,
+      minSummaryChars: MIN_PHASE_SUMMARY_CHARS,
+    });
   }
 
   private shouldFinalizeAfterPlanComplete(
@@ -1771,9 +1843,6 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     if (!plan || plan.phases.length === 0) return undefined;
     if (!this.getPlanCompletionStatus(sessionId, quickMode).complete) return undefined;
 
-    const isFinalReportPhase = (phase: PlanPhase) =>
-      /(综合结论|最终结论|结论|报告|conclusion|final report)/i.test(`${phase.name} ${phase.goal}`);
-
     const summaries = plan.phases
       .filter(hasAdequateClosedPhaseSummary)
       .map(phase => {
@@ -1785,12 +1854,12 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const finalPhase = [...plan.phases]
       .reverse()
       .find(phase => hasAdequateClosedPhaseSummary(phase) &&
-        isFinalReportPhase(phase));
+        isConclusionLikePlanPhase(phase));
     const finalSummary = cleanPlanSummaryForFinalReport(
       finalPhase?.summary?.trim() || summaries[summaries.length - 1]?.replace(/^-\s*[^:]+:\s*/, '') || '',
     );
     const evidenceBullets = plan.phases
-      .filter(phase => hasAdequateClosedPhaseSummary(phase) && !isFinalReportPhase(phase))
+      .filter(phase => hasAdequateClosedPhaseSummary(phase) && !isConclusionLikePlanPhase(phase))
       .map(phase => {
         const name = phase.name || phase.id;
         return `- ${name}: ${cleanPlanSummaryForFinalReport(phase.summary || '')}`;
@@ -2085,6 +2154,17 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         'Continuing by creating the analysis plan and collecting required evidence...',
       );
     }
+    if (status.evidenceGaps && status.evidenceGaps.length > 0) {
+      const gaps = status.evidenceGaps
+        .map(gap => formatPlanEvidenceGap(gap, outputLanguage))
+        .slice(0, 3)
+        .join(outputLanguage === 'en' ? '; ' : '；');
+      return localize(
+        outputLanguage,
+        `继续补齐缺失的关键工具证据：${gaps}`,
+        `Continuing the missing required tool evidence: ${gaps}`,
+      );
+    }
     const phaseNames = status.pendingPhases.map(p => p.name || p.id).slice(0, 3).join('、');
     return localize(
       outputLanguage,
@@ -2105,10 +2185,15 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       );
     }
     const phaseNames = status.pendingPhases.map(p => `${p.id}:${p.name}`).join(', ');
+    const evidenceGapText = status.evidenceGaps?.length
+      ? outputLanguage === 'en'
+        ? `; missing required tool evidence: ${status.evidenceGaps.map(gap => formatPlanEvidenceGap(gap, outputLanguage)).join('; ')}`
+        : `；缺失关键工具证据：${status.evidenceGaps.map(gap => formatPlanEvidenceGap(gap, outputLanguage)).join('；')}`
+      : '';
     return localize(
       outputLanguage,
-      `OpenAI 分析达到继续执行上限，但 plan 仍未完成。未完成阶段：${phaseNames}`,
-      `OpenAI analysis reached the continuation limit, but the plan is still incomplete. Pending phases: ${phaseNames}`,
+      `OpenAI 分析达到继续执行上限，但 plan 仍未完成。未完成阶段：${phaseNames}${evidenceGapText}`,
+      `OpenAI analysis reached the continuation limit, but the plan is still incomplete. Pending phases: ${phaseNames}${evidenceGapText}`,
     );
   }
 
@@ -2117,17 +2202,22 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     outputLanguage: OutputLanguage,
   ): string {
     const pending = status.pendingPhases.map(phase => {
-      const tools = phase.expectedTools?.length ? `；预期工具: ${phase.expectedTools.join(', ')}` : '';
+      const tools = expectedToolNames(phase).length ? `；预期调用: ${expectedToolNames(phase).join(', ')}` : '';
       return `- ${phase.id} ${phase.name}: ${phase.goal}${tools}`;
     }).join('\n');
+    const gapText = status.evidenceGaps?.length
+      ? outputLanguage === 'en'
+        ? `\n\nMissing required tool evidence:\n${status.evidenceGaps.map(gap => `- ${formatPlanEvidenceGap(gap, outputLanguage)}`).join('\n')}`
+        : `\n\n缺失的关键工具证据：\n${status.evidenceGaps.map(gap => `- ${formatPlanEvidenceGap(gap, outputLanguage)}`).join('\n')}`
+      : '';
 
     return localize(
       outputLanguage,
       status.hasPlan
-        ? `系统校验：你刚才给出了阶段性回答，但当前分析 plan 还没有完成，所以那不是最终答案。请继续执行剩余阶段，不要重述已完成内容。\n\n未完成阶段：\n${pending}\n\n要求：继续调用必要工具收集证据；完成或跳过每个阶段时必须调用 update_plan_phase；只有所有阶段 completed/skipped 后，才能输出最终结论。`
+        ? `系统校验：你刚才给出了阶段性回答，但当前分析 plan 还没有完成，所以那不是最终答案。请继续执行剩余阶段，不要重述已完成内容。\n\n未完成阶段：\n${pending}${gapText}\n\n要求：继续调用必要工具收集证据；完成或跳过每个阶段时必须调用 update_plan_phase；只有所有阶段 completed/skipped 后，才能输出最终结论。`
         : '系统校验：你刚才直接回答了用户，但当前是 full 分析模式，尚未调用 submit_plan。请先调用 submit_plan 建立分析计划，然后执行必要工具。只有所有计划阶段 completed/skipped 后，才能输出最终结论。',
       status.hasPlan
-        ? `System check: you produced an interim answer, but the analysis plan is not complete, so that was not a final answer. Continue the remaining phases without restating completed work.\n\nPending phases:\n${pending}\n\nRequirements: call the necessary tools to collect evidence; call update_plan_phase whenever completing or skipping each phase; only produce the final conclusion after every phase is completed or skipped.`
+        ? `System check: you produced an interim answer, but the analysis plan is not complete, so that was not a final answer. Continue the remaining phases without restating completed work.\n\nPending phases:\n${pending}${gapText}\n\nRequirements: call the necessary tools to collect evidence; call update_plan_phase whenever completing or skipping each phase; only produce the final conclusion after every phase is completed or skipped.`
         : 'System check: you answered directly, but this is full analysis mode and submit_plan has not been called. Call submit_plan first, then execute the necessary tools. Only produce the final conclusion after every planned phase is completed or skipped.',
     );
   }
@@ -2154,6 +2244,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       sessionId: string;
       quickMode: boolean;
       answerStreamFilter: OpenAiReasoningFilterState;
+      toolInputsByTaskId: Map<string, { toolName: string; args: Record<string, unknown> }>;
     },
   ): string {
     const now = Date.now();
@@ -2190,6 +2281,14 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const rawItem = (event.item as any)?.rawItem;
     if (event.name === 'tool_called') {
       const args = parseJsonObject(rawItem?.arguments) || {};
+      const taskIds = [rawItem?.callId, rawItem?.call_id, rawItem?.id]
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      for (const taskId of taskIds) {
+        streamContext.toolInputsByTaskId.set(taskId, {
+          toolName: rawItem?.name || 'unknown',
+          args,
+        });
+      }
       this.emitUpdate({
         type: 'agent_task_dispatched',
         content: {
@@ -2201,6 +2300,22 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         timestamp: now,
       });
     } else if (event.name === 'tool_output') {
+      const taskIds = [rawItem?.callId, rawItem?.call_id, rawItem?.id]
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      const cached = taskIds
+        .map(taskId => streamContext.toolInputsByTaskId.get(taskId))
+        .find(Boolean);
+      if (cached) {
+        const plan = this.sessionPlans.get(streamContext.sessionId)?.current ?? null;
+        recordPlanToolCall(plan, {
+          toolName: cached.toolName,
+          input: cached.args,
+          resultText: summarizeToolOutput(rawItem?.output),
+        });
+        for (const taskId of taskIds) {
+          streamContext.toolInputsByTaskId.delete(taskId);
+        }
+      }
       this.emitUpdate({
         type: 'agent_response',
         content: {

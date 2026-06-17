@@ -23,6 +23,7 @@ import {
   legacyFilesystemWritesEnabled,
 } from '../services/enterpriseMigration';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
+import { REPORT_LAYOUT_FIX_CSS, REPORT_LAYOUT_FIX_MARKER } from '../services/reportLayoutAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
 import { backendLogPath } from '../runtimePaths';
 import { resolveEnterpriseDataRoot } from '../services/traceMetadataStore';
@@ -362,23 +363,50 @@ const LEGACY_MERMAID_UPGRADE_CSS = REPORT_CAUSAL_MAP_CSS;
 
 const LEGACY_MERMAID_UPGRADE_SCRIPT = REPORT_CAUSAL_MAP_SCRIPT;
 
+function injectReportStyle(html: string, css: string): string {
+  if (html.includes('</style>')) {
+    return html.replace('</style>', `${css}\n</style>`);
+  }
+  if (html.includes('</head>')) {
+    return html.replace('</head>', `<style>\n${css}\n</style>\n</head>`);
+  }
+  return html;
+}
+
+function shouldInjectLegacyReportLayoutFix(html: string): boolean {
+  if (html.includes(REPORT_LAYOUT_FIX_MARKER)) return false;
+  return (
+    /class=["'][^"']*\bmetrics-grid\b/.test(html) &&
+    /class=["'][^"']*\bmetric-label\b/.test(html) &&
+    /class=["'][^"']*\bmetric-value\b/.test(html)
+  );
+}
+
 export function upgradeLegacyReportHtml(html: string): string {
-  if (!html || !html.includes('<pre class="mermaid">')) return html;
-  if (html.includes('parseMermaidFlowSource(') || html.includes('class="causal-map"')) return html;
+  if (!html) return html;
 
   let upgraded = html;
-  upgraded = upgraded.replace(
-    '</style>',
-    `${LEGACY_MERMAID_UPGRADE_CSS}\n</style>`,
-  );
-  upgraded = upgraded.replace(
-    /<pre class="mermaid">([\s\S]*?)<\/pre>/g,
-    '<div class="mermaid-wrapper"><pre class="mermaid">$1</pre></div>',
-  );
-  upgraded = upgraded.replace(
-    /if \(typeof mermaid !== 'undefined'\) \{[\s\S]*?mermaid\.run\(\{ querySelector: 'pre\.mermaid' \}\);\s*\}/,
-    LEGACY_MERMAID_UPGRADE_SCRIPT.trim(),
-  );
+
+  if (shouldInjectLegacyReportLayoutFix(upgraded)) {
+    upgraded = injectReportStyle(upgraded, REPORT_LAYOUT_FIX_CSS);
+  }
+
+  const shouldUpgradeMermaid =
+    upgraded.includes('<pre class="mermaid">') &&
+    !upgraded.includes('parseMermaidFlowSource(') &&
+    !upgraded.includes('class="causal-map"');
+  if (shouldUpgradeMermaid) {
+    upgraded = injectReportStyle(upgraded, LEGACY_MERMAID_UPGRADE_CSS);
+    upgraded = upgraded.replace(
+      /<pre class="mermaid">([\s\S]*?)<\/pre>/g,
+      '<div class="mermaid-wrapper"><pre class="mermaid">$1</pre></div>',
+    );
+    upgraded = upgraded.replace(
+      /if \(typeof mermaid !== 'undefined'\) \{[\s\S]*?mermaid\.run\(\{ querySelector: 'pre\.mermaid' \}\);\s*\}/,
+      LEGACY_MERMAID_UPGRADE_SCRIPT.trim(),
+    );
+  }
+
   return upgraded;
 }
 

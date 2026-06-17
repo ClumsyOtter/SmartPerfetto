@@ -2,13 +2,17 @@
 
 ## Runtime Selection
 
-SmartPerfetto has two first-class agent runtimes behind the shared
+SmartPerfetto has four production agent runtimes behind the shared
 `IOrchestrator` contract:
 
 - `claude-agent-sdk`: default runtime for Claude Code, Anthropic direct,
   Bedrock, Vertex, and Anthropic-compatible providers.
 - `openai-agents-sdk`: OpenAI Responses API and OpenAI-compatible Chat
   Completions providers.
+- `pi-agent-core`: Pi Agent Core runtime, selected through custom Provider
+  Manager profiles or explicit env/runtime pins.
+- `opencode`: OpenCode SDK runtime, selected through custom Provider Manager
+  profiles or explicit env/runtime pins.
 
 Runtime selection lives in `backend/src/agentRuntime/runtimeSelection.ts`.
 Selection order is:
@@ -19,7 +23,8 @@ Selection order is:
 4. Default `claude-agent-sdk`.
 
 Do not treat provider names such as DeepSeek or Qwen as runtime values. Valid
-runtime values are only `claude-agent-sdk` and `openai-agents-sdk`.
+runtime values are `claude-agent-sdk`, `openai-agents-sdk`, `pi-agent-core`,
+and `opencode`.
 
 ## Primary Flow
 
@@ -30,7 +35,7 @@ POST /api/agent/v1/analyze
   -> backend/src/routes/agentRoutes.ts
   -> AgentAnalyzeSessionService.prepareSession()
   -> createAgentOrchestrator()
-  -> ClaudeRuntime or OpenAIRuntime
+  -> selected runtime engine
   -> shared MCP tools / Skill engine / trace_processor_shell
   -> result normalization / quality artifacts
   -> SSE projection + report generation + analysis-result snapshot
@@ -44,10 +49,14 @@ Key files:
 | `backend/src/routes/agentRoutes.ts` | analyze endpoint, SSE stream, turns, response/cancel/focus |
 | `backend/src/assistant/application/agentAnalyzeSessionService.ts` | session creation/reuse, provider pinning, persistence recovery |
 | `backend/src/agentRuntime/runtimeSelection.ts` | runtime selection and orchestrator creation |
-| `backend/src/agentv3/claudeRuntime.ts` | Claude Agent SDK orchestrator |
-| `backend/src/agentOpenAI/openAiRuntime.ts` | OpenAI Agents SDK orchestrator |
+| `backend/src/agentRuntime/engines/claude/claudeRuntime.ts` | Claude Agent SDK orchestrator |
+| `backend/src/agentRuntime/engines/openai/openAiRuntime.ts` | OpenAI Agents SDK orchestrator |
+| `backend/src/agentRuntime/engines/pi/piAgentCoreRuntime.ts` | Pi Agent Core orchestrator |
+| `backend/src/agentRuntime/engines/opencode/openCodeRuntime.ts` | OpenCode SDK orchestrator and bridge |
 | `backend/src/agentv3/claudeMcpServer.ts` | shared MCP tool implementations |
 | `backend/src/agentv3/mcpToolRegistry.ts` | single registry for MCP tool exposure and allowed tool names |
+| `backend/src/agentv3/planToolCallRecorder.ts` | provider-neutral tool-call evidence log for plan adherence |
+| `backend/src/agentv3/planCompletionStatus.ts` | provider-neutral plan completion status |
 | `backend/src/agentv3/claudeSystemPrompt.ts` | system prompt assembly for Claude path |
 | `backend/src/agentv3/strategyLoader.ts` | loads `*.strategy.md` and `*.template.md` |
 | `backend/src/agentv3/queryComplexityClassifier.ts` | fast/full/auto routing |

@@ -44,6 +44,7 @@ function streamContext(sessionId: string, quickMode: boolean): any {
     sessionId,
     quickMode,
     answerStreamFilter: __testing.createOpenAiReasoningFilterState(),
+    toolInputsByTaskId: new Map(),
   };
 }
 
@@ -114,6 +115,36 @@ describe('OpenAIRuntime plan completion guard', () => {
       complete: false,
       hasPlan: true,
       pendingPhases: [expect.objectContaining({ id: 'p1' })],
+    });
+  });
+
+  it('does not treat completed phases as complete until structured expected calls are observed', () => {
+    const runtime = new OpenAIRuntime({} as any) as any;
+    const p1 = phase('p1', 'completed');
+    p1.expectedCalls = [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }];
+    runtime.sessionPlans.set('s1', {
+      current: plan([p1]),
+      history: [],
+    });
+
+    expect(runtime.getPlanCompletionStatus('s1', false)).toMatchObject({
+      complete: false,
+      hasPlan: true,
+      pendingPhases: [expect.objectContaining({ id: 'p1' })],
+      evidenceGaps: [expect.objectContaining({ phase: expect.objectContaining({ id: 'p1' }) })],
+    });
+
+    runtime.sessionPlans.get('s1')!.current!.toolCallLog.push({
+      toolName: 'invoke_skill',
+      skillId: 'scrolling_analysis',
+      matchedPhaseId: 'p1',
+      timestamp: Date.now(),
+    });
+
+    expect(runtime.getPlanCompletionStatus('s1', false)).toMatchObject({
+      complete: true,
+      hasPlan: true,
+      pendingPhases: [],
     });
   });
 
@@ -255,6 +286,47 @@ describe('OpenAIRuntime plan completion guard', () => {
 
     expect(delta).toBe('快速结论：主线程 Running 时间最高。');
     expect(updates.some(update => update.type === 'answer_token')).toBe(true);
+  });
+
+  it('records OpenAI tool calls into the active analysis plan', () => {
+    const { runtime } = createRuntimeWithUpdates();
+    const p1 = phase('p1', 'in_progress');
+    p1.expectedCalls = [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }];
+    runtime.sessionPlans.set('s-tools', {
+      current: plan([p1]),
+      history: [],
+    });
+    const context = streamContext('s-tools', false);
+
+    runtime.handleStreamEvent({
+      type: 'run_item_stream_event',
+      name: 'tool_called',
+      item: {
+        rawItem: {
+          callId: 'call-1',
+          id: 'item-1',
+          name: 'invoke_skill',
+          arguments: JSON.stringify({ skillId: 'scrolling_analysis', params: { process_name: 'demo' } }),
+        },
+      },
+    } as any, 'zh-CN', context);
+
+    runtime.handleStreamEvent({
+      type: 'run_item_stream_event',
+      name: 'tool_output',
+      item: {
+        rawItem: {
+          callId: 'call-1',
+          output: JSON.stringify([{ type: 'text', text: '{"success":true,"planPhaseId":"p1"}' }]),
+        },
+      },
+    } as any, 'zh-CN', context);
+
+    expect(runtime.sessionPlans.get('s-tools')!.current!.toolCallLog).toContainEqual(expect.objectContaining({
+      toolName: 'invoke_skill',
+      skillId: 'scrolling_analysis',
+      matchedPhaseId: 'p1',
+    }));
   });
 
   it('strips OpenAI-compatible reasoning markers from visible text', () => {

@@ -85,6 +85,8 @@ interface VerifyOptions {
   allowCapabilityLimitedRuntime: boolean;
   /** Tool names that must be dispatched during the run. */
   requiredTools: string[];
+  /** Skill ids that must be dispatched through invoke_skill during the run. */
+  requiredSkills: string[];
 }
 
 interface SseSummary {
@@ -101,6 +103,11 @@ interface SseSummary {
   architectureDetectedCount: number;
   degradedCount: number;
   degradedFallbackCounts: Record<string, number>;
+  degradedEvents: Array<{
+    fallback?: string;
+    terminationReason?: string;
+    message?: string;
+  }>;
   errorEvents: string[];
   /** Number of DataEnvelope objects carried by data events, not just event count. */
   dataEnvelopeItemCount: number;
@@ -125,6 +132,8 @@ interface SseSummary {
   analysisCompletedHasConcreteCodeRefs: boolean;
   analysisCompletedReportUrl?: string;
   analysisCompletedPartial?: boolean;
+  analysisCompletedTerminationReason?: string;
+  analysisCompletedTerminationMessage?: string;
   requiredTextMatches: Record<string, boolean>;
   forbiddenTextMatches: Record<string, boolean>;
   /** Older SSE fields that may still appear in archived sessions/logs. */
@@ -134,6 +143,7 @@ interface SseSummary {
   directSkillCompletedCount: number;
   directSkillFindingCount: number;
   toolCallCounts: Record<string, number>;
+  skillCallCounts: Record<string, number>;
 }
 
 const DEFAULT_TRACE = '../test-traces/scroll-demo-customer-scroll.pftrace';
@@ -171,6 +181,7 @@ function printUsage(): void {
   console.log('  --forbid-text <text>               Forbid literal text in conclusion/analysis_completed; repeatable');
   console.log('  --forbid-degraded-fallback <name>  Fail if a degraded event with this fallback is emitted; repeatable');
   console.log('  --require-tool <name>              Require an agent_task_dispatched tool call; repeatable');
+  console.log('  --require-skill <skillId>          Require an invoke_skill call for a specific skillId; repeatable');
   console.log('  --allow-no-data-envelopes          Do not require data envelopes in full mode');
   console.log('  --allow-capability-limited-runtime Do not require plan/tool/data events for preview runtime smoke tests');
   console.log('  --output <path>                   JSON report output path');
@@ -203,6 +214,7 @@ function parseArgs(argv: string[]): VerifyOptions {
     allowNoDataEnvelopes: false,
     allowCapabilityLimitedRuntime: false,
     requiredTools: [],
+    requiredSkills: [],
   };
   let smartScope: 'all' | 'scene_types' | 'scene_ids' | undefined;
   const smartSceneTypes: string[] = [];
@@ -497,6 +509,15 @@ function parseArgs(argv: string[]): VerifyOptions {
       continue;
     }
 
+    if (arg === '--require-skill') {
+      if (!next) {
+        throw new Error('--require-skill requires a value');
+      }
+      options.requiredSkills.push(next);
+      i += 1;
+      continue;
+    }
+
     if (arg === '--output') {
       if (!next) {
         throw new Error('--output requires a value');
@@ -718,6 +739,7 @@ async function collectSseSummary(
     architectureDetectedCount: 0,
     degradedCount: 0,
     degradedFallbackCounts: {},
+    degradedEvents: [],
     errorEvents: [],
     dataEnvelopeItemCount: 0,
     dataEnvelopeMissingPhaseCount: 0,
@@ -742,6 +764,7 @@ async function collectSseSummary(
     directSkillCompletedCount: 0,
     directSkillFindingCount: 0,
     toolCallCounts: {},
+    skillCallCounts: {},
   };
 
   const stageNameSet = new Set<string>();
@@ -815,6 +838,12 @@ async function collectSseSummary(
               if (typeof payload?.toolName === 'string') {
                 summary.toolCallCounts[payload.toolName] = (summary.toolCallCounts[payload.toolName] ?? 0) + 1;
               }
+              {
+                const args = asRecord(payload?.args);
+                if (typeof args?.skillId === 'string') {
+                  summary.skillCallCounts[args.skillId] = (summary.skillCallCounts[args.skillId] ?? 0) + 1;
+                }
+              }
               break;
             case 'agent_response':
               summary.agentResponseCount += 1;
@@ -857,6 +886,11 @@ async function collectSseSummary(
                 summary.degradedFallbackCounts[payload.fallback] =
                   (summary.degradedFallbackCounts[payload.fallback] ?? 0) + 1;
               }
+              summary.degradedEvents.push({
+                ...(typeof payload?.fallback === 'string' ? { fallback: payload.fallback } : {}),
+                ...(typeof payload?.terminationReason === 'string' ? { terminationReason: payload.terminationReason } : {}),
+                ...(typeof payload?.message === 'string' ? { message: payload.message } : {}),
+              });
               break;
             default:
               break;
@@ -873,6 +907,12 @@ async function collectSseSummary(
             }
             if (typeof payload?.partial === 'boolean') {
               summary.analysisCompletedPartial = payload.partial;
+            }
+            if (typeof payload?.terminationReason === 'string') {
+              summary.analysisCompletedTerminationReason = payload.terminationReason;
+            }
+            if (typeof payload?.terminationMessage === 'string') {
+              summary.analysisCompletedTerminationMessage = payload.terminationMessage;
             }
           }
 
@@ -1110,6 +1150,9 @@ async function main(): Promise<void> {
     const requiredToolChecks = Object.fromEntries(
       options.requiredTools.map((toolName) => [`requiresTool:${toolName}`, (sse.toolCallCounts[toolName] ?? 0) > 0]),
     );
+    const requiredSkillChecks = Object.fromEntries(
+      options.requiredSkills.map((skillId) => [`requiresSkill:${skillId}`, (sse.skillCallCounts[skillId] ?? 0) > 0]),
+    );
     const degradedFallbackChecks = Object.fromEntries(
       options.forbiddenDegradedFallbacks.map((fallback) => [
         `forbidsDegradedFallback:${fallback}`,
@@ -1130,6 +1173,7 @@ async function main(): Promise<void> {
       ...requiredTextChecks,
       ...forbiddenTextChecks,
       ...requiredToolChecks,
+      ...requiredSkillChecks,
       ...degradedFallbackChecks,
     };
     const passed = Object.values(requiredChecks).every(Boolean)
@@ -1144,6 +1188,7 @@ async function main(): Promise<void> {
       && Object.values(requiredTextChecks).every(Boolean)
       && Object.values(forbiddenTextChecks).every(Boolean)
       && Object.values(requiredToolChecks).every(Boolean)
+      && Object.values(requiredSkillChecks).every(Boolean)
       && Object.values(degradedFallbackChecks).every(Boolean)
       && (isQuickMode || Object.values(fullModeChecks).every(Boolean));
     const sessionLogFile = findSessionLogFile(sessionId);

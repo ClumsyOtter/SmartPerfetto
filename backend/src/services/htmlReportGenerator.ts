@@ -28,6 +28,7 @@ import {
   inferColumnDefinition,
 } from '../types/dataContract';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from './reportCausalMapAssets';
+import { REPORT_LAYOUT_FIX_CSS } from './reportLayoutAssets';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, parseOutputLanguage, type OutputLanguage } from '../agentv3/outputLanguage';
 import type { ComparisonReportSection } from '../agentv3/sessionStateSnapshot';
 import type { ClaimVerificationResult } from '../types/claimVerification';
@@ -1813,8 +1814,8 @@ export class HTMLReportGenerator {
           <div class="metrics-grid" style="margin-top: 12px;">
             ${metrics.map((metric: any) => `
               <div class="metric-card">
-                <div class="metric-label">${this.escapeHtml(metric.label || metric.name || '')}</div>
-                <div class="metric-value">${this.escapeHtml(this.stringifyValueForDisplay(metric.value, 120))}</div>
+                <div class="metric-label label">${this.escapeHtml(metric.label || metric.name || '')}</div>
+                <div class="metric-value value">${this.escapeHtml(this.stringifyValueForDisplay(metric.value, 120))}</div>
               </div>
             `).join('')}
           </div>
@@ -4182,9 +4183,38 @@ export class HTMLReportGenerator {
       margin-right: 12px; border-radius: 2px;
     }
     .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; }
-    .metric-card { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
-    .metric-card .value { font-size: 28px; font-weight: 700; color: #8b5cf6; }
-    .metric-card .label { font-size: 14px; color: #666; margin-top: 5px; }
+    ${REPORT_LAYOUT_FIX_CSS}
+    .metric-card {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .metric-card .value,
+    .metric-card .metric-value {
+      font-size: 28px;
+      font-weight: 700;
+      color: #8b5cf6;
+      line-height: 1.2;
+      word-break: break-word;
+    }
+    .metric-card .metric-value {
+      font-size: 20px;
+      color: #111827;
+    }
+    .metric-card .label,
+    .metric-card .metric-label {
+      font-size: 14px;
+      color: #666;
+      line-height: 1.35;
+    }
+    .metric-card .label { margin-top: 5px; }
+    .metric-card .metric-label {
+      margin-top: 0;
+      margin-bottom: 4px;
+      color: #4b5563;
+      font-weight: 600;
+    }
     .hypothesis-card {
       background: #faf5ff; padding: 15px; border-radius: 8px; margin-bottom: 12px;
       border-left: 4px solid #8b5cf6;
@@ -4443,10 +4473,18 @@ export class HTMLReportGenerator {
 	    .answer-box td, .finding-description td {
 	      padding: 5px 10px; border: 1px solid #e2e8f0;
 	    }
-	    .partial-warning { border-left: 4px solid #f59e0b; }
-	    .warning-card { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 14px 16px; color: #78350f; }
-	    .warning-title { font-weight: 700; margin-bottom: 6px; }
-	    .warning-body { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+    .partial-warning { border-left: 4px solid #f59e0b; }
+    .warning-card { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 14px 16px; color: #78350f; }
+    .warning-title { font-weight: 700; margin-bottom: 6px; }
+    .warning-body { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+    @media (max-width: 640px) {
+      body { padding: 8px; }
+      .header { padding: 16px; }
+      .header h1 { font-size: 22px; }
+      .header .meta span { display: block; margin: 4px 0 0; }
+      .section { padding: 14px; }
+      .metrics, .metrics-grid { grid-template-columns: 1fr; }
+    }
 	  </style>
 </head>
 <body>

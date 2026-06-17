@@ -8,3 +8,4 @@ export * from './runtimePromptContext';
 export * from './runtimeEntities';
 export * from './runtimeHypothesis';
 export * from './runtimeSkillNotes';
+export * from './runtimeFinalReportRecovery';

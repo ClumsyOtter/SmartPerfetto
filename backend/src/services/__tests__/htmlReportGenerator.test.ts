@@ -233,6 +233,10 @@ describe('HTMLReportGenerator', () => {
     expect(html).toContain('execute_sql_on:1:params_hash:reference');
     expect(html).toContain('total_rows');
     expect(html).toContain('10');
+    expect(html).toContain('smartperfetto-report-layout-fix-v1');
+    expect(html).toContain('grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))');
+    expect(html).toContain('class="metric-label label"');
+    expect(html).toContain('class="metric-value value"');
     expect(html).not.toContain('无汇总数据');
   });
 

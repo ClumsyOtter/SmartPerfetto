@@ -13,6 +13,13 @@ const tsxCliPath = path.join(backendRoot, 'node_modules/tsx/dist/cli.mjs');
 
 loadBackendEnv();
 
+const DEFAULT_RUNTIME = 'openai-agents-sdk';
+const DEEPSEEK_RUNTIME_KINDS = [
+  'openai-agents-sdk',
+  'pi-agent-core',
+  'opencode',
+];
+
 const suites = {
   startup: {
     label: 'startup final-report gate',
@@ -67,6 +74,19 @@ const suites = {
       '--output',
       'test-output/e2e-deepseek-scrolling-real.json',
       '--keep-session',
+      '--require-non-partial',
+      '--require-tool',
+      'invoke_skill',
+      '--require-skill',
+      'scrolling_analysis',
+      '--require-skill',
+      'jank_frame_detail',
+      '--require-skill',
+      'frame_blocking_calls',
+      '--require-skill',
+      'blocking_chain_analysis',
+      '--forbid-degraded-fallback',
+      'verification_failed',
     ],
   },
 };
@@ -85,26 +105,39 @@ function main() {
 
   const credential = resolveDeepseekCredential();
   const suiteNames = options.suite === 'all' ? ['startup', 'scrolling'] : [options.suite];
+  const runtimeKinds = resolveRuntimeKinds(options.runtime);
 
-  for (const suiteName of suiteNames) {
-    runSuite(suiteName, credential);
+  for (const runtimeKind of runtimeKinds) {
+    for (const suiteName of suiteNames) {
+      runSuite(suiteName, credential, runtimeKind, runtimeKinds.length > 1 || options.runtime !== DEFAULT_RUNTIME);
+    }
   }
 
-  console.log(`\nDeepseek Agent SSE E2E passed: ${suiteNames.join(', ')}`);
+  console.log(`\nDeepseek Agent SSE E2E passed: ${runtimeKinds.join(', ')} / ${suiteNames.join(', ')}`);
 }
 
 function parseArgs(argv) {
   let suite = 'all';
+  let runtime = DEFAULT_RUNTIME;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {
-      return { suite, help: true };
+      return { suite, runtime, help: true };
     }
     if (arg === '--suite') {
       const value = argv[i + 1];
       if (!value) throw new Error('--suite requires a value: all, startup, or scrolling');
       suite = parseSuite(value);
+      i += 1;
+      continue;
+    }
+    if (arg === '--runtime') {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error('--runtime requires a value: openai-agents-sdk, pi-agent-core, opencode, or all-deepseek');
+      }
+      runtime = parseRuntime(value);
       i += 1;
       continue;
     }
@@ -115,7 +148,7 @@ function parseArgs(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
-  return { suite, help: false };
+  return { suite, runtime, help: false };
 }
 
 function parseSuite(value) {
@@ -123,13 +156,37 @@ function parseSuite(value) {
   throw new Error(`Invalid suite: ${value}. Expected all, startup, or scrolling.`);
 }
 
+function parseRuntime(value) {
+  if (
+    value === 'all' ||
+    value === 'all-deepseek' ||
+    value === 'openai' ||
+    value === 'openai-agents-sdk' ||
+    value === 'pi' ||
+    value === 'pi-agent-core' ||
+    value === 'opencode'
+  ) {
+    return value;
+  }
+  throw new Error(
+    `Invalid runtime: ${value}. Expected openai-agents-sdk, pi-agent-core, opencode, or all-deepseek.`,
+  );
+}
+
+function resolveRuntimeKinds(value) {
+  if (value === 'all' || value === 'all-deepseek') return DEEPSEEK_RUNTIME_KINDS;
+  if (value === 'openai') return ['openai-agents-sdk'];
+  if (value === 'pi') return ['pi-agent-core'];
+  return [value];
+}
+
 function printUsage() {
-  console.log('Usage: node scripts/run-deepseek-agent-e2e.cjs [--suite all|startup|scrolling]');
+  console.log('Usage: node scripts/run-deepseek-agent-e2e.cjs [--suite all|startup|scrolling] [--runtime openai-agents-sdk|pi-agent-core|opencode|all-deepseek]');
   console.log('');
-  console.log('Runs SmartPerfetto Agent SSE E2E with the Deepseek OpenAI-compatible runtime.');
+  console.log('Runs SmartPerfetto Agent SSE E2E with Deepseek-backed SmartPerfetto runtimes.');
   console.log('');
   console.log('Credential precedence: DEEPSEEK_API_KEY, then OPENAI_API_KEY.');
-  console.log('The child verifier always receives OPENAI_API_KEY plus Deepseek base URL/model pins.');
+  console.log('OpenAI receives OPENAI_* pins; Pi/OpenCode receive generated Deepseek model JSON unless env already overrides it.');
 }
 
 function loadBackendEnv() {
@@ -150,15 +207,19 @@ function resolveDeepseekCredential() {
   return { apiKey, source };
 }
 
-function runSuite(suiteName, credential) {
+function runSuite(suiteName, credential, runtimeKind, runtimeSpecificOutput) {
   const suite = suites[suiteName];
+  const args = runtimeSpecificOutput
+    ? withRuntimeOutputPath(suite.args, suite.output, runtimeKind)
+    : suite.args;
   console.log(`\n[deepseek-e2e] suite=${suiteName} (${suite.label})`);
-  console.log(`[deepseek-e2e] output=${suite.output}`);
+  console.log(`[deepseek-e2e] runtime=${runtimeKind}`);
+  console.log(`[deepseek-e2e] output=${getOutputPathFromArgs(args) || suite.output}`);
   console.log(`[deepseek-e2e] credential=${credential.source}`);
 
-  const result = spawnSync(process.execPath, [tsxCliPath, verifierPath, ...suite.args], {
+  const result = spawnSync(process.execPath, [tsxCliPath, verifierPath, ...args], {
     cwd: backendRoot,
-    env: buildChildEnv(credential.apiKey),
+    env: buildChildEnv(credential.apiKey, runtimeKind),
     stdio: 'inherit',
   });
 
@@ -170,18 +231,91 @@ function runSuite(suiteName, credential) {
   }
 }
 
-function buildChildEnv(apiKey) {
-  return {
+function withRuntimeOutputPath(args, outputPath, runtimeKind) {
+  const next = [...args];
+  const index = next.indexOf('--output');
+  const runtimeOutput = outputPath.replace(/-real\.json$/, `-${runtimeKind}-real.json`);
+  if (index >= 0 && next[index + 1]) {
+    next[index + 1] = runtimeOutput;
+  } else {
+    next.push('--output', runtimeOutput);
+  }
+  return next;
+}
+
+function getOutputPathFromArgs(args) {
+  const index = args.indexOf('--output');
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function buildChildEnv(apiKey, runtimeKind) {
+  const deepseekBaseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1';
+  const deepseekModel = process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
+  const deepseekLightModel = process.env.DEEPSEEK_LIGHT_MODEL || 'deepseek-v4-flash';
+  const baseEnv = {
     ...process.env,
-    SMARTPERFETTO_AGENT_RUNTIME: 'openai-agents-sdk',
+    DEEPSEEK_API_KEY: apiKey,
     OPENAI_API_KEY: apiKey,
-    OPENAI_BASE_URL: 'https://api.deepseek.com/v1',
-    OPENAI_AGENTS_PROTOCOL: 'chat_completions',
-    OPENAI_MODEL: 'deepseek-v4-pro',
-    OPENAI_LIGHT_MODEL: 'deepseek-v4-flash',
+    OPENAI_BASE_URL: deepseekBaseUrl,
+    OPENAI_MODEL: deepseekModel,
+    OPENAI_LIGHT_MODEL: deepseekLightModel,
     OPENAI_MAX_OUTPUT_TOKENS: '8192',
     DOTENV_CONFIG_QUIET: 'true',
   };
+
+  if (runtimeKind === 'openai-agents-sdk') {
+    return {
+      ...baseEnv,
+      SMARTPERFETTO_AGENT_RUNTIME: 'openai-agents-sdk',
+      OPENAI_AGENTS_PROTOCOL: 'chat_completions',
+    };
+  }
+
+  if (runtimeKind === 'pi-agent-core') {
+    return {
+      ...baseEnv,
+      SMARTPERFETTO_AGENT_RUNTIME: 'pi-agent-core',
+      SMARTPERFETTO_PI_AGENT_CORE_MODEL_JSON:
+        process.env.SMARTPERFETTO_PI_AGENT_CORE_MODEL_JSON || createPiAgentCoreDeepseekModelJson({
+          model: deepseekModel,
+          baseUrl: deepseekBaseUrl,
+        }),
+    };
+  }
+
+  if (runtimeKind === 'opencode') {
+    return {
+      ...baseEnv,
+      SMARTPERFETTO_AGENT_RUNTIME: 'opencode',
+      SMARTPERFETTO_OPENCODE_MODEL_JSON:
+        process.env.SMARTPERFETTO_OPENCODE_MODEL_JSON || JSON.stringify({
+          providerID: 'deepseek',
+          modelID: deepseekModel,
+          baseURL: deepseekBaseUrl,
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          smallModel: deepseekLightModel,
+        }),
+    };
+  }
+
+  throw new Error(`Unsupported runtime: ${runtimeKind}`);
+}
+
+function createPiAgentCoreDeepseekModelJson({ model, baseUrl }) {
+  return JSON.stringify({
+    id: model,
+    name: model,
+    api: 'openai-completions',
+    provider: 'deepseek',
+    baseUrl,
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 8192,
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    thinkingLevel: 'off',
+  });
 }
 
 function assertFile(filePath, label) {

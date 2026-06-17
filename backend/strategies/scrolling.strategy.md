@@ -68,8 +68,8 @@ final_report_contract:
       description: '每个 CRITICAL/HIGH 根因至少给出 1 个代表样本，包含帧耗时、超预算倍数、vsync_missed、关键 slice/阻塞点和因果链。'
       pattern_groups:
         - ['代表帧', 'representative\s+frame']
-        - ['frame_id', 'guilty[_ ]?frame', '帧耗时', 'frame duration']
-        - ['vsync_missed', '超预算', 'budget overrun', 'missed[-\s]?vsync']
+        - ['frame_id', 'guilty[_ ]?frame', '帧耗时', '耗时\s*/\s*预算', '帧\s*\d+', 'frame duration']
+        - ['vsync_missed', 'VSync\s*丢失', '丢失\s*\d+\s*VSync', '超预算', '预算', 'budget overrun', 'missed[-\s]?vsync']
     - id: peak_and_semantic_metrics
       label: 峰值/口径指标
       description: '说明总帧数、真实掉帧、假阳性/Buffer Stuffing、最长帧和最长连续丢帧等口径。'
@@ -124,9 +124,19 @@ plan_template:
     - id: frame_jank_analysis
       match_keywords: ['frame', 'jank', 'scroll', '帧', '卡顿', '滑动', 'scrolling_analysis', 'consumer_jank']
       suggestion: '滑动场景建议包含帧渲染/卡顿分析阶段 (scrolling_analysis, consumer_jank_detection)'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: scrolling_analysis
     - id: root_cause_diagnosis
       match_keywords: ['root', 'cause', 'diagnos', '根因', '诊断', '深入', 'deep', 'jank_frame_detail', 'frame_blocking_calls']
-      suggestion: '滑动场景建议包含卡顿帧根因分析阶段 (jank_frame_detail / frame_blocking_calls)'
+      suggestion: '滑动场景建议包含完整卡顿帧根因分析阶段 (jank_frame_detail + frame_blocking_calls + blocking_chain_analysis)'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: jank_frame_detail
+        - tool: invoke_skill
+          skill_id: frame_blocking_calls
+        - tool: invoke_skill
+          skill_id: blocking_chain_analysis
     - id: architecture_specific_jank
       match_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合', '架构']
       suggestion: '非标准/混合渲染架构必须拆成 HWUI host 链路 + producer 链路 + SF 合成链路分别分析，再合并因果，避免只看 FrameTimeline'
@@ -222,6 +232,7 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 
 **滑动场景计划契约（submit_plan 时提前声明）：**
 - 概览/数据收集阶段通常应声明 `expectedCalls: [{ tool: "invoke_skill", skillId: "scrolling_analysis" }]`，并在 `expectedTools` 中同时包含可能用到的 `execute_sql`、`fetch_artifact`、`lookup_sql_schema`。
+- 根因诊断阶段必须声明完整深钻链：`jank_frame_detail` 用于代表帧调用栈/线程切片，`frame_blocking_calls` 用于帧窗口内 Binder/IO/futex/锁/GC 重叠，`blocking_chain_analysis` 用于 Q4/阻塞链解释。三者是互补证据，不可只声明其中一个来覆盖 root_cause_diagnosis。
 - Flutter、TextureView、SurfaceView、WebView、RN、GL/Game 等混合管线阶段，应把对应架构 Skill 写进 `expectedCalls`；如果要用 FrameTimeline、`thread_slice`、BufferQueue、VSYNC 或 SF 表做兜底 SQL 交叉验证，`expectedTools` 必须包含 `execute_sql`，并先包含/调用 `lookup_sql_schema`。
 - 缺帧/producer gap 阶段若会检查 Flutter TextureView、SurfaceTexture 或多 layer 生产端，`expectedCalls` 至少包含 `frame_production_gap`，按架构再追加 `textureview_producer_frame_timing`、`flutter_scrolling_analysis` 或其他 producer Skill。
 - 进程身份来自自动焦点检测、Skill 返回空但线程/layer 有目标信号、或身份准入提示 ambiguous/blocked 时，单独设置身份确认阶段，并声明 `expectedCalls: [{ tool: "invoke_skill", skillId: "process_identity_resolver" }]`；执行中才发现时先 `revise_plan` 再调用。

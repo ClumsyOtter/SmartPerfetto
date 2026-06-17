@@ -209,6 +209,57 @@ describe('experimental Pi agent-core runtime contract', () => {
     ]);
   });
 
+  it('records Pi tool executions into the shared analysis plan evidence log', async () => {
+    const plan = {
+      phases: [
+        {
+          id: 'p-frame-detail',
+          name: '代表帧深钻',
+          goal: '调用 jank_frame_detail 获取代表掉帧调用栈',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'jank_frame_detail' }],
+          status: 'in_progress',
+          summary: '',
+        },
+      ],
+      successCriteria: '完整解释代表掉帧根因',
+      submittedAt: 1,
+      toolCallLog: [],
+    } as any;
+    const spec: SharedToolSpec = {
+      name: 'invoke_skill',
+      description: 'Invoke a SmartPerfetto skill',
+      exposure: 'public',
+      inputSchema: {
+        skillId: z.string(),
+        params: z.record(z.string(), z.any()).optional(),
+      },
+      handler: jest.fn(async () => ({
+        content: [{ type: 'text', text: '{"planPhaseId":"p-frame-detail","ok":true}' }],
+      } as RuntimeToolResult)),
+    };
+    const tool = createPiAgentCoreToolFromSharedSpec(spec, {
+      allowedToolNames: new Set([spec.name]),
+      runtimeKind: EXPERIMENTAL_PI_AGENT_CORE_RUNTIME_KIND,
+      analysisPlan: { current: plan },
+    });
+
+    await tool.execute(
+      'call-frame-detail',
+      { skillId: 'jank_frame_detail', params: { frameId: 59665219 } },
+      undefined,
+    );
+
+    expect(plan.toolCallLog).toEqual([
+      expect.objectContaining({
+        toolName: 'invoke_skill',
+        skillId: 'jank_frame_detail',
+        inputSummary: 'jank_frame_detail(frameId)',
+        matchedPhaseId: 'p-frame-detail',
+      }),
+    ]);
+  });
+
   it('repairs recoverable Pi submit_plan argument drift before shared tool validation', () => {
     const repaired = repairPiAgentCoreSubmitPlanArgs({
       phases: [
@@ -637,6 +688,33 @@ describe('experimental Pi agent-core runtime contract', () => {
     });
     expect(plan.phases[1].summary.length).toBeGreaterThanOrEqual(15);
     expect(getPiAgentCorePlanCompletionStatus(plan).complete).toBe(true);
+  });
+
+  it('does not treat a completed Pi phase as closed when required tool evidence is missing', () => {
+    const plan = {
+      phases: [
+        {
+          id: 'p-frame-detail',
+          name: '代表帧深钻',
+          goal: '调用 jank_frame_detail 获取代表掉帧调用栈',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'jank_frame_detail' }],
+          status: 'completed',
+          summary: '已完成代表帧根因分析，并整理出主线程阻塞调用栈证据。',
+        },
+      ],
+      successCriteria: '完整解释代表掉帧根因',
+      submittedAt: 1,
+      toolCallLog: [],
+    } as any;
+
+    const status = getPiAgentCorePlanCompletionStatus(plan);
+
+    expect(status.complete).toBe(false);
+    expect(status.pendingPhases.map(phase => phase.id)).toEqual(['p-frame-detail']);
+    expect(status.evidenceGaps?.[0].missingExpectedCalls).toEqual([
+      { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+    ]);
   });
 
   it('continues Pi final report generation when completed plan still misses the scene contract', () => {

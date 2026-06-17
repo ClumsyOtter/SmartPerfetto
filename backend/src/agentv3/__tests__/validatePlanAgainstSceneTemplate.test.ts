@@ -11,11 +11,13 @@
 
 import { describe, it, expect } from '@jest/globals';
 import { validatePlanAgainstSceneTemplate } from '../scenePlanTemplates';
+import type { ExpectedCall } from '../types';
 
-const minimalPhase = (overrides: Partial<{ name: string; goal: string; expectedTools: string[] }> = {}) => ({
+const minimalPhase = (overrides: Partial<{ name: string; goal: string; expectedTools: string[]; expectedCalls: ExpectedCall[] }> = {}) => ({
   name: '',
   goal: '',
   expectedTools: [] as string[],
+  expectedCalls: [] as ExpectedCall[],
   ...overrides,
 });
 
@@ -53,18 +55,77 @@ describe('validatePlanAgainstSceneTemplate', () => {
         minimalPhase({
           name: '帧渲染分析',
           goal: '获取卡顿帧分布',
-          expectedTools: ['scrolling_analysis'],
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }],
         }),
         minimalPhase({
           name: '根因诊断',
-          goal: 'jank_frame_detail 深入',
-          expectedTools: ['jank_frame_detail'],
+          goal: 'jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+            { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+            { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+          ],
+        }),
+        minimalPhase({
+          name: '架构确认',
+          goal: '确认是否存在 TextureView/WebView/Flutter/Compose/mixed 混合渲染链路',
+          expectedTools: ['execute_sql'],
         }),
       ],
       'scrolling',
     );
     expect(result.warnings).toEqual([]);
     expect(result.missingAspectIds).toEqual([]);
+  });
+
+  it('requires scrolling mandatory aspects to declare structured expectedCalls', () => {
+    const result = validatePlanAgainstSceneTemplate(
+      [
+        minimalPhase({
+          name: '帧渲染分析',
+          goal: '调用 scrolling_analysis 获取卡顿帧分布',
+          expectedTools: ['invoke_skill'],
+        }),
+        minimalPhase({
+          name: '根因诊断',
+          goal: '使用 jank_frame_detail 深入',
+          expectedTools: ['invoke_skill'],
+        }),
+      ],
+      'scrolling',
+    );
+    expect(result.missingAspectIds).toEqual(expect.arrayContaining([
+      'frame_jank_analysis',
+      'root_cause_diagnosis',
+    ]));
+  });
+
+  it('requires the full scrolling root-cause drilldown chain, not only one representative skill', () => {
+    const result = validatePlanAgainstSceneTemplate(
+      [
+        minimalPhase({
+          name: '帧渲染分析',
+          goal: '调用 scrolling_analysis 获取卡顿帧分布',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }],
+        }),
+        minimalPhase({
+          name: '根因诊断',
+          goal: '使用 jank_frame_detail 深入代表帧',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'jank_frame_detail' }],
+        }),
+        minimalPhase({
+          name: '架构确认',
+          goal: '确认是否存在 TextureView/WebView/Flutter/Compose/mixed 混合渲染链路',
+          expectedTools: ['execute_sql'],
+        }),
+      ],
+      'scrolling',
+    );
+    expect(result.missingAspectIds).toEqual(['root_cause_diagnosis']);
   });
 
   it('matches keywords case-insensitively across name/goal/expectedTools', () => {

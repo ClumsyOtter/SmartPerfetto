@@ -22,6 +22,7 @@ import { createSdkEnv, getSdkBinaryOption } from './claudeConfig';
 import type { Finding, StreamingUpdate } from '../../../agent/types';
 import type { VerificationResult, VerificationIssue, AnalysisPlanV3, Hypothesis, ToolCallRecord } from '../../../agentv3/types';
 import { expectedCallMatchesRecord, expectedToolNames, formatExpectedCall } from '../../../agentv3/types';
+import { isConclusionLikePlanPhase } from '../../../agentv3/planPhaseSemantics';
 import type { SceneType } from '../../../agentv3/sceneClassifier';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../../../agentv3/outputLanguage';
 import { backendLogPath } from '../../../runtimePaths';
@@ -353,6 +354,25 @@ export function verifyHeuristic(
   return issues;
 }
 
+function hasNonConclusionPhaseToolEvidence(
+  plan: AnalysisPlanV3,
+  conclusionPhaseId: string,
+): boolean {
+  const phaseById = new Map(plan.phases.map(phase => [phase.id, phase]));
+  return plan.toolCallLog.some(record => {
+    if (!record.matchedPhaseId || record.matchedPhaseId === conclusionPhaseId) return false;
+    const matchedPhase = phaseById.get(record.matchedPhaseId);
+    return Boolean(matchedPhase && !isConclusionLikePlanPhase(matchedPhase));
+  });
+}
+
+function expectedCallWasExecutedAnywhere(
+  plan: AnalysisPlanV3,
+  expectedCall: NonNullable<AnalysisPlanV3['phases'][number]['expectedCalls']>[number],
+): boolean {
+  return plan.toolCallLog.some(record => expectedCallMatchesRecord(expectedCall, record));
+}
+
 /**
  * Verify plan adherence — check if Claude completed all planned phases.
  * Returns issues for skipped phases that weren't explicitly marked as skipped.
@@ -391,9 +411,15 @@ export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIs
   const completedPhases = plan.phases.filter(p => p.status === 'completed');
   for (const phase of completedPhases) {
     const matchedCalls = plan.toolCallLog.filter(t => t.matchedPhaseId === phase.id);
+    const isConclusionPhase = isConclusionLikePlanPhase(phase);
+    const hasExternalEvidence = isConclusionPhase &&
+      hasNonConclusionPhaseToolEvidence(plan, phase.id);
     const expected = expectedToolNames(phase).join(', ');
-    const missingExpectedCalls = (phase.expectedCalls ?? [])
+    const missingExpectedCallsForPhase = (phase.expectedCalls ?? [])
       .filter(call => !matchedCalls.some(record => expectedCallMatchesRecord(call, record)));
+    const missingExpectedCalls = isConclusionPhase
+      ? missingExpectedCallsForPhase.filter(call => !expectedCallWasExecutedAnywhere(plan, call))
+      : missingExpectedCallsForPhase;
     if (missingExpectedCalls.length > 0) {
       const missing = missingExpectedCalls.map(formatExpectedCall).join(', ');
       issues.push({
@@ -406,6 +432,9 @@ export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIs
 
     const hasExpectations = phase.expectedTools.length > 0;
     if (matchedCalls.length === 0 && hasExpectations) {
+      if (isConclusionPhase && hasExternalEvidence) {
+        continue;
+      }
       issues.push({
         type: 'plan_deviation',
         severity: 'error',
@@ -490,16 +519,16 @@ export function verifySceneCompleteness(
       const calledSkills = toolCalls.map(call => `${call.toolName} ${call.skillId ?? ''} ${call.inputSummary ?? ''}`).join(' ').toLowerCase();
       const hasAnalysisTool = /blocking_chain_analysis|binder_root_cause|jank_frame_detail|frame_blocking_calls|surfaceflinger_analysis|frame_production_gap|阻塞链.*(?:唤醒|waker|blocker)|server_dur/i.test(allText) ||
         /jank_frame_detail|frame_blocking_calls|blocking_chain_analysis|binder_root_cause|surfaceflinger_analysis|frame_production_gap/i.test(calledSkills);
-      const hasKnowledgeDrill = /lookup_knowledge|cpu[\.\-]scheduler|rendering[\.\-]pipeline|thermal[\.\-]throttling/i.test(allText) ||
-        /lookup_knowledge.*(cpu|scheduler|rendering|pipeline|thermal|throttling)/i.test(calledSkills);
-      const hasDeepDrill = hasAnalysisTool || hasKnowledgeDrill;
+      const hasDeepDrill = hasAnalysisTool;
       // Check if there are significant jank frames (the analysis mentions percentage distributions)
-      const hasSignificantJank = /(?:[2-9]\d|[1-9]\d{2,})\s*帧|(?:[1-9]\d+)\s*%.*(?:freq_ramp|workload|sched_delay|lock_binder|binder_wait|thermal|sf_composition|render_thread|gc_pressure|cpu_max)/i.test(allText);
+      const hasSignificantJank = /(?:[2-9]\d|[1-9]\d{2,})\s*帧|(?:[1-9]\d+)\s*%.*(?:freq_ramp|workload|sched_delay|lock_binder|binder_wait|thermal|sf_composition|render_thread|gc_pressure|cpu_max)/i.test(allText) ||
+        /(?:真实掉帧|real[_\s-]?jank|app deadline missed|vsync_missed|掉帧|卡顿)[^。\n]{0,80}\b[1-9]\s*(?:帧|frames?)/i.test(allText) ||
+        /\b[1-9]\s*(?:帧|frames?)[^。\n]{0,80}(?:真实掉帧|real[_\s-]?jank|app deadline missed|vsync_missed|workload|lock_binder|binder_wait|deadline missed|掉帧|卡顿)/i.test(allText);
       if (hasSignificantJank && !hasDeepDrill) {
         issues.push({
           type: 'missing_check',
           severity: 'error',
-          message: '滑动分析有掉帧但缺少 Phase 1.9 根因深钻 — reason_code 只是分类标签，不是真正的根因。必须对占比 >15% 的根因类别调用 blocking_chain_analysis/lookup_knowledge/binder_root_cause/jank_frame_detail/surfaceflinger_analysis 获取机制级证据，回答"WHY 这帧慢"',
+          message: '滑动分析有掉帧但缺少 Phase 1.9 根因深钻 — reason_code 只是分类标签，不是真正的根因。必须对关键根因类别调用 blocking_chain_analysis/binder_root_cause/jank_frame_detail/frame_blocking_calls/surfaceflinger_analysis 获取机制级证据，回答"WHY 这帧慢"；lookup_knowledge 只能作为背景解释，不能替代 trace 证据。',
         });
       }
 

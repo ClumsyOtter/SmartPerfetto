@@ -48,6 +48,15 @@ import type {
   UncertaintyFlag,
 } from '../../../agentv3/types';
 import {
+  getAnalysisPlanCompletionStatus,
+  type AnalysisPlanCompletionStatus,
+} from '../../../agentv3/planCompletionStatus';
+import { isConclusionLikePlanPhase } from '../../../agentv3/planPhaseSemantics';
+import {
+  formatPlanEvidenceGap,
+  recordPlanToolCall,
+} from '../../../agentv3/planToolCallRecorder';
+import {
   createOpenCodeSnapshotEngineState,
   getOpenCodeSnapshotEngineState,
   type OpenCodeOpaqueState,
@@ -61,6 +70,7 @@ import {
   applyFinalResultQualityGate,
   hasDeliverableFinalReportHeading,
 } from '../../../services/finalResultQualityGate';
+import { verifyConclusion } from '../claude/claudeVerifier';
 import { getExtendedKnowledgeBase } from '../../../services/sqlKnowledgeBase';
 import { sanitizeCodeAwareText } from '../../../services/security/codeAwareOutputRegistry';
 import { getProviderService, type ProviderConfig, type ProviderScope } from '../../../services/providerManager';
@@ -72,7 +82,9 @@ import {
   buildEntityContext,
   captureSkillDisplayEntities,
   createRuntimeSkillNotesBudget,
+  isTruncationVerificationIssue,
   knowledgeScopeFromAnalysisOptions,
+  repairTruncatedFinalReport,
   toProtocolHypothesis as toRuntimeProtocolHypothesis,
 } from '../../runtimeCommon';
 import {
@@ -624,6 +636,7 @@ type OpenCodeBridgeUpdateEmitter = (update: StreamingUpdate) => void;
 
 interface OpenCodeBridgeDispatchOptions {
   getSignal?: () => AbortSignal | undefined;
+  analysisPlan?: { current: AnalysisPlanV3 | null };
 }
 
 function summarizeOpenCodeToolResult(result: unknown): string {
@@ -713,6 +726,11 @@ export async function dispatchOpenCodeBridgeRequest(
           signal: options.getSignal?.(),
         }),
       );
+      recordPlanToolCall(options.analysisPlan?.current, {
+        toolName: definition.name,
+        input: args,
+        resultText: summarizeOpenCodeToolResult(result),
+      });
       emitUpdate?.({
         type: 'agent_response',
         content: {
@@ -1200,19 +1218,16 @@ function estimateConfidence(findings: readonly Finding[], partial?: boolean): nu
   return partial ? Math.min(confidence, 0.55) : confidence;
 }
 
-export function getOpenCodePlanCompletionStatus(plan: AnalysisPlanV3 | null): { complete: boolean; pending: string[] } {
-  if (!plan?.phases?.length) {
-    return { complete: false, pending: ['plan_missing'] };
-  }
-  const pending = plan.phases
-    .filter((phase: any) => phase.status !== 'completed' && phase.status !== 'skipped')
-    .map((phase: any) => phase.id || phase.title || 'unknown');
-  return { complete: pending.length === 0, pending };
-}
-
-function isOpenCodeFinalReportPhase(phase: PlanPhase): boolean {
-  return /(?:综合结论|最终结论|结论|报告|final report|final conclusion|summary|recommendation)/i
-    .test(`${phase.name} ${phase.goal}`);
+export function getOpenCodePlanCompletionStatus(plan: AnalysisPlanV3 | null): AnalysisPlanCompletionStatus & {
+  pending: string[];
+} {
+  const status = getAnalysisPlanCompletionStatus(plan, {
+    minSummaryChars: MIN_PHASE_SUMMARY_CHARS,
+  });
+  const pending = status.hasPlan
+    ? status.pendingPhases.map((phase: any) => phase.id || phase.title || 'unknown')
+    : ['plan_missing'];
+  return { ...status, pending };
 }
 
 export function completeOpenCodeFinalReportPhaseIfDelivered(
@@ -1224,13 +1239,11 @@ export function completeOpenCodeFinalReportPhaseIfDelivered(
   if (!plan?.phases?.length) return undefined;
   if (!hasDeliverableFinalReportHeading(conclusion)) return undefined;
 
-  const pendingPhases = plan.phases.filter(
-    (phase: any) => phase.status !== 'completed' && phase.status !== 'skipped',
-  );
+  const pendingPhases = getOpenCodePlanCompletionStatus(plan).pendingPhases;
   if (pendingPhases.length !== 1) return undefined;
 
   const [phase] = pendingPhases;
-  if (!phase || !isOpenCodeFinalReportPhase(phase)) return undefined;
+  if (!phase || !isConclusionLikePlanPhase(phase)) return undefined;
 
   phase.status = 'completed';
   phase.completedAt = now();
@@ -1246,14 +1259,21 @@ export function completeOpenCodeFinalReportPhaseIfDelivered(
 }
 
 function formatIncompletePlanMessage(
-  status: { pending: string[] },
+  status: { pending: string[]; evidenceGaps?: AnalysisPlanCompletionStatus['evidenceGaps'] },
   outputLanguage: string,
 ): string {
   const pending = status.pending.join(', ');
+  const evidenceGapText = status.evidenceGaps?.length
+    ? localize(
+        outputLanguage as any,
+        `；缺失关键工具证据：${status.evidenceGaps.map(gap => formatPlanEvidenceGap(gap, outputLanguage)).join('；')}`,
+        `; missing required tool evidence: ${status.evidenceGaps.map(gap => formatPlanEvidenceGap(gap, outputLanguage)).join('; ')}`,
+      )
+    : '';
   return localize(
     outputLanguage as any,
-    `OpenCode 分析 plan 尚未完成。未完成阶段：${pending || 'unknown'}`,
-    `OpenCode analysis plan is incomplete. Pending phases: ${pending || 'unknown'}`,
+    `OpenCode 分析 plan 尚未完成。未完成阶段：${pending || 'unknown'}${evidenceGapText}`,
+    `OpenCode analysis plan is incomplete. Pending phases: ${pending || 'unknown'}${evidenceGapText}`,
   );
 }
 
@@ -1490,7 +1510,10 @@ export class OpenCodeRuntime extends EventEmitter implements IOrchestrator {
     const bridge = await startOpenCodeMcpBridge(
       prep.toolDefinitions,
       update => this.emitUpdate(update),
-      { getSignal: () => abortController.signal },
+      {
+        getSignal: () => abortController.signal,
+        analysisPlan: prep.quickMode ? undefined : prep.analysisPlan,
+      },
     );
     const { dirs, restoredOpenCodeSessionId } = this.resolveSessionDirs(sessionId);
     const port = numericEnv(this.env[OPENCODE_SERVER_PORT_ENV]);
@@ -1631,6 +1654,75 @@ export class OpenCodeRuntime extends EventEmitter implements IOrchestrator {
       terminationReason,
       terminationMessage,
     };
+
+    if (!prep.quickMode) {
+      const verifyCurrentConclusion = async () => verifyConclusion(result.findings, result.conclusion, {
+        emitUpdate: (update) => this.emitUpdate(update),
+        enableLLM: false,
+        plan: prep.analysisPlan.current,
+        hypotheses: prep.hypotheses,
+        sceneType: prep.sceneType,
+        outputLanguage: prep.analysisRunSpec.outputLanguage,
+        query,
+        emitIssueProgress: false,
+      });
+      let verification = await verifyCurrentConclusion();
+      let verificationIssue = [
+        ...verification.heuristicIssues,
+        ...(verification.llmIssues || []),
+      ].find(issue => issue.severity === 'error');
+      if (
+        verificationIssue &&
+        isTruncationVerificationIssue(verificationIssue) &&
+        planStatus.complete
+      ) {
+        const repairedConclusion = repairTruncatedFinalReport({
+          conclusion: result.conclusion,
+          plan: prep.analysisPlan.current,
+          hypotheses: prep.hypotheses,
+          outputLanguage: prep.analysisRunSpec.outputLanguage,
+        });
+        if (repairedConclusion) {
+          result.conclusion = repairedConclusion;
+          result.findings = extractFindingsFromText(repairedConclusion);
+          result.confidence = estimateConfidence(result.findings, false);
+          this.emitUpdate({
+            type: 'progress',
+            content: {
+              phase: 'concluding',
+              message: localize(
+                prep.analysisRunSpec.outputLanguage,
+                '最终报告输出被截断，已基于结构化证据补齐收尾并重新验证。',
+                'The final report output was truncated; it was closed from structured evidence and re-verified.',
+              ),
+            },
+            timestamp: Date.now(),
+          });
+          verification = await verifyCurrentConclusion();
+          verificationIssue = [
+            ...verification.heuristicIssues,
+            ...(verification.llmIssues || []),
+          ].find(issue => issue.severity === 'error');
+        }
+      }
+      if (verificationIssue) {
+        result.partial = true;
+        result.terminationReason = result.terminationReason ?? 'plan_incomplete';
+        result.terminationMessage = result.terminationMessage ?? verificationIssue.message;
+        result.confidence = Math.min(0.55, result.confidence);
+        this.emitUpdate({
+          type: 'degraded',
+          content: {
+            module: 'openCodeRuntime',
+            fallback: 'verification_failed',
+            partial: true,
+            terminationReason: result.terminationReason,
+            message: verificationIssue.message,
+          },
+          timestamp: Date.now(),
+        });
+      }
+    }
 
     const wasPartialBeforeQualityGate = result.partial === true;
     const gateIssue = applyFinalResultQualityGate({ result, query, sceneType: prep.sceneType });
