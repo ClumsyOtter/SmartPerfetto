@@ -168,6 +168,41 @@ describe('ProviderService', () => {
       expect(env.AWS_BEARER_TOKEN_BEDROCK).toBe('tok123');
     });
 
+    it('normalizes short Anthropic model IDs to Bedrock cross-region IDs', () => {
+      // Bedrock rejects 'claude-sonnet-4-6' with 400 invalid model identifier.
+      // An existing bedrock provider that still holds a short name must be
+      // normalized at env-build time. See GitHub issue #179.
+      const p = svc.create({
+        ...validInput,
+        type: 'bedrock',
+        connection: { awsRegion: 'us-west-2', awsBearerToken: 'tok123' },
+      });
+      svc.activate(p.id);
+      const env = svc.getEffectiveEnv()!;
+      expect(env.CLAUDE_MODEL).toBe('us.anthropic.claude-sonnet-4-5-20250929-v1:0');
+      expect(env.CLAUDE_LIGHT_MODEL).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    });
+
+    it('preserves an explicit Bedrock model ID without re-normalizing', () => {
+      // A user-provided Bedrock ID (any region prefix / direct ID) must pass
+      // through unchanged so Provider Manager/runtime pinning semantics stay intact.
+      const p = svc.create({
+        ...validInput,
+        type: 'bedrock',
+        models: {
+          primary: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0',
+          light: 'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
+        },
+        connection: { awsRegion: 'eu-west-1', awsBearerToken: 'tok123' },
+      });
+      svc.activate(p.id);
+      const env = svc.getEffectiveEnv()!;
+      expect(env.CLAUDE_MODEL).toBe('eu.anthropic.claude-sonnet-4-5-20250929-v1:0');
+      expect(env.CLAUDE_LIGHT_MODEL).toBe('eu.anthropic.claude-haiku-4-5-20251001-v1:0');
+    });
+
+
+
     it('uses DeepSeek Anthropic-compatible endpoint by default', () => {
       const p = svc.create({
         ...validInput,
