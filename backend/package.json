@@ -1,6 +1,6 @@
 {
   "name": "@gracker/smartperfetto",
-  "version": "1.0.35",
+  "version": "1.0.36",
   "description": "SmartPerfetto CLI and backend runtime",
   "main": "dist/index.js",
   "bin": {
